@@ -2,28 +2,70 @@ from __future__ import annotations
 
 import argparse
 import dataclasses
-from datetime import time as dt_time
-from typing import Optional
+from datetime import time as dt_time, datetime, timedelta
+from typing import List, Optional
 
 from rich.console import Console
 from rich.table import Table
 
 from .api import SportsAPI
 from .discovery import discover_endpoints
-from .models import BookingTarget, MonitorPlan
+from .models import BookingTarget, MonitorPlan, PresetOption
 from .monitor import SlotMonitor
 from .scheduler import schedule_daily
+from .order import OrderManager
+
+
+PRESETS: List[PresetOption] = []
+
+
+def parse_date_input(date_input: str) -> str:
+    """解析日期输入，支持数字offset或标准日期格式"""
+    if date_input.isdigit():
+        # 数字输入，作为offset处理
+        offset = int(date_input)
+        target_date = datetime.now() + timedelta(days=offset)
+        return target_date.strftime("%Y-%m-%d")
+    else:
+        # 标准日期格式，直接返回
+        return date_input
+
+
+def parse_time_input(time_input: str) -> str:
+    """解析时间输入，支持数字或HH:MM格式"""
+    if time_input.isdigit():
+        # 数字输入，转换为HH:MM格式
+        hour = int(time_input)
+        if 0 <= hour <= 23:
+            return f"{hour:02d}:00"
+        else:
+            raise ValueError(f"Invalid hour: {hour}. Must be 0-23")
+    else:
+        # 标准时间格式，直接返回
+        return time_input
 
 
 def clone_target(base: BookingTarget) -> BookingTarget:
-    return dataclasses.replace(
-        base,
-        fixed_dates=list(base.fixed_dates),
-    )
+    return dataclasses.replace(base, fixed_dates=list(base.fixed_dates))
+
+
+def _apply_preset(tgt: BookingTarget, preset_index: int) -> None:
+    for option in PRESETS:
+        if option.index == preset_index:
+            tgt.venue_id = option.venue_id
+            tgt.venue_keyword = option.venue_name
+            tgt.field_type_id = option.field_type_id
+            tgt.field_type_keyword = option.field_type_name
+            if option.field_type_code:
+                tgt.field_type_code = option.field_type_code
+            return
+    raise ValueError(f"Unknown preset index: {preset_index}")
 
 
 def apply_target_overrides(target: BookingTarget, args) -> BookingTarget:
     tgt = clone_target(target)
+    if getattr(args, "preset", None) is not None:
+        _apply_preset(tgt, args.preset)
     if args.venue_id:
         tgt.venue_id = args.venue_id
     if args.venue_keyword:
@@ -32,22 +74,32 @@ def apply_target_overrides(target: BookingTarget, args) -> BookingTarget:
         tgt.field_type_id = args.field_type_id
     if args.field_type_keyword:
         tgt.field_type_keyword = args.field_type_keyword
+    if getattr(args, "field_type_code", None):
+        tgt.field_type_code = args.field_type_code
     if args.date:
-        tgt.fixed_dates = args.date
+        # 解析日期输入，支持数字offset
+        parsed_dates = [parse_date_input(d) for d in args.date]
+        tgt.fixed_dates = parsed_dates
+        tgt.use_all_dates = False
+    if getattr(args, "date_token", None):
+        tgt.date_token = args.date_token
     if args.date_offset is not None:
         tgt.date_offset = args.date_offset
     if args.start_hour is not None:
         tgt.start_hour = args.start_hour
     if args.duration_hours is not None:
         tgt.duration_hours = args.duration_hours
+    if not args.date and args.date_offset is None:
+        tgt.use_all_dates = True
+        tgt.date_offset = None
     return tgt
 
 
 def cmd_debug_login(api: SportsAPI, console: Console) -> None:
     try:
         payload = api.check_login()
-    except Exception as exc:
-        console.print(f"[red]登录检查失败：{exc}[/red]")
+    except Exception as exc:  # pylint: disable=broad-except
+        console.print(f"[red]Login check failed: {exc}[/red]")
         return
     user_info = payload
     if isinstance(payload, dict):
@@ -56,9 +108,9 @@ def cmd_debug_login(api: SportsAPI, console: Console) -> None:
             if isinstance(candidate, dict) and candidate:
                 user_info = candidate
                 break
-    table = Table(title="登录信息", show_lines=False)
-    table.add_column("字段")
-    table.add_column("值")
+    table = Table(title="Account Info", show_lines=False)
+    table.add_column("Field")
+    table.add_column("Value")
     shown = False
     if isinstance(user_info, dict):
         for key in ("realName", "name", "userName", "username", "code", "deptName", "mobile", "email"):
@@ -71,28 +123,125 @@ def cmd_debug_login(api: SportsAPI, console: Console) -> None:
     if shown:
         console.print(table)
     else:
-        console.print("[yellow]未在响应中找到可显示的用户字段，原始返回如下：[/yellow]")
+        console.print("[yellow]No printable user fields found. Raw payload follows:[/yellow]")
         console.print(payload)
 
 
 def cmd_list_venues(api: SportsAPI, console: Console, keyword: Optional[str], page: int, size: int) -> None:
     venues = api.list_venues(keyword=keyword, page=page, size=size)
-    table = Table(title=f"场馆列表（关键词：{keyword or '全部'}）", show_lines=False)
+    title = f"Venue List (keyword: {keyword or 'ALL'})"
+    table = Table(title=title, show_lines=False)
     table.add_column("ID")
-    table.add_column("名称")
-    table.add_column("地址")
-    table.add_column("电话")
+    table.add_column("Name")
+    table.add_column("Address")
+    table.add_column("Phone")
     for venue in venues:
         table.add_row(venue.id, venue.name, venue.address or "-", venue.phone or "-")
     console.print(table)
 
 
+def cmd_list_presets(console: Console) -> None:
+    if not PRESETS:
+        console.print("[yellow]No presets defined in config.PRESET_TARGETS[/yellow]")
+        return
+    table = Table(title="Preset Venue / Sport Mapping", show_lines=False)
+    table.add_column("#")
+    table.add_column("Venue")
+    table.add_column("Sport")
+    table.add_column("Venue ID")
+    table.add_column("Field Type ID")
+    for option in sorted(PRESETS, key=lambda item: item.index):
+        table.add_row(
+            str(option.index),
+            option.venue_name,
+            option.field_type_name,
+            option.venue_id,
+            option.field_type_id,
+        )
+    console.print(table)
+
+
+def cmd_list_venues_sports(console: Console) -> None:
+    """显示场馆和运动类型的序号映射表"""
+    if not PRESETS:
+        console.print("[yellow]No presets defined in config.PRESET_TARGETS[/yellow]")
+        return
+    
+    table = Table(title="场馆和运动类型映射表 - 使用 --preset 序号选择", show_lines=False)
+    table.add_column("序号", style="cyan", justify="center")
+    table.add_column("场馆名称", style="green")
+    table.add_column("运动类型", style="yellow")
+    table.add_column("使用示例", style="dim")
+    
+    for option in sorted(PRESETS, key=lambda item: item.index):
+        example = f"python main.py slots --preset {option.index}"
+        table.add_row(
+            str(option.index),
+            option.venue_name,
+            option.field_type_name,
+            example,
+        )
+    
+    console.print(table)
+    console.print("\n[bold cyan]使用方法：[/bold cyan]")
+    console.print("1. 查看上表找到你想要的场馆和运动类型对应的序号")
+    console.print("2. 使用 --preset 序号 来选择，例如：")
+    console.print("   [green]python main.py slots --preset 13[/green]  # 选择南洋北苑健身房")
+    console.print("   [green]python main.py monitor --preset 5[/green]  # 监控霍英东体育馆羽毛球")
+    console.print("   [green]python main.py book-now --preset 1[/green]  # 立即预约学生中心篮球")
+
+
+def cmd_catalog(api: SportsAPI, console: Console, max_pages: int, page_size: int) -> None:
+    index = 1
+    table = Table(title="Venue / Sport Catalog", show_lines=False)
+    table.add_column("#")
+    table.add_column("Venue")
+    table.add_column("Sport")
+    table.add_column("Venue ID")
+    table.add_column("Field Type ID")
+    for page in range(1, max_pages + 1):
+        venues = api.list_venues(page=page, size=page_size)
+        if not venues:
+            break
+        for venue in venues:
+            detail = api.get_venue_detail(venue.id)
+            field_types = api.list_field_types(detail)
+            if not field_types:
+                table.add_row(str(index), venue.name, "-", venue.id, "-")
+                index += 1
+                continue
+            for field_type in field_types:
+                table.add_row(
+                    str(index),
+                    venue.name,
+                    field_type.name,
+                    venue.id,
+                    field_type.id,
+                )
+                index += 1
+        if len(venues) < page_size:
+            break
+    if index == 1:
+        console.print("[yellow]No venue data returned by list_venues[/yellow]")
+    else:
+        console.print(table)
+
+
 def cmd_list_slots(api: SportsAPI, console: Console, base_target: BookingTarget, args) -> None:
     tgt = apply_target_overrides(base_target, args)
+    
+    # 如果指定了start_hour，显示时间信息
+    if hasattr(args, 'start_hour') and args.start_hour is not None:
+        start_time = f"{args.start_hour:02d}:00"
+        duration = getattr(args, 'duration_hours', 1) or 1
+        end_hour = (args.start_hour + duration) % 24
+        end_time = f"{end_hour:02d}:00"
+        console.print(f"[cyan]查询时间段: {start_time}-{end_time}[/cyan]")
+    
     monitor = SlotMonitor(api, tgt, MonitorPlan(enabled=False), console=console)
     slots = monitor.run_once(include_full=args.show_full)
     if not slots:
-        console.print("[yellow]未找到可用时段[/yellow]")
+        console.print("[yellow]No slots matched the filters[/yellow]")
         return
     table = monitor.render_table(slots, include_full=args.show_full)
     console.print(table)
@@ -115,7 +264,7 @@ def cmd_book_now(api: SportsAPI, console: Console, base_target: BookingTarget, a
     monitor = SlotMonitor(api, tgt, MonitorPlan(enabled=False, auto_book=True), console=console)
     slots = monitor.run_once(include_full=True)
     if not slots:
-        console.print("[yellow]未找到任何时段[/yellow]")
+        console.print("[yellow]No slots found[/yellow]")
         return
     slot = None
     for date_str, candidate in slots:
@@ -127,15 +276,73 @@ def cmd_book_now(api: SportsAPI, console: Console, base_target: BookingTarget, a
             slot = (date_str, candidate)
             break
     if not slot:
-        console.print("[yellow]没有符合条件的可预约时段[/yellow]")
+        console.print("[yellow]No available slot satisfied the target filters[/yellow]")
         table = monitor.render_table(slots, include_full=True)
         console.print(table)
         return
     ok, msg = monitor.attempt_booking(*slot)
     if ok:
-        console.print(f"[bold green]下单成功：{msg}[/bold green]")
+        console.print(f"[bold green]Booking succeeded: {msg}[/bold green]")
     else:
-        console.print(f"[red]下单失败：{msg}[/red]")
+        console.print(f"[red]Booking failed: {msg}[/red]")
+
+
+def cmd_order(api: SportsAPI, console: Console, args) -> None:
+    """下单命令"""
+    import config as CFG  # pylint: disable=import-outside-toplevel
+    
+    # 解析日期输入
+    date = parse_date_input(args.date)
+    
+    # 解析时间输入
+    start_time = parse_time_input(args.start_time)
+    
+    # 自动计算结束时间（如果未提供）
+    if hasattr(args, 'end_time') and args.end_time:
+        end_time = parse_time_input(args.end_time)
+    else:
+        # 自动计算：开始时间 + 1小时
+        start_hour = int(start_time.split(':')[0])
+        end_hour = (start_hour + 1) % 24
+        end_time = f"{end_hour:02d}:00"
+    
+    # 创建下单管理器
+    order_manager = OrderManager(api, CFG.ENCRYPTION_CONFIG)
+    
+    # 执行下单
+    result = order_manager.place_order_by_preset(
+        preset_index=args.preset,
+        date=date,
+        start_time=start_time,
+        end_time=end_time
+    )
+    
+    if result.success:
+        console.print(f"[bold green]下单成功！[/bold green]")
+        console.print(f"消息: {result.message}")
+        if result.order_id:
+            console.print(f"订单ID: {result.order_id}")
+    else:
+        console.print(f"[red]下单失败: {result.message}[/red]")
+        
+        # 显示详细的错误信息
+        if result.raw_response:
+            console.print(f"[yellow]响应详情:[/yellow]")
+            if isinstance(result.raw_response, dict):
+                for key, value in result.raw_response.items():
+                    console.print(f"  {key}: {value}")
+            else:
+                console.print(f"  {result.raw_response}")
+        
+        # 根据错误类型给出建议
+        if "登录超时" in result.message or "401" in result.message:
+            console.print(f"[yellow]建议: 请检查config.py中的AUTH配置，确保Cookie有效[/yellow]")
+        elif "权限不足" in result.message or "403" in result.message:
+            console.print(f"[yellow]建议: 请检查账户权限或联系管理员[/yellow]")
+        elif "已满" in result.message or "不可用" in result.message:
+            console.print(f"[yellow]建议: 该时间段可能已被预订，请尝试其他时间[/yellow]")
+        elif "服务器错误" in result.message or "500" in result.message:
+            console.print(f"[yellow]建议: 服务器暂时不可用，请稍后重试[/yellow]")
 
 
 def cmd_schedule(api_factory, console: Console, base_target: BookingTarget, plan: MonitorPlan, args) -> None:
@@ -166,7 +373,18 @@ def run_cli(args) -> None:
     console = Console()
 
     def api_factory() -> SportsAPI:
-        return SportsAPI(CFG.BASE_URL, CFG.ENDPOINTS, CFG.AUTH)
+        return SportsAPI(CFG.BASE_URL, CFG.ENDPOINTS, CFG.AUTH, preset_targets=CFG.PRESET_TARGETS)
+
+    global PRESETS  # pylint: disable=global-statement
+    PRESETS = list(getattr(CFG, "PRESET_TARGETS", []))
+
+    if args.command == "presets":
+        cmd_list_presets(console)
+        return
+    
+    if args.command == "list":
+        cmd_list_venues_sports(console)
+        return
 
     api = api_factory()
     try:
@@ -175,6 +393,13 @@ def run_cli(args) -> None:
         elif args.command == "discover":
             base_url = getattr(args, "base", None) or CFG.BASE_URL
             discover_endpoints(base_url, console=console)
+        elif args.command == "catalog":
+            cmd_catalog(
+                api,
+                console,
+                max_pages=getattr(args, "pages", 3),
+                page_size=getattr(args, "size", 50),
+            )
         elif args.command == "venues":
             cmd_list_venues(api, console, keyword=args.keyword, page=args.page, size=args.size)
         elif args.command == "slots":
@@ -185,51 +410,69 @@ def run_cli(args) -> None:
             cmd_book_now(api, console, CFG.TARGET, args)
         elif args.command == "schedule":
             cmd_schedule(api_factory, console, CFG.TARGET, CFG.MONITOR_PLAN, args)
+        elif args.command == "order":
+            cmd_order(api, console, args)
         else:
-            console.print("[yellow]未知命令[/yellow]")
+            console.print("[yellow]Unknown command[/yellow]")
     finally:
         api.close()
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="SJTU Sports 自动化工具")
+    parser = argparse.ArgumentParser(description="SJTU Sports Automation CLI")
     sub = parser.add_subparsers(dest="command")
 
-    sub.add_parser("debug-login", help="检查登录态并显示账号信息")
-    p_discover = sub.add_parser("discover", help="扫描页面提取候选 API")
-    p_discover.add_argument("--base", type=str, help="覆盖默认 BASE_URL")
+    sub.add_parser("debug-login", help="Check login status and show account information")
+    p_discover = sub.add_parser("discover", help="Scan pages and JS files for candidate API endpoints")
+    p_discover.add_argument("--base", type=str, help="Override BASE_URL when scanning")
 
-    p_venues = sub.add_parser("venues", help="列出场馆列表")
-    p_venues.add_argument("--keyword", type=str, help="场馆关键字")
-    p_venues.add_argument("--page", type=int, default=1, help="页码")
-    p_venues.add_argument("--size", type=int, default=20, help="每页数量")
+    sub.add_parser("presets", help="List preset venue/sport mappings defined in config")
+    sub.add_parser("list", help="List all available venues and sports with index numbers")
 
-    def add_target_args(p):
-        p.add_argument("--venue-id", type=str, help="指定场馆 ID")
-        p.add_argument("--venue-keyword", type=str, help="模糊匹配场馆名称")
-        p.add_argument("--field-type-id", type=str, help="指定项目 ID")
-        p.add_argument("--field-type-keyword", type=str, help="模糊匹配项目名称")
-        p.add_argument("--date", type=str, action="append", help="指定日期 YYYY-MM-DD，可多次提供")
-        p.add_argument("--date-offset", type=int, help="今天 + N 天进行尝试")
-        p.add_argument("--start-hour", type=int, help="目标开始小时")
-        p.add_argument("--duration-hours", type=int, help="预约时长（小时）")
+    p_catalog = sub.add_parser("catalog", help="Enumerate venues and field types with generated indices")
+    p_catalog.add_argument("--pages", type=int, default=3, help="Number of venue pages to scan")
+    p_catalog.add_argument("--size", type=int, default=50, help="Venue page size")
 
-    p_slots = sub.add_parser("slots", help="查询时段余量并输出表格")
+    p_venues = sub.add_parser("venues", help="List venues from the official API")
+    p_venues.add_argument("--keyword", type=str, help="Filter by keyword")
+    p_venues.add_argument("--page", type=int, default=1, help="Page number")
+    p_venues.add_argument("--size", type=int, default=20, help="Page size")
+
+    def add_target_args(p: argparse.ArgumentParser) -> None:
+        p.add_argument("--preset", type=int, help="Use preset index from config.PRESET_TARGETS (推荐使用此选项)")
+        p.add_argument("--venue-id", type=str, help="Override venue ID (不推荐，请使用 --preset)")
+        p.add_argument("--venue-keyword", type=str, help="Override venue keyword search")
+        p.add_argument("--field-type-id", type=str, help="Override field type ID (不推荐，请使用 --preset)")
+        p.add_argument("--field-type-keyword", type=str, help="Override field type keyword")
+        p.add_argument("--field-type-code", type=str, help="Provide extra code/motionId if required")
+        p.add_argument("--date", type=str, action="append", help="Date: 0-8 (offset) or YYYY-MM-DD format")
+        p.add_argument("--date-token", type=str, help="Provide dateId/dateToken when known")
+        p.add_argument("--date-offset", type=int, help="Target today + N days (ignored when --date used)")
+        p.add_argument("--start-hour", type=int, help="Desired starting hour (0-23)")
+        p.add_argument("--duration-hours", type=int, help="Booking duration in hours")
+
+    p_slots = sub.add_parser("slots", help="Query slot availability and render a table")
     add_target_args(p_slots)
-    p_slots.add_argument("--show-full", action="store_true", help="显示已满时段")
+    p_slots.add_argument("--show-full", action="store_true", help="Include slots that are already full")
 
-    p_monitor = sub.add_parser("monitor", help="持续监测余票并可自动下单")
+    p_monitor = sub.add_parser("monitor", help="Continuously monitor for availability")
     add_target_args(p_monitor)
-    p_monitor.add_argument("--interval", type=int, help="轮询间隔（秒）")
-    p_monitor.add_argument("--auto-book", action="store_true", help="发现余票后自动下单")
+    p_monitor.add_argument("--interval", type=int, help="Polling interval in seconds")
+    p_monitor.add_argument("--auto-book", action="store_true", help="Attempt booking automatically when possible")
 
-    p_book = sub.add_parser("book-now", help="立即尝试抢票")
+    p_book = sub.add_parser("book-now", help="Run a single booking attempt")
     add_target_args(p_book)
 
-    p_sched = sub.add_parser("schedule", help="每天固定时间自动抢票")
+    p_sched = sub.add_parser("schedule", help="Schedule a booking attempt every day at a fixed time")
     add_target_args(p_sched)
     p_sched.add_argument("--hour", type=int, default=12)
     p_sched.add_argument("--minute", type=int, default=0)
     p_sched.add_argument("--second", type=int, default=0)
+
+    p_order = sub.add_parser("order", help="Place an order for a specific time slot")
+    p_order.add_argument("--preset", type=int, required=True, help="Preset index from config.PRESET_TARGETS")
+    p_order.add_argument("--date", type=str, required=True, help="Date: 0-8 (offset) or YYYY-MM-DD format")
+    p_order.add_argument("--start-time", "--st", type=str, default="21", help="Start time: 0-23 (hour) or HH:MM format")
+    p_order.add_argument("--end-time", type=str, help="End time: 0-23 (hour) or HH:MM format (auto: start+1h if not provided)")
 
     return parser
