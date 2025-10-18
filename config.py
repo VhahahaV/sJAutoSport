@@ -1,0 +1,337 @@
+"""Runtime configuration for the SJTU Sports CLI.
+
+Fill in the values below with the details captured from the sports platform.
+"""
+
+from sja_booking.models import AuthConfig, BookingTarget, EndpointSet, MonitorPlan, PresetOption
+
+# Base address for all API requests. Most SJTU deployments respond on this host.
+BASE_URL = "https://sports.sjtu.edu.cn"
+JSESSIONID = ""
+# Authentication headers/cookies copied from a successful browser session.
+AUTH = AuthConfig(
+    cookie=f"JSESSIONID={JSESSIONID}",  # Paste the full Cookie header value captured from DevTools.
+    token=None,  # Optional Authorization header such as "Bearer ...".
+    username=None,  # Optional fallback if the platform requires credential login flows.
+    password=None,
+)
+
+# Default API endpoints discovered from the current platform version.
+ENDPOINTS = EndpointSet(
+    current_user="/system/user/currentUser",
+    list_venues="/manage/venue/listOrderCount",
+    venue_detail="/manage/venue/queryVenueById",
+    field_situation="/manage/fieldDetail/queryFieldSituation",
+    field_reserve="/manage/fieldDetail/queryFieldReserveSituationIsFull",
+    order_submit="/venue/personal/orderImmediatelyPC",
+    order_confirm="/venue/personal/ConfirmOrder",  # 新增下单确认端点
+    appointment_overview="/appointment/disabled/getAppintmentAndSysUserbyUser",
+    slot_summary="/manage/fieldDetail/queryFieldReserveSituationIsFull",
+    ping="/",
+)
+
+# 加密相关配置
+ENCRYPTION_CONFIG = {
+    "rsa_public_key": """-----BEGIN PUBLIC KEY-----
+MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEArKZOdKQAL+iYzJ4Q5EQzwv/yvVPnfdNVKRgNG19HbCYM4qIzFPEOFv28SVFQh+xqAj8tAfjpMSTihFwt6BQuWfZXWYpAqf4jF4cU7ez/VHJyzsn8Cb7Lf/1KsLpuz+MbqufrA57AysnLAnRXHOwik+QnpsXZYjTcjgxQ0iLMe5iJyo06CKFxH1rmgYMwS4E89kNg1VtYrFKs1MajApfhu9hTEXnm/lP24TPdefRXbf+z84p1GLue2HRhZs3wECH1HJWZOsrdL/M+wigWldY0fHoiaKsjD9rK1NyaPtk4bIYuwPsfQu5RN4hkEPpTvdw1nKzOdo77zNa5ovCY0uNLZwIDAQAB
+-----END PUBLIC KEY-----""",
+    "aes_key_length": 16,  # AES-128
+    "return_url": "https://sports.sjtu.edu.cn/#/paymentResult/1",
+}
+
+# 场馆和运动类型映射表 - 用户可以通过序号选择
+PRESET_TARGETS = [
+    PresetOption(
+        index=1,
+        venue_id="d784ad7c-cb24-4282-afd6-a67aec68c675",
+        venue_name="学生中心",
+        field_type_id="32c2a148-c828-4b15-a392-8c551195f596",
+        field_type_name="交谊厅",
+        field_type_code=None,
+    ),
+    PresetOption(
+        index=2,
+        venue_id="d784ad7c-cb24-4282-afd6-a67aec68c675",
+        venue_name="学生中心",
+        field_type_id="417dc5ed-aba7-4abb-bbdc-efef8446dbdb",
+        field_type_name="台球",
+        field_type_code=None,
+    ),
+    PresetOption(
+        index=3,
+        venue_id="d784ad7c-cb24-4282-afd6-a67aec68c675",
+        venue_name="学生中心",
+        field_type_id="7d46c0a4-3ae6-4398-822b-d4b7b37085fa",
+        field_type_name="学生中心健身房",
+        field_type_code=None,
+    ),
+    PresetOption(
+        index=4,
+        venue_id="d784ad7c-cb24-4282-afd6-a67aec68c675",
+        venue_name="学生中心",
+        field_type_id="f8e10d96-a3c9-425e-a0c0-e0cbbaf135c0",
+        field_type_name="舞蹈",
+        field_type_code=None,
+    ),
+    PresetOption(
+        index=5,
+        venue_id="3b10ff47-7e83-4c21-816c-5edc257168c1",
+        venue_name="气膜体育中心",
+        field_type_id="29942202-d2ac-448e-90b7-14d3c6be19ff",
+        field_type_name="羽毛球",
+        field_type_code=None,
+    ),
+    PresetOption(
+        index=6,
+        venue_id="3b10ff47-7e83-4c21-816c-5edc257168c1",
+        venue_name="气膜体育中心",
+        field_type_id="8dc0e52c-564a-4d9a-9cb2-08477f1a18d4",
+        field_type_name="篮球",
+        field_type_code=None,
+    ),
+    PresetOption(
+        index=7,
+        venue_id="768214ba-3b1c-4f29-ad00-15c0e376b000",
+        venue_name="子衿街学生活动中心",
+        field_type_id="019335a6-9d67-4d7d-923e-92ecea740c7b",
+        field_type_name="舞蹈",
+        field_type_code=None,
+    ),
+    PresetOption(
+        index=8,
+        venue_id="768214ba-3b1c-4f29-ad00-15c0e376b000",
+        venue_name="子衿街学生活动中心",
+        field_type_id="0a349309-1734-4507-98bd-4c30bf33c6bc",
+        field_type_name="健身房",
+        field_type_code=None,
+    ),
+    PresetOption(
+        index=9,
+        venue_id="768214ba-3b1c-4f29-ad00-15c0e376b000",
+        venue_name="子衿街学生活动中心",
+        field_type_id="151ba6a9-2cb1-489d-8cbd-2d2fe5e12f7c",
+        field_type_name="桌游室",
+        field_type_code=None,
+    ),
+    PresetOption(
+        index=10,
+        venue_id="768214ba-3b1c-4f29-ad00-15c0e376b000",
+        venue_name="子衿街学生活动中心",
+        field_type_id="57fbed57-d8b9-4247-a6ed-b2088a9e8a37",
+        field_type_name="钢琴",
+        field_type_code=None,
+    ),
+    PresetOption(
+        index=11,
+        venue_id="768214ba-3b1c-4f29-ad00-15c0e376b000",
+        venue_name="子衿街学生活动中心",
+        field_type_id="7bffbb9b-4999-49e4-9025-6012d3524da8",
+        field_type_name="烘焙",
+        field_type_code=None,
+    ),
+    PresetOption(
+        index=12,
+        venue_id="768214ba-3b1c-4f29-ad00-15c0e376b000",
+        venue_name="子衿街学生活动中心",
+        field_type_id="bbd8cc4b-f3b5-4714-af53-f61a8f1c2fba",
+        field_type_name="琴房兼乐器",
+        field_type_code=None,
+    ),
+    PresetOption(
+        index=13,
+        venue_id="73b17f69-6ed9-481f-b157-5e0606a55fd5",
+        venue_name="南洋北苑健身房",
+        field_type_id="dad366b3-7db9-4043-865c-7177aff83efa",
+        field_type_name="健身房",
+        field_type_code=None,
+    ),
+    PresetOption(
+        index=14,
+        venue_id="3f009fce-10b4-4df6-94b7-9d46aef77bb9",
+        venue_name="南区体育馆",
+        field_type_id="28d3bea9-541d-4efb-ae46-e739a5f78d72",
+        field_type_name="乒乓球",
+        field_type_code=None,
+    ),
+    PresetOption(
+        index=15,
+        venue_id="3f009fce-10b4-4df6-94b7-9d46aef77bb9",
+        venue_name="南区体育馆",
+        field_type_id="3770c0b3-1060-41f4-ae12-8df38d48c8b1",
+        field_type_name="排球",
+        field_type_code=None,
+    ),
+    PresetOption(
+        index=16,
+        venue_id="3f009fce-10b4-4df6-94b7-9d46aef77bb9",
+        venue_name="南区体育馆",
+        field_type_id="7f11b6af-cb2e-47ac-9a51-9cd0df885736",
+        field_type_name="篮球",
+        field_type_code=None,
+    ),
+    PresetOption(
+        index=17,
+        venue_id="8130b252-16a7-4066-9c30-c89bb1fac1e9",
+        venue_name="胡法光体育场",
+        field_type_id="a810f3f6-f5c8-4ab3-b57c-e9372f40649b",
+        field_type_name="舞蹈",
+        field_type_code=None,
+    ),
+    PresetOption(
+        index=18,
+        venue_id="9096787a-bc53-430a-9405-57dc46bc9e83",
+        venue_name="霍英东体育中心",
+        field_type_id="49629b20-71fb-4bae-8675-fdae0831e861",
+        field_type_name="羽毛球",
+        field_type_code=None,
+    ),
+    PresetOption(
+        index=19,
+        venue_id="9096787a-bc53-430a-9405-57dc46bc9e83",
+        venue_name="霍英东体育中心",
+        field_type_id="561d43a3-338e-4834-b35f-747bdc578366",
+        field_type_name="篮球",
+        field_type_code=None,
+    ),
+    PresetOption(
+        index=20,
+        venue_id="9096787a-bc53-430a-9405-57dc46bc9e83",
+        venue_name="霍英东体育中心",
+        field_type_id="b3dce013-3a0e-45e0-a0c2-425a364ac90f",
+        field_type_name="健身房",
+        field_type_code=None,
+    ),
+    PresetOption(
+        index=21,
+        venue_id="db75ba81-ae54-4f22-ad5e-84de039f5a89",
+        venue_name="徐汇校区体育馆",
+        field_type_id="0f71f5e1-2e24-4c15-b437-cc9f82a1343e",
+        field_type_name="健身房",
+        field_type_code=None,
+    ),
+    PresetOption(
+        index=22,
+        venue_id="db75ba81-ae54-4f22-ad5e-84de039f5a89",
+        venue_name="徐汇校区体育馆",
+        field_type_id="84e4aeaf-0c8c-431c-a64d-7ccd9cc381f6",
+        field_type_name="羽毛球",
+        field_type_code=None,
+    ),
+    PresetOption(
+        index=23,
+        venue_id="db75ba81-ae54-4f22-ad5e-84de039f5a89",
+        venue_name="徐汇校区体育馆",
+        field_type_id="92c28497-7437-4d5d-ab55-55721009db45",
+        field_type_name="乒乓球",
+        field_type_code=None,
+    ),
+    PresetOption(
+        index=24,
+        venue_id="cfd28228-bb2a-4a61-8c6a-4da6da3877e0",
+        venue_name="致远游泳健身馆",
+        field_type_id="8c229c55-6188-48b7-822f-477e5ddb3820",
+        field_type_name="乒乓球",
+        field_type_code=None,
+    ),
+    PresetOption(
+        index=25,
+        venue_id="165f97cc-ea52-42a3-aaaf-357b8c2569ae",
+        venue_name="徐汇校区网球场",
+        field_type_id="2353a4d7-7017-45f1-8cdf-4d857fc86dbe",
+        field_type_name="网球",
+        field_type_code=None,
+    ),
+    PresetOption(
+        index=26,
+        venue_id="1888c119-d7cd-4d56-8c63-94e818dc8a38",
+        venue_name="徐汇校区足球场",
+        field_type_id="150d21d9-13ed-4320-8ab1-1cfb14c52bef",
+        field_type_name="足球",
+        field_type_code=None,
+    ),
+    PresetOption(
+        index=27,
+        venue_id="93284352-aad3-4353-8448-aad2b1526da1",
+        venue_name="张江校区体育运动中心",
+        field_type_id="",
+        field_type_name="无运动类型",
+        field_type_code=None,
+    ),
+    PresetOption(
+        index=28,
+        venue_id="108d2783-6565-4efa-bf78-e0db8dd8acb6",
+        venue_name="学创船建分中心",
+        field_type_id="ea0c50b2-52b9-44ae-928d-6f59e5c63fb9",
+        field_type_name="创新实践",
+        field_type_code=None,
+    ),
+    PresetOption(
+        index=29,
+        venue_id="eeaa1c0f-8ec3-466e-b822-f2e47d747c9e",
+        venue_name="学创空天分中心",
+        field_type_id="878844e8-bd71-4c2e-ab54-b1464207da8d",
+        field_type_name="创新实践",
+        field_type_code=None,
+    ),
+    PresetOption(
+        index=30,
+        venue_id="84c5439f-fc02-488b-83d5-6026077b3094",
+        venue_name="学创机动分中心",
+        field_type_id="dc20c596-ebb5-4b84-87ec-5848f1ea0495",
+        field_type_name="创新实践",
+        field_type_code=None,
+    ),
+    PresetOption(
+        index=31,
+        venue_id="a41b3261-6fce-4073-b799-1e91ed19a7f3",
+        venue_name="致远游泳馆东侧足球场",
+        field_type_id="6a157dec-2f89-4f5c-ba10-dd28db67292b",
+        field_type_name="足球",
+        field_type_code=None,
+    ),
+    PresetOption(
+        index=32,
+        venue_id="3466293b-a7d8-45be-a918-8526e3bed4c5",
+        venue_name="东区网球场",
+        field_type_id="4dd7ae28-cf27-4369-9bc4-ee75b8e3cc76",
+        field_type_name="网球",
+        field_type_code=None,
+    ),
+    PresetOption(
+        index=33,
+        venue_id="2b528fa8-3ce8-4a7a-8f8b-83cc537901ed",
+        venue_name="笼式足球场",
+        field_type_id="ad666603-a47e-488d-b913-d5304a880ced",
+        field_type_name="足球",
+        field_type_code=None,
+    ),
+    PresetOption(
+        index=34,
+        venue_id="0c6edc93-87ac-41b0-9895-6b66fda93fe5",
+        venue_name="胡晓明网球场",
+        field_type_id="19f69e5c-872f-4fbb-b9fe-70d6337c2d93",
+        field_type_name="网球",
+        field_type_code=None,
+    ),
+]
+
+# Preferred booking target; override identifiers or keywords as needed.
+TARGET = BookingTarget(
+    venue_id=None,
+    venue_keyword="学生中心",
+    field_type_id=None,
+    field_type_keyword="羽毛球",
+    date_offset=7,  # Days from today to target when fixed_dates is empty.
+    start_hour=18,
+    duration_hours=1,
+)
+
+# Default monitor behaviour for the `monitor` and `schedule` commands.
+MONITOR_PLAN = MonitorPlan(
+    enabled=False,
+    interval_seconds=30,
+    auto_book=False,
+    notify_stdout=True,
+)
+
+__all__ = ["BASE_URL", "AUTH", "ENDPOINTS", "TARGET", "MONITOR_PLAN", "PRESET_TARGETS", "ENCRYPTION_CONFIG"]

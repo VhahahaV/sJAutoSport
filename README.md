@@ -1,145 +1,203 @@
-# SJTU Sports CLI
+﻿# SJTU Sports CLI
 
-面向上海交通大学体育场馆预约系统的 HTTP 自动化脚本。项目以“可配置+模块化”为核心，既能复用真实接口做极速抢票，也能提供余票监控、场馆信息检索、定时任务等配套能力。
+Automation helpers for the Shanghai Jiao Tong University venue booking platform. The toolkit talks to the backend directly over HTTP, so you can query availability, monitor slots, and book without keeping a browser open.
 
----
+## Features
 
-## 功能概览
-- **纯 HTTP**：直接请求后端接口，无需浏览器/模拟器，响应快、稳定性高。
-- **模块化设计**：`sja_booking` 包含 API 客户端、余票监控器、计划调度器、端点发现、CLI 等组件，可按需扩展。
-- **多模式下单**：
-  - 手动查询：快速列出场馆、日期、时段余量，表格输出。
-  - 实时监测：按指定间隔自动轮询，发现空位时提示或直接下单。
-  - 定时抢票：依托 APScheduler，实现每天固定时间自动抢票。
-- **灵活配置**：所有接口路径、默认目标、登录凭据都在 `config.py` 中可配置。
-- **端点辅助**：提供轻量级 `discover`，从页面/静态 JS 中提取候选 API，方便比对。
+- Pure HTTP workflow (no browser automation).
+- Modular components for API access, monitoring, scheduling, and endpoint discovery.
+- Multiple booking modes: one-off queries, continuous monitoring with optional auto-book, and daily scheduling.
+- Configurable defaults and presets maintained in `config.py`.
 
----
+## Repository Layout
 
-## 目录结构
 ```
-sja_booking/           # 核心模块
-├── api.py             # SportsAPI：封装真实接口、数据解析
-├── monitor.py         # SlotMonitor：余票轮询、自动下单
-├── scheduler.py       # schedule_daily：APScheduler 封装
-├── discovery.py       # discover_endpoints：端点扫描
-├── models.py          # 数据模型/配置结构
-├── cli.py             # 子命令解析与调度
-└── __init__.py
-config.py              # 站点配置/默认目标（需根据抓包结果维护）
-main.py           # CLI 入口（解析命令，调用 run_cli）
-README.md              # 文档（当前文件）
+sja_booking/
+sja_booking/
+|-- api.py          # SportsAPI: server endpoints and response parsing
+|-- monitor.py      # SlotMonitor: polling and rendering logic
+|-- scheduler.py    # schedule_daily wrapper around APScheduler
+|-- discovery.py    # discover_endpoints helper
+|-- models.py       # Shared dataclasses
+|-- cli.py          # Command line entrypoints (argparse + rich)
+|-- __init__.py
+config.py           # Runtime configuration (credentials, endpoints, presets)
+main.py             # CLI entrypoint
+README.md           # This file
 ```
 
----
+## Installation
 
-## 环境准备
 ```bash
-python -m venv .venv && source .venv/bin/activate       # Windows: .venv\Scripts\activate
-pip install -U pip
-pip install httpx[http2] apscheduler rich tzlocal
-```
-> 如需在 CI/服务器使用，确保系统时间正确且可访问学校内网。
-
----
-
-## 配置指南（config.py）
-1. **登录凭据**
-   - 登录平台后打开 DevTools → Network，找到任意成功的 API 请求。
-   - 复制 Request Headers 中整段 `Cookie:`（包含 `JSESSIONID`、监控埋点等字段），粘贴到 `AUTH.cookie`。
-   - 若请求头中存在 `Authorization: Bearer ...` 等字段，请写入 `AUTH.token`。
-2. **接口路径**
-   - 根据抓包结果填写 `ENDPOINTS` 中各字段；示例已匹配当前平台版本：
-     ```python
-     ENDPOINTS = EndpointSet(
-         current_user="/system/user/currentUser",
-         list_venues="/manage/venue/listOrderCount",
-         venue_detail="/manage/venue/queryVenueById",
-         field_situation="/manage/fieldDetail/queryFieldSituation",
-         field_reserve="/manage/fieldDetail/queryFieldReserveSituationIsFull",
-         order_submit="/venue/personal/orderImmediatelyPC",
-         appointment_overview="/appointment/disabled/getAppintmentAndSysUserbyUser",
-         ping="/",
-     )
-     ```
-3. **默认目标**
-   - `TARGET` 里配置常用场馆关键字、项目关键字、日期策略（`date_offset` 或 `fixed_dates`）、起始小时等。
-4. **监控计划**
-   - `MONITOR_PLAN` 定义 `monitor` 命令默认轮询间隔、是否自动下单等。
-
-配置完成后，建议先运行 `python main.py debug-login` 确认登录态无误。
-
----
-
-## 命令速览
-所有功能通过 `python main.py <命令>` 调用：
-
-| 命令 | 功能 | 常用参数 |
-| --- | --- | --- |
-| `debug-login` | 校验登录态、输出用户信息 | 无 |
-| `discover` | 扫描页面/静态 JS，生成候选 API | `--base`（覆盖基地址） |
-| `venues` | 列出场馆 | `--keyword`（模糊匹配），`--page`，`--size` |
-| `slots` | 查询余票并表格输出 | `--venue-id/--venue-keyword`，`--field-type-id/--field-type-keyword`，`--date`，`--date-offset`，`--show-full` |
-| `monitor` | 定时轮询，发现空位可自动下单 | 同 `slots`，外加 `--interval`、`--auto-book` |
-| `book-now` | 立即抢票（按配置筛选优先空位） | 同 `slots` |
-| `schedule` | 每天固定时间执行 `book-now` | 同 `slots`，外加 `--hour`、`--minute`、`--second` |
-
-示例：
-```bash
-# 1. 检查登录态
-python main.py debug-login
-
-# 2. 列出含“学生”的场馆
-python main.py venues --keyword 学生
-
-# 3. 查看学生中心羽毛球 7 天后的余票（含已满时段）
-python main.py slots --venue-keyword 学生 --field-type-keyword 羽毛球 --date-offset 7 --show-full
-
-# 4. 每 30 秒轮询一次，发现空位即自动下单
-python main.py monitor --venue-keyword 学生 --field-type-keyword 羽毛球 --auto-book --interval 30
-
-# 5. 每天 11:59 预热 & 12:00 自动抢票
-python main.py schedule --venue-keyword 学生 --field-type-keyword 羽毛球 --hour 12 --minute 0 --second 0
+conda create -n sJAutoSport python=3.10
+pip install httpx[http2] apscheduler rich tzlocal pycryptodome
 ```
 
----
+## Configuration (`config.py`)
 
-## 余票监控与自动下单
-- `SlotMonitor` 会在第一次运行时解析场馆/项目（支持 ID 或关键字），随后按配置日期请求 `/manage/fieldDetail/queryFieldSituation`。
-- 输出基于 `rich`，表格包含日期、起止时间、状态、剩余、容量、价格等列。
-- 若开启 `--auto-book` / `MONITOR_PLAN.auto_book`，会寻找时段返回里的 `orderId`（或其它可用标识）调用 `/venue/personal/orderImmediatelyPC`。
-- 若接口改版导致字段缺失，可在 `SlotMonitor._attempt_booking` 或 `SportsAPI.query_slots` 中扩展解析。
+1. Copy the complete `Cookie` header (and optional `Authorization`) from DevTools after a successful request, and paste it into `AUTH`.
+2. Adjust `ENDPOINTS` if the platform deploys a different path structure.
+3. Fill in `TARGET` with your favourite venue/field and scheduling preferences. Set `date_offset=None` to fetch all available dates automatically.
+4. Edit `MONITOR_PLAN` if you prefer a different polling interval or default auto-book behaviour.
+5. Maintain `PRESET_TARGETS` with frequently used venue/field combinations so users can rely on the simpler `--preset` flag.
 
----
+Example preset entry:
 
-## 端点发现（可选）
-```bash
-python main.py discover
-python main.py discover --base https://sports.sjtu.edu.cn/pc/
+```python
+PRESET_TARGETS = [
+    PresetOption(
+        index=1,
+        venue_id="73b17f69-6ed9-481f-b157-5e0606a55fd5",
+        venue_name="南洋北苑健身房",
+        field_type_id="dad366b3-7db9-4043-865c-7177aff83efa",
+        field_type_name="健身房",
+    ),
+]
 ```
-命令会：
-1. 下载首页 HTML，提取内联 `"/api/..."` 字符串。
-2. 扫描 `<script src="...js">` 引用，追加外链 JS 中的 `"/pc/api/..."` 候选。
-3. 输出前 50 个结果，并写入 `endpoints.auto.json` 供对照。
 
-> 若返回空数组，说明页面内无明显 API 字面量，此时需继续靠 Network 抓包确认。
+## CLI Commands
 
----
+All functionality is exposed through `python main.py <command> [options]`.
 
-## 常见问题
-- **debug-login 404 / HTML**：`ENDPOINTS.current_user` 写错或 Cookie 失效。请重登平台后复制最新 Cookie。
-- **venues/slots 空表**：接口返回结构可能有变，打印 `slots` 命令结果时加 `--show-full` 看 raw 信息；必要时调整 `SportsAPI.query_slots` 中的字段映射。
-- **自动下单失败**：检查监控输出日志是否显示“缺少 orderId”。这通常意味着接口不直接返回订单号，需要额外请求（例如锁定接口）或参数。
-- **discover 无结果**：部分页面通过动态接口返回路径，静态扫描无法捕获。请继续使用浏览器抓包或阅读前端源码。
+| Command       | Description                                             | Common options |
+| ------------- | ------------------------------------------------------- | -------------- |
+| `list`        | 显示场馆和运动类型的序号映射表（推荐使用）                | – |
+| `presets`     | Show the preset table defined in `config.PRESET_TARGETS`| – |
+| `catalog`     | Enumerate venues and field types with generated indices | `--pages`, `--size` |
+| `debug-login` | Validate the current cookies/token and show account info| – |
+| `discover`    | Scan the base page and JS assets for candidate API paths| `--base` |
+| `venues`      | List venues from the official API                       | `--keyword`, `--page`, `--size` |
+| `slots`       | Query slot availability and render a table              | `--preset`, `--date`, `--start-hour`, `--show-full` |
+| `monitor`     | Continuously poll for availability (optionally autobook)| `--preset`, `--date`, `--interval`, `--auto-book` |
+| `book-now`    | Single booking attempt using the target filters         | `--preset`, `--date`, `--start-hour`, `--duration-hours` |
+| `order`       | 直接下单预订指定时间段（推荐使用）                      | `--preset`, `--date`, `--st`, `--end-time` |
+| `schedule`    | Daily scheduled booking attempt                         | `--preset`, `--hour`, `--minute`, `--second` |
 
----
+### 快速开始 - 使用序号选择
 
-## 开发扩展
-- 模块化设计便于自定义命令：在 `sja_booking/cli.py` 添加子命令并调用相应 API/Monitor。
-- 需要更多字段时，可在 `sja_booking/models.py` 扩充数据类（例如增加价格策略、场馆标签等）。
-- 若要支持多用户/多计划，可考虑在外层脚本中循环调用 `SportsAPI` 并传入不同配置。
+1. 运行 `python main.py list` 查看所有可用的场馆和运动类型及其序号
+2. 使用序号进行预约，例如：
 
----
+   ```bash
+   # 查看南洋北苑健身房的可用时间段
+   python main.py slots --preset 13
+   
+   # 查看明天的可用时间段
+   python main.py slots --preset 13 --date 1
+   
+   # 查看今天14:00-15:00的时间段
+   python main.py slots --preset 13 --date 0 --start-hour 14
+   
+   # 监控霍英东体育馆羽毛球场地
+   python main.py monitor --preset 5 --interval 30 --auto-book
+   
+   # 立即预约学生中心篮球场
+   python main.py book-now --preset 1
+   
+   # 直接下单预订指定时间段（简化格式）
+   python main.py order --preset 13 --date 0 --st 21
+   python main.py order --preset 14 --date 1 --st 17
+   ```
 
-## 免责声明
-本项目仅供学习/个人实验。使用过程中请遵守学校平台规则，避免高频/恶意请求所造成的账号封禁或其它后果。作者不对脚本使用造成的任何影响负责。
+这样就不需要记住复杂的 `--venue-id` 或 `--field-type-id` 了！
+
+### 🚀 简化命令格式
+
+为了提升用户体验，所有命令都支持简化的参数格式：
+
+#### 📅 日期格式
+- **数字格式**：`0-8` 表示日期偏移量
+  - `0` = 今天
+  - `1` = 明天  
+  - `7` = 下周今天
+  - `8` = 下周明天
+- **标准格式**：`YYYY-MM-DD`（如 `2025-01-15`）
+
+#### ⏰ 时间格式
+- **数字格式**：`0-23` 表示小时
+  - `14` = 14:00
+  - `21` = 21:00
+- **标准格式**：`HH:MM`（如 `14:00`）
+
+#### 🎯 命令示例对比
+
+| 功能 | 传统格式 | 简化格式 |
+|------|----------|----------|
+| 查看今天时间段 | `--date 2025-10-19` | `--date 0` |
+| 查看明天时间段 | `--date 2025-10-20` | `--date 1` |
+| 指定开始时间 | `--start-time 14:00` | `--st 14` |
+| 下单预订 | `--date 2025-10-19 --start-time 14:00 --end-time 15:00` | `--date 0 --st 14` |
+
+#### ✨ 自动功能
+- **自动计算结束时间**：如果不指定 `--end-time`，系统会自动设置为开始时间+1小时
+- **智能时间解析**：支持数字和标准格式混合使用
+
+### 传统工作流程
+
+1. Run `python main.py catalog` to discover the latest venue/field combinations and their generated indices.
+2. Run `python main.py presets` to view the numbered venue/sport list that you maintain in `config.py`.
+3. Use the sequence number with other commands, for example:
+
+   ```bash
+   python main.py slots --preset 1 --show-full
+   python main.py monitor --preset 1 --interval 30 --auto-book
+   ```
+
+This removes the need to memorise UUID-style `--venue-id` or `--field-type-id` values.
+
+## Monitoring & Auto-booking
+
+- `SlotMonitor` resolves the venue/field (using IDs, keywords, or presets), fetches all available dates, and aggregates slot availability by time.
+- Output tables list venue, date, time, total remaining capacity, and price. Slots with zero remaining capacity are omitted by default.
+- With `--auto-book`, the monitor attempts to submit the order immediately once a qualifying slot is found.
+
+## Tips
+
+- Start with `python main.py debug-login` to ensure cookies/tokens are still valid.
+- When you add a new venue/sport pair to `PRESET_TARGETS`, rerun `python main.py presets` (and update the table below) so everyone can reference the latest indices.
+- Use `python main.py catalog` to export the full venue/sport list directly from the platform when building or verifying presets.
+
+## 场馆和运动类型映射表
+
+| 序号 | 场馆名称 | 运动类型 | 使用示例 |
+|------|----------|----------|----------|
+| 1 | 学生中心 | 交谊厅 | `python main.py slots --preset 1` |
+| 2 | 学生中心 | 台球 | `python main.py slots --preset 2` |
+| 3 | 学生中心 | 学生中心健身房 | `python main.py slots --preset 3` |
+| 4 | 学生中心 | 舞蹈 | `python main.py slots --preset 4` |
+| 5 | 气膜体育中心 | 羽毛球 | `python main.py slots --preset 5` |
+| 6 | 气膜体育中心 | 篮球 | `python main.py slots --preset 6` |
+| 7 | 子衿街学生活动中心 | 舞蹈 | `python main.py slots --preset 7` |
+| 8 | 子衿街学生活动中心 | 健身房 | `python main.py slots --preset 8` |
+| 9 | 子衿街学生活动中心 | 桌游室 | `python main.py slots --preset 9` |
+| 10 | 子衿街学生活动中心 | 钢琴 | `python main.py slots --preset 10` |
+| 11 | 子衿街学生活动中心 | 烘焙 | `python main.py slots --preset 11` |
+| 12 | 子衿街学生活动中心 | 琴房兼乐器 | `python main.py slots --preset 12` |
+| 13 | 南洋北苑健身房 | 健身房 | `python main.py slots --preset 13` |
+| 14 | 南区体育馆 | 乒乓球 | `python main.py slots --preset 14` |
+| 15 | 南区体育馆 | 排球 | `python main.py slots --preset 15` |
+| 16 | 南区体育馆 | 篮球 | `python main.py slots --preset 16` |
+| 17 | 胡法光体育场 | 舞蹈 | `python main.py slots --preset 17` |
+| 18 | 霍英东体育中心 | 羽毛球 | `python main.py slots --preset 18` |
+| 19 | 霍英东体育中心 | 篮球 | `python main.py slots --preset 19` |
+| 20 | 霍英东体育中心 | 健身房 | `python main.py slots --preset 20` |
+| 21 | 徐汇校区体育馆 | 健身房 | `python main.py slots --preset 21` |
+| 22 | 徐汇校区体育馆 | 羽毛球 | `python main.py slots --preset 22` |
+| 23 | 徐汇校区体育馆 | 乒乓球 | `python main.py slots --preset 23` |
+| 24 | 致远游泳健身馆 | 乒乓球 | `python main.py slots --preset 24` |
+| 25 | 徐汇校区网球场 | 网球 | `python main.py slots --preset 25` |
+| 26 | 徐汇校区足球场 | 足球 | `python main.py slots --preset 26` |
+| 27 | 张江校区体育运动中心 | 无运动类型 | `python main.py slots --preset 27` |
+| 28 | 学创船建分中心 | 创新实践 | `python main.py slots --preset 28` |
+| 29 | 学创空天分中心 | 创新实践 | `python main.py slots --preset 29` |
+| 30 | 学创机动分中心 | 创新实践 | `python main.py slots --preset 30` |
+| 31 | 致远游泳馆东侧足球场 | 足球 | `python main.py slots --preset 31` |
+| 32 | 东区网球场 | 网球 | `python main.py slots --preset 32` |
+| 33 | 笼式足球场 | 足球 | `python main.py slots --preset 33` |
+| 34 | 胡晓明网球场 | 网球 | `python main.py slots --preset 34` |
+
+> **提示**: 运行 `python main.py list` 可以查看最新的映射表和使用示例。
+
+
+
+
