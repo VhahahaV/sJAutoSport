@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import asyncio
 import dataclasses
 from datetime import time as dt_time, datetime, timedelta
 from typing import List, Optional
@@ -10,10 +11,10 @@ from rich.table import Table
 
 from .api import SportsAPI
 from .discovery import discover_endpoints
-from .models import BookingTarget, MonitorPlan, PresetOption
+from .models import BookingTarget, MonitorPlan, OrderIntent, PresetOption
 from .monitor import SlotMonitor
 from .scheduler import schedule_daily
-from .order import OrderManager
+from . import service
 
 
 PRESETS: List[PresetOption] = []
@@ -229,21 +230,36 @@ def cmd_catalog(api: SportsAPI, console: Console, max_pages: int, page_size: int
 
 def cmd_list_slots(api: SportsAPI, console: Console, base_target: BookingTarget, args) -> None:
     tgt = apply_target_overrides(base_target, args)
-    
-    # 如果指定了start_hour，显示时间信息
-    if hasattr(args, 'start_hour') and args.start_hour is not None:
+
+    if hasattr(args, "start_hour") and args.start_hour is not None:
         start_time = f"{args.start_hour:02d}:00"
-        duration = getattr(args, 'duration_hours', 1) or 1
+        duration = getattr(args, "duration_hours", tgt.duration_hours or 1) or 1
         end_hour = (args.start_hour + duration) % 24
         end_time = f"{end_hour:02d}:00"
-        console.print(f"[cyan]查询时间段: {start_time}-{end_time}[/cyan]")
-    
-    monitor = SlotMonitor(api, tgt, MonitorPlan(enabled=False), console=console)
-    slots = monitor.run_once(include_full=args.show_full)
-    if not slots:
+        console.print(f"[cyan]查询时段: {start_time}-{end_time}[/cyan]")
+
+    result = asyncio.run(
+        service.list_slots(
+            preset=getattr(args, "preset", None),
+            venue_id=getattr(args, "venue_id", None),
+            field_type_id=getattr(args, "field_type_id", None),
+            date=None,
+            start_hour=getattr(args, "start_hour", None),
+            show_full=args.show_full,
+            base_target=tgt,
+        )
+    )
+
+    if not result.slots:
         console.print("[yellow]No slots matched the filters[/yellow]")
         return
-    table = monitor.render_table(slots, include_full=args.show_full)
+
+    render_monitor = SlotMonitor(api, result.resolved.target, MonitorPlan(enabled=False), console=console)
+    render_monitor._venue_name = result.resolved.venue_name  # type: ignore[attr-defined]
+    render_monitor._field_type_name = result.resolved.field_type_name  # type: ignore[attr-defined]
+
+    rows = [(entry.date, entry.slot) for entry in result.slots]
+    table = render_monitor.render_table(rows, include_full=args.show_full)
     console.print(table)
 
 
@@ -261,88 +277,123 @@ def cmd_monitor(api: SportsAPI, console: Console, base_target: BookingTarget, pl
 
 def cmd_book_now(api: SportsAPI, console: Console, base_target: BookingTarget, args) -> None:
     tgt = apply_target_overrides(base_target, args)
-    monitor = SlotMonitor(api, tgt, MonitorPlan(enabled=False, auto_book=True), console=console)
-    slots = monitor.run_once(include_full=True)
-    if not slots:
+
+    result = asyncio.run(
+        service.list_slots(
+            preset=getattr(args, "preset", None),
+            venue_id=getattr(args, "venue_id", None),
+            field_type_id=getattr(args, "field_type_id", None),
+            date=None,
+            start_hour=None,
+            show_full=True,
+            base_target=tgt,
+        )
+    )
+
+    if not result.slots:
         console.print("[yellow]No slots found[/yellow]")
         return
-    slot = None
-    for date_str, candidate in slots:
-        chosen = monitor.api.pick_slot([candidate], tgt.start_hour, tgt.duration_hours)
-        if chosen and candidate.available:
-            slot = (date_str, candidate)
+
+    preferred_hour = getattr(tgt, "start_hour", None)
+    chosen_entry = None
+    fallback_entry = None
+    for entry in result.slots:
+        slot = entry.slot
+        if not slot.available:
+            continue
+        if fallback_entry is None:
+            fallback_entry = entry
+        if preferred_hour is None:
+            chosen_entry = entry
             break
-        if candidate.available:
-            slot = (date_str, candidate)
+        try:
+            slot_hour = int(str(slot.start).split(":")[0])
+        except Exception:  # pylint: disable=broad-except
+            continue
+        if slot_hour == preferred_hour:
+            chosen_entry = entry
             break
-    if not slot:
+    target_entry = chosen_entry or fallback_entry
+    if not target_entry:
         console.print("[yellow]No available slot satisfied the target filters[/yellow]")
-        table = monitor.render_table(slots, include_full=True)
+        render_monitor = SlotMonitor(api, result.resolved.target, MonitorPlan(enabled=False), console=console)
+        render_monitor._venue_name = result.resolved.venue_name  # type: ignore[attr-defined]
+        render_monitor._field_type_name = result.resolved.field_type_name  # type: ignore[attr-defined]
+        rows = [(entry.date, entry.slot) for entry in result.slots]
+        table = render_monitor.render_table(rows, include_full=True)
         console.print(table)
         return
-    ok, msg = monitor.attempt_booking(*slot)
-    if ok:
-        console.print(f"[bold green]Booking succeeded: {msg}[/bold green]")
+
+    slot = target_entry.slot
+    order_identifier = slot.raw.get("orderId") if isinstance(slot.raw, dict) else None
+    if not order_identifier:
+        if isinstance(slot.raw, dict):
+            order_identifier = slot.raw.get("id")
+    if not order_identifier:
+        order_identifier = slot.slot_id
+    if not order_identifier:
+        console.print("[red]Booking failed: missing order identifier in slot payload[/red]")
+        return
+
+    intent = OrderIntent(
+        venue_id=result.resolved.venue_id,
+        field_type_id=result.resolved.field_type_id,
+        slot_id=slot.slot_id,
+        date=target_entry.date,
+        order_id=str(order_identifier),
+        payload=slot.raw,
+    )
+
+    try:
+        response = api.order_immediately(intent)
+    except Exception as exc:  # pylint: disable=broad-except
+        console.print(f"[red]Booking failed: {exc}[/red]")
+        return
+
+    success = True
+    message = response
+    if isinstance(response, dict):
+        code = response.get("code")
+        success = code in (None, 0, "0") and not response.get("error")
+        message = response.get("msg") or response.get("message") or str(response)
+    if success:
+        console.print(f"[bold green]Booking succeeded: {message}[/bold green]")
     else:
-        console.print(f"[red]Booking failed: {msg}[/red]")
+        console.print(f"[red]Booking failed: {message}[/red]")
+        if isinstance(response, dict):
+            console.print(response)
 
 
 def cmd_order(api: SportsAPI, console: Console, args) -> None:
-    """下单命令"""
     import config as CFG  # pylint: disable=import-outside-toplevel
-    
-    # 解析日期输入
-    date = parse_date_input(args.date)
-    
-    # 解析时间输入
-    start_time = parse_time_input(args.start_time)
-    
-    # 自动计算结束时间（如果未提供）
-    if hasattr(args, 'end_time') and args.end_time:
-        end_time = parse_time_input(args.end_time)
-    else:
-        # 自动计算：开始时间 + 1小时
-        start_hour = int(start_time.split(':')[0])
-        end_hour = (start_hour + 1) % 24
-        end_time = f"{end_hour:02d}:00"
-    
-    # 创建下单管理器
-    order_manager = OrderManager(api, CFG.ENCRYPTION_CONFIG)
-    
-    # 执行下单
-    result = order_manager.place_order_by_preset(
-        preset_index=args.preset,
-        date=date,
-        start_time=start_time,
-        end_time=end_time
-    )
-    
+
+    base_target = getattr(CFG, "TARGET", BookingTarget())
+    try:
+        result = asyncio.run(
+            service.order_once(
+                preset=args.preset,
+                date=args.date,
+                start_time=args.start_time,
+                end_time=getattr(args, "end_time", None),
+                base_target=base_target,
+            )
+        )
+    except ValueError as exc:
+        console.print(f"[red]Input error: {exc}[/red]")
+        return
+    except Exception as exc:  # pylint: disable=broad-except
+        console.print(f"[red]Order failed: {exc}[/red]")
+        return
+
     if result.success:
-        console.print(f"[bold green]下单成功！[/bold green]")
-        console.print(f"消息: {result.message}")
+        console.print("[bold green]Order succeeded[/bold green]")
+        console.print(f"Message: {result.message}")
         if result.order_id:
-            console.print(f"订单ID: {result.order_id}")
+            console.print(f"Order ID: {result.order_id}")
     else:
-        console.print(f"[red]下单失败: {result.message}[/red]")
-        
-        # 显示详细的错误信息
+        console.print(f"[red]Order failed: {result.message}")
         if result.raw_response:
-            console.print(f"[yellow]响应详情:[/yellow]")
-            if isinstance(result.raw_response, dict):
-                for key, value in result.raw_response.items():
-                    console.print(f"  {key}: {value}")
-            else:
-                console.print(f"  {result.raw_response}")
-        
-        # 根据错误类型给出建议
-        if "登录超时" in result.message or "401" in result.message:
-            console.print(f"[yellow]建议: 请检查config.py中的AUTH配置，确保Cookie有效[/yellow]")
-        elif "权限不足" in result.message or "403" in result.message:
-            console.print(f"[yellow]建议: 请检查账户权限或联系管理员[/yellow]")
-        elif "已满" in result.message or "不可用" in result.message:
-            console.print(f"[yellow]建议: 该时间段可能已被预订，请尝试其他时间[/yellow]")
-        elif "服务器错误" in result.message or "500" in result.message:
-            console.print(f"[yellow]建议: 服务器暂时不可用，请稍后重试[/yellow]")
+            console.print(f"[yellow]Raw response:[/yellow] {result.raw_response}")
 
 
 def cmd_schedule(api_factory, console: Console, base_target: BookingTarget, plan: MonitorPlan, args) -> None:

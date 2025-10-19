@@ -494,6 +494,76 @@ class SportsAPI:
         )
         return resp.json()
 
+    def normalize_slot_summary(self, payload: Any) -> List[Dict[str, Any]]:
+        """Convert summary payloads into simplified slot dictionaries."""
+        slots: List[Dict[str, Any]] = []
+        for node in _collect_slot_dicts(payload):
+            start = (
+                node.get("startTime")
+                or node.get("beginTime")
+                or node.get("startHour")
+                or node.get("timeStart")
+                or node.get("timeBegin")
+                or node.get("start")
+                or node.get("begin")
+            )
+            end = (
+                node.get("endTime")
+                or node.get("finishTime")
+                or node.get("endHour")
+                or node.get("timeEnd")
+                or node.get("timeFinish")
+                or node.get("end")
+            )
+            remain_raw = (
+                node.get("remain")
+                or node.get("count")
+                or node.get("left")
+                or node.get("availableNumber")
+                or node.get("surplus")
+            )
+            capacity_raw = node.get("capacity") or node.get("total") or node.get("maxNumber")
+            status_raw = node.get("status") or node.get("state") or node.get("isFull")
+
+            remain_val: Optional[int] = None
+            if isinstance(remain_raw, (int, float)):
+                remain_val = int(remain_raw)
+            elif isinstance(remain_raw, str) and remain_raw.strip().lstrip("-").isdigit():
+                remain_val = int(remain_raw)
+
+            capacity_val: Optional[int] = None
+            if isinstance(capacity_raw, (int, float)):
+                capacity_val = int(capacity_raw)
+            elif isinstance(capacity_raw, str) and capacity_raw.strip().isdigit():
+                capacity_val = int(capacity_raw)
+
+            available_flag = node.get("isFull")
+            if isinstance(available_flag, str) and available_flag.isdigit():
+                available_flag = available_flag == "0"
+            available_bool = (
+                _bool(node.get("available"))
+                or _bool(node.get("status"))
+                or _bool(remain_val)
+                or not _bool(available_flag)
+            )
+
+            field_name = node.get("fieldName") or node.get("siteName") or node.get("name") or node.get("courtName")
+            area_name = node.get("areaName") or node.get("fieldAreaName") or node.get("venueFieldName") or node.get("zoneName")
+
+            slots.append(
+                {
+                    "start": str(start) if start is not None else "",
+                    "end": str(end) if end is not None else "",
+                    "field": str(field_name) if field_name is not None else "",
+                    "area": str(area_name) if area_name is not None else "",
+                    "remain": remain_val,
+                    "capacity": capacity_val,
+                    "available": available_bool,
+                    "status": "" if status_raw is None else str(status_raw),
+                }
+            )
+        return slots
+
     def order_immediately(self, intent: OrderIntent) -> Dict[str, Any]:
         if not intent.order_id:
             raise ValueError("order_immediately requires intent.order_id")

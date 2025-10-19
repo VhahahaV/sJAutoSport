@@ -1,0 +1,40 @@
+[build-system]
+requires = ["poetry-core"]
+build-backend = "poetry.core.masonry.api"
+
+[tool.poetry]
+name = "sja-booking-bot"
+version = "0.1.0"
+description = "SJTU Sports Booking Bot - OneBot 适配器"
+authors = ["Your Name <your.email@example.com>"]
+readme = "README.md"
+packages = [{include = "bot"}]
+
+[tool.poetry.dependencies]
+python = "^3.10"
+nonebot2 = "^2.0.0"
+nonebot-adapter-onebot = "^2.0.0"
+httpx = {extras = ["http2"], version = "^0.24.0"}
+rich = "^13.0.0"
+apscheduler = "^3.10.0"
+tzlocal = "^4.2"
+pycryptodome = "^3.18.0"
+asyncio = "^3.4.3"
+
+[tool.poetry.group.dev.dependencies]
+pytest = "^7.0.0"
+pytest-asyncio = "^0.21.0"
+black = "^23.0.0"
+isort = "^5.12.0"
+flake8 = "^6.0.0"
+
+[tool.poetry.scripts]
+sja-bot = "bot.main:main"
+
+[tool.black]
+line-length = 88
+target-version = ['py310']
+
+[tool.isort]
+profile = "black"
+line_length = 88
