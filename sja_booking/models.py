@@ -21,10 +21,13 @@ class EndpointSet:
     field_situation: str = "/manage/fieldDetail/queryFieldSituation"
     field_reserve: str = "/manage/fieldDetail/queryFieldReserveSituationIsFull"
     order_submit: str = "/venue/personal/orderImmediatelyPC"
-    order_confirm: str = "/venue/personal/ConfirmOrder"  # 新增下单确认端点
+    order_confirm: str = "/venue/personal/ConfirmOrder"
     appointment_overview: Optional[str] = "/appointment/disabled/getAppintmentAndSysUserbyUser"
     slot_summary: Optional[str] = "/manage/fieldDetail/queryFieldReserveSituationIsFull"
     ping: str = "/"
+    login_prepare: Optional[str] = None
+    login_submit: Optional[str] = None
+    login_captcha: Optional[str] = None
 
 
 @dataclass

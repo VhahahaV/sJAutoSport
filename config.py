@@ -7,7 +7,7 @@ from sja_booking.models import AuthConfig, BookingTarget, EndpointSet, MonitorPl
 
 # Base address for all API requests. Most SJTU deployments respond on this host.
 BASE_URL = "https://sports.sjtu.edu.cn"
-JSESSIONID = ""
+JSESSIONID=""
 # Authentication headers/cookies copied from a successful browser session.
 AUTH = AuthConfig(
     cookie=f"JSESSIONID={JSESSIONID}",  # Paste the full Cookie header value captured from DevTools.
@@ -85,6 +85,9 @@ ENDPOINTS = EndpointSet(
     appointment_overview="/appointment/disabled/getAppintmentAndSysUserbyUser",
     slot_summary="/manage/fieldDetail/queryFieldReserveSituationIsFull",
     ping="/",
+    login_prepare="https://jaccount.sjtu.edu.cn/jaccount/ulogin",
+    login_submit="https://jaccount.sjtu.edu.cn/jaccount/ulogin",
+    login_captcha="https://jaccount.sjtu.edu.cn/jaccount/captcha",
 )
 
 

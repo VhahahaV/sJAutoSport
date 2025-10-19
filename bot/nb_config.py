@@ -35,9 +35,12 @@ driver = get_driver()
 driver.config.nickname = os.getenv("BOT_NICKNAME", "体育预订助手")
 driver.config.command_prefix = os.getenv("BOT_COMMAND_PREFIX", "!")
 
-# OneBot 适配器配置
-driver.config.onebot_ws_url = os.getenv("ONEBOT_WS_URL", "ws://127.0.0.1:6700/ws")
-driver.config.onebot_http_url = os.getenv("ONEBOT_HTTP_URL", "http://127.0.0.1:6700")
+# OneBot / NTQQ 适配器配置
+ntqq_ws = os.getenv("NTQQ_WS_URL")
+ntqq_http = os.getenv("NTQQ_HTTP_URL")
+driver.config.onebot_ws_url = ntqq_ws or os.getenv("ONEBOT_WS_URL", "ws://127.0.0.1:6090/onebot/v11/ws")
+driver.config.onebot_http_url = ntqq_http or os.getenv("ONEBOT_HTTP_URL", "http://127.0.0.1:6090")
+driver.config.onebot_access_token = os.getenv("NTQQ_ACCESS_TOKEN") or os.getenv("ONEBOT_ACCESS_TOKEN")
 
 # 日志配置
 driver.config.log_level = os.getenv("LOG_LEVEL", "INFO")

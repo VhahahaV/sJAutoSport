@@ -16,19 +16,11 @@ from nonebot.params import CommandArg
 import sys
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
-from sja_booking.service import (
-    monitor_status, 
-    list_scheduled_jobs, 
-    cancel_scheduled_job,
-    stop_monitor,
-    get_verification_code,
-    submit_verification_code
-)
+from sja_booking.service import monitor_status, list_scheduled_jobs, cancel_scheduled_job, stop_monitor
 
 # 命令处理器
 system_status_cmd = on_command("系统状态", aliases={"status", "系统"}, priority=5)
 cleanup_cmd = on_command("清理", aliases={"cleanup", "清理任务"}, priority=5)
-verification_cmd = on_command("验证码", aliases={"verify", "验证"}, priority=5)
 help_cmd = on_command("管理帮助", aliases={"admin_help", "管理"}, priority=5)
 
 
@@ -153,43 +145,6 @@ async def handle_cleanup(bot: Bot, event: MessageEvent, args: Message = CommandA
         await cleanup_cmd.finish(f"❌ 清理任务出错: {str(e)}")
 
 
-@verification_cmd.handle()
-async def handle_verification(bot: Bot, event: MessageEvent, args: Message = CommandArg()):
-    """处理验证码命令"""
-    try:
-        # 解析参数
-        args_str = str(args).strip()
-        logger.info(f"收到验证码命令: {args_str}")
-        
-        if not args_str:
-            # 获取验证码
-            result = await get_verification_code()
-            
-            if result["success"]:
-                response = f"🔐 验证码信息:\n"
-                response += f"📝 消息: {result.get('message', 'N/A')}\n"
-                response += f"💡 使用 '验证码 123456' 提交验证码"
-                await verification_cmd.finish(response)
-            else:
-                await verification_cmd.finish(f"❌ 获取验证码失败: {result.get('message', '未知错误')}")
-        else:
-            # 提交验证码
-            code = args_str.strip()
-            result = await submit_verification_code(code)
-            
-            if result["success"]:
-                response = f"✅ 验证码提交成功!\n"
-                response += f"🔐 验证码: {code}\n"
-                response += f"📝 消息: {result.get('message', 'N/A')}"
-                await verification_cmd.finish(response)
-            else:
-                await verification_cmd.finish(f"❌ 验证码提交失败: {result.get('message', '未知错误')}")
-        
-    except Exception as e:
-        logger.error(f"验证码处理出错: {e}")
-        await verification_cmd.finish(f"❌ 验证码处理出错: {str(e)}")
-
-
 @help_cmd.handle()
 async def handle_admin_help(bot: Bot, event: MessageEvent):
     """处理管理帮助命令"""
@@ -199,7 +154,9 @@ async def handle_admin_help(bot: Bot, event: MessageEvent):
 📊 系统管理：
 • 系统状态 - 查看系统运行状态
 • 清理 [类型] - 清理任务（all/监控/任务）
-• 验证码 [代码] - 获取或提交验证码
+• 登录 - 启动登录流程，必要时由机器人发送验证码
+• 验证码 [代码] - （参见登录插件）提交验证码
+• 登录状态 - 查看当前 Cookie 状态
 
 📋 监控管理：
 • 开始监控 [参数] - 启动监控任务
@@ -237,6 +194,3 @@ async def handle_admin_help(bot: Bot, event: MessageEvent):
     """
     await help_cmd.finish(help_text)
 
-
-# 添加 sys 导入
-import sys
