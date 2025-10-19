@@ -9,6 +9,15 @@ Automation helpers for the Shanghai Jiao Tong University venue booking platform.
 - Multiple booking modes: one-off queries, continuous monitoring with optional auto-book, and daily scheduling.
 - Configurable defaults and presets maintained in `config.py`.
 
+## 📚 Documentation
+
+所有文档已按功能分类整理到 `docs/` 目录中：
+
+- **[使用指南](docs/guides/)** - 快速开始、自动抢票、机器人系统使用指南
+- **[项目总结](docs/summaries/)** - 功能实施总结、技术架构说明
+- **[API文档](docs/api/)** - 接口文档和开发指南
+- **[示例代码](docs/examples/)** - 使用示例和代码片段
+
 ## Repository Layout
 
 ```
@@ -197,7 +206,4 @@ This removes the need to memorise UUID-style `--venue-id` or `--field-type-id` v
 | 34 | 胡晓明网球场 | 网球 | `python main.py slots --preset 34` |
 
 > **提示**: 运行 `python main.py list` 可以查看最新的映射表和使用示例。
-
-
-
 

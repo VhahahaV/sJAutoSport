@@ -31,6 +31,7 @@ class SlotMonitor:
         self._venue_name: Optional[str] = None
         self._field_type_name: Optional[str] = None
         self._field_type_info: Optional[FieldType] = None
+        self._summary_fingerprints: Dict[str, Tuple] = {}
 
     # -------------------- public API --------------------
 
@@ -100,6 +101,55 @@ class SlotMonitor:
         results: List[Tuple[str, Slot]] = []
         for date_str in normalized_dates:
             token = date_tokens.get(date_str)
+            prev_fingerprint = self._summary_fingerprints.get(date_str)
+            summary_slots: List[Dict[str, Any]] = []
+            summary_fingerprint: Optional[Tuple[Tuple[str, str, str, str, Optional[int], Optional[int], bool, str], ...]] = None
+            summary_available = False
+
+            supports_summary = bool(getattr(self.api.endpoints, "field_reserve", None))
+            if not include_full and supports_summary:
+                try:
+                    summary_payload = self.api.query_reserve_summary(self._venue_id, self._field_type_id, date_str)
+                    summary_slots = self.api.normalize_slot_summary(summary_payload)
+                except Exception:  # pylint: disable=broad-except
+                    summary_slots = []
+                else:
+                    for slot_info in summary_slots:
+                        remain_value = slot_info.get("remain")
+                        if slot_info.get("available") and (remain_value is None or (isinstance(remain_value, int) and remain_value > 0)):
+                            summary_available = True
+                            break
+                    summary_fingerprint = tuple(
+                        sorted(
+                            (
+                                str(slot_info.get("field") or ""),
+                                str(slot_info.get("area") or ""),
+                                str(slot_info.get("start") or ""),
+                                str(slot_info.get("end") or ""),
+                                slot_info.get("remain"),
+                                slot_info.get("capacity"),
+                                bool(slot_info.get("available")),
+                                str(slot_info.get("status") or ""),
+                            )
+                            for slot_info in summary_slots
+                        )
+                    )
+
+            should_fetch_details = include_full or not summary_slots
+            if not include_full and summary_slots:
+                if summary_available:
+                    should_fetch_details = True
+                elif prev_fingerprint is not None and summary_fingerprint is not None and summary_fingerprint != prev_fingerprint:
+                    should_fetch_details = True
+                else:
+                    should_fetch_details = False
+
+            if summary_fingerprint is not None:
+                self._summary_fingerprints[date_str] = summary_fingerprint
+
+            if not should_fetch_details:
+                continue
+
             if self._field_type_info:
                 field_type = self._field_type_info
             else:
@@ -120,7 +170,7 @@ class SlotMonitor:
                     date_token=token,
                     original_field_type=field_type,
                 )
-            except Exception as exc:  # pylint: disable=broad-except
+            except Exception:  # pylint: disable=broad-except
                 continue
             for slot in slots:
                 if not include_full and not slot.available:

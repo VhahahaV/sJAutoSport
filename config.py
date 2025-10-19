@@ -16,6 +16,63 @@ AUTH = AuthConfig(
     password=None,
 )
 
+
+# =============================================================================
+# 默认预订目标配置 (BookingTarget)
+# =============================================================================
+# 此配置作为所有命令的默认基础设置，会被命令行参数覆盖
+# 
+# 使用场景：
+# 1. slots 命令 - 查询时间段可用性的默认目标
+#    python main.py slots  # 使用此默认配置
+#    python main.py slots --preset 13  # 覆盖为预设13的配置
+#
+# 2. monitor 命令 - 监控可用性的默认目标  
+#    python main.py monitor  # 使用此默认配置监控学生中心羽毛球
+#    python main.py monitor --preset 5  # 覆盖为预设5的配置
+#
+# 3. book-now 命令 - 立即预订的默认目标
+#    python main.py book-now  # 使用此默认配置尝试预订
+#    python main.py book-now --preset 1  # 覆盖为预设1的配置
+#
+# 4. schedule 命令 - 定时预订的默认目标
+#    python main.py schedule --hour 8 --minute 0  # 每天8:00使用此配置预订
+#
+# 5. service 模块 - 作为所有服务的默认参考目标
+#    - list_slots() 函数使用此配置作为基础
+#    - order_once() 函数使用此配置作为参考
+#    - 当没有提供 base_target 参数时，回退到此配置
+#
+# 参数说明：
+# - venue_id/venue_keyword: 场馆标识，优先使用ID，keyword用于搜索
+# - field_type_id/field_type_keyword: 运动类型标识，优先使用ID，keyword用于搜索  
+# - date_offset: 日期偏移量，7表示7天后（下周今天）
+# - start_hour: 期望的开始时间（24小时制）
+# - duration_hours: 预订时长（小时）
+# =============================================================================
+TARGET = BookingTarget(
+    venue_id=None,                    # 场馆ID（优先使用，为None时使用keyword搜索）
+    venue_keyword="学生中心",          # 场馆关键词，用于搜索匹配
+    field_type_id=None,               # 运动类型ID（优先使用，为None时使用keyword搜索）
+    field_type_keyword="羽毛球",       # 运动类型关键词，用于搜索匹配
+    field_type_code=None,             # 运动类型代码（可选，用于特殊匹配）
+    date_token=None,                  # 日期令牌（可选，用于特定日期查询）
+    use_all_dates=False,              # 是否使用所有可用日期（False时使用date_offset）
+    date_offset=7,                    # 日期偏移量：7天后（下周今天）
+    fixed_dates=[],                   # 固定日期列表（优先级最高）
+    start_hour=18,                    # 期望开始时间：18:00（下午6点）
+    duration_hours=1,                 # 预订时长：1小时
+)
+
+# Default monitor behaviour for the `monitor` and `schedule` commands.
+MONITOR_PLAN = MonitorPlan(
+    enabled=False,
+    interval_seconds=4*60,
+    auto_book=True,
+    notify_stdout=True,
+)
+
+
 # Default API endpoints discovered from the current platform version.
 ENDPOINTS = EndpointSet(
     current_user="/system/user/currentUser",
@@ -29,6 +86,7 @@ ENDPOINTS = EndpointSet(
     slot_summary="/manage/fieldDetail/queryFieldReserveSituationIsFull",
     ping="/",
 )
+
 
 # 加密相关配置
 ENCRYPTION_CONFIG = {
@@ -315,23 +373,6 @@ PRESET_TARGETS = [
     ),
 ]
 
-# Preferred booking target; override identifiers or keywords as needed.
-TARGET = BookingTarget(
-    venue_id=None,
-    venue_keyword="学生中心",
-    field_type_id=None,
-    field_type_keyword="羽毛球",
-    date_offset=7,  # Days from today to target when fixed_dates is empty.
-    start_hour=18,
-    duration_hours=1,
-)
 
-# Default monitor behaviour for the `monitor` and `schedule` commands.
-MONITOR_PLAN = MonitorPlan(
-    enabled=False,
-    interval_seconds=30,
-    auto_book=False,
-    notify_stdout=True,
-)
 
 __all__ = ["BASE_URL", "AUTH", "ENDPOINTS", "TARGET", "MONITOR_PLAN", "PRESET_TARGETS", "ENCRYPTION_CONFIG"]
