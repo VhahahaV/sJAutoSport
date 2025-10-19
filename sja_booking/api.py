@@ -238,6 +238,17 @@ class SportsAPI:
             raise RuntimeError("profile interface returned non-dict payload")
         return data
 
+    def check_auth_status(self) -> bool:
+        try:
+            data = self.check_login()
+        except Exception:
+            return False
+        if isinstance(data, dict):
+            code = data.get("code")
+            if code not in (None, 0, "0"):
+                return False
+        return True
+
     def ping(self) -> None:
         try:
             self._req("GET", self.endpoints.ping or "/")
@@ -631,7 +642,6 @@ class SportsAPI:
                 if keyword in ft.name:
                     return ft
         return field_types[0] if field_types else None
-
 
 
 

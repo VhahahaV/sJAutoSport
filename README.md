@@ -4,7 +4,7 @@ Automation helpers for the Shanghai Jiao Tong University venue booking platform.
 
 ## Features
 
-- Pure HTTP workflow (no browser automation).
+- Pure HTTP workflow (no browser automation) with optional credential login automation.
 - Modular components for API access, monitoring, scheduling, and endpoint discovery.
 - Multiple booking modes: one-off queries, continuous monitoring with optional auto-book, and daily scheduling.
 - Configurable defaults and presets maintained in `config.py`.
@@ -17,6 +17,14 @@ Automation helpers for the Shanghai Jiao Tong University venue booking platform.
 - **[项目总结](docs/summaries/)** - 功能实施总结、技术架构说明
 - **[API文档](docs/api/)** - 接口文档和开发指南
 - **[示例代码](docs/examples/)** - 使用示例和代码片段
+
+> 🚀 **全新 NapCatQQ 机器人适配**  
+> 项目内置的 QQ 交互默认使用 NapCatQQ（基于官方 NTQQ 的 OneBot 适配器）。请按照以下指引部署并配置：
+> - [Linux/Wine 部署指引](docs/guides/bot_setup_linux.md)
+> - [macOS/Wine 部署指引](docs/guides/bot_setup_macos.md)
+> - [Windows 部署指引](docs/guides/bot_setup_windows.md)
+>
+> NapCatQQ 启动后，验证码协同、余票查询、任务管理等功能即可通过 QQ 机器人直接完成。
 
 ## Repository Layout
 
@@ -40,6 +48,8 @@ README.md           # This file
 ```bash
 conda create -n sJAutoSport python=3.10
 pip install httpx[http2] apscheduler rich tzlocal pycryptodome
+# optional for OCR/encryption support
+pip install pytesseract opencv-python cryptography
 ```
 
 ## Configuration (`config.py`)
@@ -64,12 +74,33 @@ PRESET_TARGETS = [
 ]
 ```
 
+## Credential Management & Login
+
+Use the dedicated login/logout commands to maintain a valid session without manually copying cookies every day.
+
+1. **Supply credentials** via environment variables (`SJABOT_USER`, `SJABOT_PASS`) or CLI flags (`--username`, `--password`). Missing values trigger interactive prompts (password uses `getpass`).
+2. **Run the login flow**:
+   ```bash
+   python main.py login
+   python main.py login --username 2022xxxx --no-ocr  # 手动输入验证码
+   ```
+3. **Captcha resolution**
+   - OCR 首选：安装 `pytesseract`（配合 `opencv-python` 提升效果）。
+   - 当 OCR 置信度不足，CLI 会将验证码保存至临时文件并提示输入；传入 `--no-prompt` 可改为外部协同（如 QQ 机器人）。
+4. **持久化 Cookie**
+   - 登录成功后，Cookie 会（在提供 `SJABOT_SECRET` 且安装 `cryptography` 时）加密存储于 `~/.sja/credentials.json`。
+   - 其他命令自动加载该 Cookie；执行 `python main.py logout` 可清理持久化会话。
+
+> Optional packages: `pytesseract`, `opencv-python`, and `cryptography` are recommended for full automation but not mandatory.
+
 ## CLI Commands
 
 All functionality is exposed through `python main.py <command> [options]`.
 
 | Command       | Description                                             | Common options |
 | ------------- | ------------------------------------------------------- | -------------- |
+| `login`       | 执行账号密码登录，持久化 Cookie（默认使用 OCR+命令行兜底）  | `--username`, `--password`, `--no-ocr` |
+| `logout`      | 清理本地持久化 Cookie                                       | – |
 | `list`        | 显示场馆和运动类型的序号映射表（推荐使用）                | – |
 | `presets`     | Show the preset table defined in `config.PRESET_TARGETS`| – |
 | `catalog`     | Enumerate venues and field types with generated indices | `--pages`, `--size` |
@@ -154,6 +185,16 @@ All functionality is exposed through `python main.py <command> [options]`.
 
 This removes the need to memorise UUID-style `--venue-id` or `--field-type-id` values.
 
+### QQ 机器人交互速查
+
+部署 NapCatQQ 后，可直接在 QQ（私聊或群聊）使用以下指令与系统交互：
+
+- `登录` → 根据提示回复 `验证码 123456` 完成 Cookie 登录  
+- `登录状态` / `系统状态` / `任务列表` / `取消任务`：查看与管理后台任务  
+- `查询 preset=13` / `预订 preset=13 date=0 time=18`：查询并预订场馆  
+- `监控 preset=5 time=21 auto`：启动余票监控，可选 `auto` 自动抢票  
+- `管理帮助` / `系统帮助`：查看机器人全部命令说明
+
 ## Monitoring & Auto-booking
 
 - `SlotMonitor` resolves the venue/field (using IDs, keywords, or presets), fetches all available dates, and aggregates slot availability by time.
@@ -206,4 +247,3 @@ This removes the need to memorise UUID-style `--venue-id` or `--field-type-id` v
 | 34 | 胡晓明网球场 | 网球 | `python main.py slots --preset 34` |
 
 > **提示**: 运行 `python main.py list` 可以查看最新的映射表和使用示例。
-

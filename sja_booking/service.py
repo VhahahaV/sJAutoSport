@@ -2,11 +2,14 @@ from __future__ import annotations
 
 import asyncio
 import dataclasses
+import os
+import uuid
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 from .api import SportsAPI
+from .auth import AuthManager, AuthClient, AuthState, _cookie_header
 from .models import (
     BookingTarget,
     MonitorPlan,
@@ -94,6 +97,14 @@ def _get_preset(index: Optional[int]) -> Optional[PresetOption]:
 
 
 def _create_api() -> SportsAPI:
+    try:
+        stored = _auth_manager.load_cookie()
+        if stored:
+            cookie, _ = stored
+            if cookie:
+                CFG.AUTH.cookie = cookie
+    except Exception:  # pylint: disable=broad-except
+        pass
     return SportsAPI(
         CFG.BASE_URL,
         CFG.ENDPOINTS,
@@ -378,6 +389,23 @@ async def order_once(
 # 全局任务存储（初期使用内存字典）
 _active_monitors: Dict[str, Dict] = {}
 _scheduled_jobs: Dict[str, Dict] = {}
+_auth_manager = AuthManager()
+
+
+@dataclass
+class LoginSession:
+    session_id: str
+    client: AuthClient
+    state: AuthState
+    username: str
+    password: str
+    created_at: datetime
+    user_id: Optional[str] = None
+    attempts: int = 0
+
+
+_login_sessions: Dict[str, LoginSession] = {}
+_LOGIN_SESSION_TIMEOUT = timedelta(minutes=5)
 
 
 async def start_monitor(
@@ -769,59 +797,184 @@ async def _execute_scheduled_job(job_id: str) -> None:
 
 
 # =============================================================================
-# 验证码协作 API
+# 登录协同 API
 # =============================================================================
 
-async def get_verification_code() -> Dict[str, Any]:
-    """
-    获取验证码（如果需要）
-    
-    Returns:
-        验证码信息
-    """
+
+def _resolve_credentials(username: Optional[str], password: Optional[str]) -> Tuple[Optional[str], Optional[str]]:
+    resolved_user = username or getattr(CFG.AUTH, "username", None) or os.getenv("SJABOT_USER")
+    resolved_pass = password or getattr(CFG.AUTH, "password", None) or os.getenv("SJABOT_PASS")
+    return resolved_user, resolved_pass
+
+
+async def start_login_session(
+    *,
+    user_id: Optional[str] = None,
+    username: Optional[str] = None,
+    password: Optional[str] = None,
+) -> Dict[str, Any]:
+    """启动登录流程，必要时返回验证码图片。"""
+    resolved_user, resolved_pass = _resolve_credentials(username, password)
+    if not resolved_user or not resolved_pass:
+        return {"success": False, "message": "未配置登录凭据（用户名或密码缺失）"}
+
+    client = AuthClient(CFG.BASE_URL, CFG.ENDPOINTS, CFG.AUTH)
     try:
-        # 这里可以集成真实的验证码获取逻辑
-        # 例如：调用API获取验证码图片，OCR识别等
-        
-        # 模拟验证码获取
-        import random
-        code = str(random.randint(100000, 999999))
-        
-        # 保存验证码到数据库
-        db_manager = get_db_manager()
-        await db_manager.save_verification_code(code, "pending")
-        
+        state = await client.prepare()
+    except Exception as exc:  # pylint: disable=broad-except
+        await client.close()
+        return {"success": False, "message": f"登录初始化失败: {exc}"}
+
+    session_id = f"login_{uuid.uuid4().hex[:8]}"
+    session = LoginSession(
+        session_id=session_id,
+        client=client,
+        state=state,
+        username=resolved_user,
+        password=resolved_pass,
+        created_at=datetime.now(timezone.utc),
+        user_id=user_id,
+    )
+
+    if state.captcha_required:
+        try:
+            image = await client.fetch_captcha(state)
+        except Exception as exc:  # pylint: disable=broad-except
+            await client.close()
+            return {"success": False, "message": f"获取验证码失败: {exc}"}
+        _login_sessions[session_id] = session
         return {
-            "success": True, 
-            "message": f"验证码已生成: {code}",
-            "code": code,
-            "expires_in": 300  # 5分钟过期
+            "success": True,
+            "captcha_required": True,
+            "session_id": session_id,
+            "captcha_image": image,
+            "message": "已生成验证码，请在 5 分钟内输入",
         }
-    except Exception as e:
-        return {"success": False, "message": f"获取验证码失败: {str(e)}"}
 
-
-async def submit_verification_code(code: str) -> Dict[str, Any]:
-    """
-    提交验证码
-    
-    Args:
-        code: 验证码
-        
-    Returns:
-        提交结果
-    """
+    # 无验证码，直接尝试登录
     try:
-        # 标记验证码为已使用
-        db_manager = get_db_manager()
-        success = await db_manager.mark_verification_code_used(code)
-        
-        if success:
-            return {"success": True, "message": f"验证码 {code} 提交成功"}
-        else:
-            return {"success": False, "message": f"验证码 {code} 无效或已使用"}
-    except Exception as e:
-        return {"success": False, "message": f"提交验证码失败: {str(e)}"}
+        submit_resp = await client.submit(state, resolved_user, resolved_pass, None)
+        await client.follow_redirects(submit_resp)
+        cookie_header = _cookie_header(client._client.cookies)  # type: ignore[attr-defined]
+        if not cookie_header:
+            raise RuntimeError("登录失败，未获得 Cookie")
+
+        expires_at = datetime.now(timezone.utc) + timedelta(hours=8)
+        _auth_manager.save_cookie(cookie_header, expires_at)
+        CFG.AUTH.cookie = cookie_header
+
+        # 校验登录态
+        api = SportsAPI(CFG.BASE_URL, CFG.ENDPOINTS, CFG.AUTH)
+        try:
+            if not api.check_auth_status():
+                raise RuntimeError("登录成功但校验失败，请稍后重试")
+        finally:
+            api.close()
+
+        await client.close()
+        return {
+            "success": True,
+            "captcha_required": False,
+            "message": "登录成功",
+            "cookie": cookie_header,
+            "expires_at": expires_at.isoformat(),
+        }
+    except Exception as exc:  # pylint: disable=broad-except
+        await client.close()
+        return {"success": False, "message": f"登录失败: {exc}"}
+
+
+async def submit_login_session_code(session_id: str, code: str) -> Dict[str, Any]:
+    """提交验证码，继续登录流程。"""
+    session = _login_sessions.get(session_id)
+    if not session:
+        return {"success": False, "message": "登录会话不存在或已过期"}
+
+    if datetime.now(timezone.utc) - session.created_at > _LOGIN_SESSION_TIMEOUT:
+        await session.client.close()
+        del _login_sessions[session_id]
+        return {"success": False, "message": "登录会话已超时，请重新开始"}
+
+    session.attempts += 1
+    try:
+        submit_resp = await session.client.submit(session.state, session.username, session.password, code)
+        await session.client.follow_redirects(submit_resp)
+
+        cookie_header = _cookie_header(session.client._client.cookies)  # type: ignore[attr-defined]
+        if not cookie_header:
+            raise RuntimeError("验证码可能错误，未获取到 Cookie")
+
+        expires_at = datetime.now(timezone.utc) + timedelta(hours=8)
+        _auth_manager.save_cookie(cookie_header, expires_at)
+        CFG.AUTH.cookie = cookie_header
+
+        api = SportsAPI(CFG.BASE_URL, CFG.ENDPOINTS, CFG.AUTH)
+        try:
+            if not api.check_auth_status():
+                raise RuntimeError("框架未验证通过，请重新尝试")
+        finally:
+            api.close()
+
+        await session.client.close()
+        del _login_sessions[session_id]
+        return {
+            "success": True,
+            "message": "登录成功",
+            "cookie": cookie_header,
+            "expires_at": expires_at.isoformat(),
+        }
+    except Exception as exc:  # pylint: disable=broad-except
+        if session.attempts >= 3:
+            await session.client.close()
+            del _login_sessions[session_id]
+            return {"success": False, "message": f"验证码错误次数过多: {exc}"}
+
+        # 重试：重新获取验证码
+        try:
+            state = await session.client.prepare()
+            session.state = state
+            session.created_at = datetime.now(timezone.utc)
+            if state.captcha_required:
+                image = await session.client.fetch_captcha(state)
+                return {
+                    "success": False,
+                    "retry": True,
+                    "session_id": session_id,
+                    "captcha_image": image,
+                    "message": f"验证码错误，请重试 ({session.attempts}/3)",
+                }
+            await session.client.close()
+            del _login_sessions[session_id]
+            return {"success": False, "message": f"验证码错误: {exc}"}
+        except Exception as inner_exc:  # pylint: disable=broad-except
+            await session.client.close()
+            del _login_sessions[session_id]
+            return {"success": False, "message": f"验证码处理失败: {inner_exc}"}
+
+
+async def cancel_login_session(session_id: str) -> Dict[str, Any]:
+    """取消正在进行的登录流程。"""
+    session = _login_sessions.pop(session_id, None)
+    if not session:
+        return {"success": False, "message": "未找到对应的登录会话"}
+    try:
+        await session.client.close()
+    except Exception:  # pylint: disable=broad-except
+        pass
+    return {"success": True, "message": "已取消登录流程"}
+
+
+def login_status() -> Dict[str, Any]:
+    """获取当前登录状态信息。"""
+    record = _auth_manager.load_cookie()
+    if not record:
+        return {"success": False, "message": "尚未保存任何登录凭据"}
+    cookie, expires_at = record
+    return {
+        "success": True,
+        "cookie": cookie,
+        "expires_at": expires_at.isoformat(),
+    }
 
 
 # =============================================================================

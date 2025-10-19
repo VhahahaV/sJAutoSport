@@ -1,0 +1,36 @@
+# SJTU体育场馆自动预约系统依赖包
+# 核心依赖
+httpx>=0.24.0
+pydantic>=2.0.0
+rich>=13.0.0
+tzlocal>=5.0.0
+
+# HTTP/2 支持
+httpx[http2]>=0.24.0
+
+# 调度器
+apscheduler>=3.10.0
+
+# 图像处理（OCR功能）
+pytesseract>=0.3.10
+Pillow>=10.0.0
+
+# 浏览器自动化（备用方案）
+selenium>=4.15.0
+
+# 异步支持
+asyncio-mqtt>=0.13.0
+
+# 加密支持
+pycryptodome>=3.21.0
+
+# 开发依赖（可选）
+pytest>=7.0.0
+pytest-asyncio>=0.21.0
+black>=23.0.0
+flake8>=6.0.0
+mypy>=1.5.0
+
+# 文档生成（可选）
+sphinx>=7.0.0
+sphinx-rtd-theme>=1.3.0 

@@ -3,6 +3,8 @@ from __future__ import annotations
 import argparse
 import asyncio
 import dataclasses
+import getpass
+import os
 from datetime import time as dt_time, datetime, timedelta
 from typing import List, Optional
 
@@ -14,6 +16,8 @@ from .discovery import discover_endpoints
 from .models import BookingTarget, MonitorPlan, OrderIntent, PresetOption
 from .monitor import SlotMonitor
 from .scheduler import schedule_daily
+from .auth import AuthManager, perform_login
+from .ocr import solve_captcha_async
 from . import service
 
 
@@ -192,6 +196,45 @@ def cmd_list_venues_sports(console: Console) -> None:
     console.print("   [green]python main.py book-now --preset 1[/green]  # 立即预约学生中心篮球")
 
 
+def cmd_login(console: Console, cfg, args, auth_manager: AuthManager) -> None:
+    username = args.username or os.getenv("SJABOT_USER") or cfg.AUTH.username
+    if not username:
+        username = input("账号: ").strip()
+    password = args.password or os.getenv("SJABOT_PASS") or cfg.AUTH.password
+    if not password:
+        password = getpass.getpass("密码: ")
+
+    async def run_login() -> None:
+        if args.no_prompt:
+            async def _empty_fallback(_: bytes) -> str:
+                return ""
+
+            fallback_local = _empty_fallback
+        else:
+            fallback_local = None
+        result = await perform_login(
+            cfg.BASE_URL,
+            cfg.ENDPOINTS,
+            cfg.AUTH,
+            username,
+            password,
+            solver=None if args.no_ocr else solve_captcha_async,
+            fallback=fallback_local,
+        )
+        auth_manager.save_cookie(result.cookie_header, result.expires_at)
+        cfg.AUTH.cookie = result.cookie_header
+        console.print(
+            f"[green]登录成功，有效期至 {result.expires_at.astimezone().strftime('%Y-%m-%d %H:%M:%S')}[/green]"
+        )
+
+    asyncio.run(run_login())
+
+
+def cmd_logout(console: Console, auth_manager: AuthManager) -> None:
+    auth_manager.clear()
+    console.print("[green]已清除本地持久化 Cookie[/green]")
+
+
 def cmd_catalog(api: SportsAPI, console: Console, max_pages: int, page_size: int) -> None:
     index = 1
     table = Table(title="Venue / Sport Catalog", show_lines=False)
@@ -230,17 +273,64 @@ def cmd_catalog(api: SportsAPI, console: Console, max_pages: int, page_size: int
 
 def cmd_list_slots(api: SportsAPI, console: Console, base_target: BookingTarget, args) -> None:
     tgt = apply_target_overrides(base_target, args)
-
-    if hasattr(args, "start_hour") and args.start_hour is not None:
+    if getattr(args, "start_hour", None) is not None:
         start_time = f"{args.start_hour:02d}:00"
         duration = getattr(args, "duration_hours", tgt.duration_hours or 1) or 1
         end_hour = (args.start_hour + duration) % 24
         end_time = f"{end_hour:02d}:00"
         console.print(f"[cyan]查询时段: {start_time}-{end_time}[/cyan]")
 
+    preset_index = getattr(args, "preset", None)
+    explicit_field = any([preset_index, getattr(args, "field_type_id", None), getattr(args, "field_type_keyword", None)])
+
+    if not explicit_field:
+        venue_identifier = tgt.venue_id
+        if not venue_identifier and tgt.venue_keyword:
+            venue = api.find_venue(tgt.venue_keyword)
+            if venue:
+                venue_identifier = venue.id
+        if not venue_identifier:
+            console.print("[red]缺少场馆 ID，请使用 --preset 或 --venue-id[/red]")
+            return
+        detail = api.get_venue_detail(venue_identifier)
+        field_types = api.list_field_types(detail)
+        if not field_types:
+            console.print("[yellow]未在该场馆找到可预约项目[/yellow]")
+            return
+        printed_any = False
+        for field_type in field_types:
+            field_target = dataclasses.replace(tgt)
+            field_target.field_type_id = field_type.id
+            field_target.field_type_keyword = field_type.name
+            result = asyncio.run(
+                service.list_slots(
+                    preset=None,
+                    venue_id=venue_identifier,
+                    field_type_id=field_type.id,
+                    date=None,
+                    start_hour=getattr(args, "start_hour", None),
+                    show_full=args.show_full,
+                    base_target=field_target,
+                )
+            )
+            if not result.slots:
+                console.print(f"[yellow]{field_type.name}: 暂无可用时段[/yellow]")
+                continue
+            printed_any = True
+            render_monitor = SlotMonitor(api, result.resolved.target, MonitorPlan(enabled=False), console=console)
+            render_monitor._venue_name = result.resolved.venue_name  # type: ignore[attr-defined]
+            render_monitor._field_type_name = field_type.name  # type: ignore[attr-defined]
+            rows = [(entry.date, entry.slot) for entry in result.slots]
+            table = render_monitor.render_table(rows, include_full=args.show_full)
+            table.title = f"{result.resolved.venue_name or venue_identifier} - {field_type.name}"
+            console.print(table)
+        if not printed_any:
+            console.print("[yellow]未找到任何时间段[/yellow]")
+        return
+
     result = asyncio.run(
         service.list_slots(
-            preset=getattr(args, "preset", None),
+            preset=preset_index,
             venue_id=getattr(args, "venue_id", None),
             field_type_id=getattr(args, "field_type_id", None),
             date=None,
@@ -422,12 +512,30 @@ def run_cli(args) -> None:
     import config as CFG  # pylint: disable=import-outside-toplevel
 
     console = Console()
+    auth_manager = AuthManager()
+
+    stored_cookie = auth_manager.load_cookie()
+    if stored_cookie:
+        cookie_value, expires_at = stored_cookie
+        if cookie_value:
+            CFG.AUTH.cookie = cookie_value
+            console.log(
+                f"Loaded persisted cookie (expires {expires_at.astimezone().strftime('%Y-%m-%d %H:%M:%S')})"
+            )
 
     def api_factory() -> SportsAPI:
         return SportsAPI(CFG.BASE_URL, CFG.ENDPOINTS, CFG.AUTH, preset_targets=CFG.PRESET_TARGETS)
 
     global PRESETS  # pylint: disable=global-statement
     PRESETS = list(getattr(CFG, "PRESET_TARGETS", []))
+
+    if args.command == "login":
+        cmd_login(console, CFG, args, auth_manager)
+        return
+
+    if args.command == "logout":
+        cmd_logout(console, auth_manager)
+        return
 
     if args.command == "presets":
         cmd_list_presets(console)
@@ -476,6 +584,14 @@ def build_parser() -> argparse.ArgumentParser:
     sub.add_parser("debug-login", help="Check login status and show account information")
     p_discover = sub.add_parser("discover", help="Scan pages and JS files for candidate API endpoints")
     p_discover.add_argument("--base", type=str, help="Override BASE_URL when scanning")
+
+    p_login = sub.add_parser("login", help="Execute credential login and persist session cookie")
+    p_login.add_argument("--username", type=str, help="Account (fallback: SJABOT_USER env or config AUTH.username)")
+    p_login.add_argument("--password", type=str, help="Password (fallback: SJABOT_PASS env)")
+    p_login.add_argument("--no-ocr", action="store_true", help="Disable OCR and rely on manual input")
+    p_login.add_argument("--no-prompt", action="store_true", help="Skip CLI prompt fallback (for external collaboration)")
+
+    sub.add_parser("logout", help="Remove persisted cookies and re-authenticate next time")
 
     sub.add_parser("presets", help="List preset venue/sport mappings defined in config")
     sub.add_parser("list", help="List all available venues and sports with index numbers")

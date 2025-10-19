@@ -223,6 +223,7 @@ class SlotMonitor:
             show_lines=False,
         )
         table.add_column("Venue")
+        table.add_column("Field")
         table.add_column("Date")
         table.add_column("Time")
         table.add_column("Remaining")
@@ -279,7 +280,7 @@ class SlotMonitor:
                 return (hour * 60, label)
             return (10_000, label)
 
-        aggregates: Dict[Tuple[str, str, str, Optional[float]], int] = {}
+        aggregates: Dict[Tuple[str, str, str, str, Optional[float]], int] = {}
 
         for date_str, slot in slots:
             remain = slot.remain if slot.remain is not None else 0
@@ -287,24 +288,27 @@ class SlotMonitor:
                 continue
             time_label = _time_label(slot)
             price_val = slot.price
-            key = (venue_label, date_str, time_label, price_val)
+            field_label = slot.field_name or slot.area_name or slot.sub_site_id or "-"
+            key = (venue_label, field_label, date_str, time_label, price_val)
             aggregates[key] = aggregates.get(key, 0) + remain
 
         sorted_entries = sorted(
             aggregates.items(),
             key=lambda item: (
+                item[0][2],
                 item[0][1],
-                _time_sort_key(item[0][2]),
-                item[0][3] if item[0][3] is not None else float("inf"),
+                _time_sort_key(item[0][3]),
+                item[0][4] if item[0][4] is not None else float("inf"),
             ),
         )
 
-        for (venue_cell, date_cell, time_cell, price_val), total_remain in sorted_entries:
+        for (venue_cell, field_cell, date_cell, time_cell, price_val), total_remain in sorted_entries:
             if total_remain <= 0:
                 continue
             price_text = "-" if price_val is None else f"{price_val:.2f}"
             table.add_row(
                 venue_cell,
+                field_cell,
                 date_cell,
                 time_cell,
                 str(total_remain),

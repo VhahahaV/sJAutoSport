@@ -174,13 +174,17 @@ Desktop.ini
 # Linux
 *~
 
-# 测试文件
-test_*.py
-*_test.py
+# 测试及其产物（不提交，但本地可运行）
+test/
 tests/
+*_test.py
+test_*.py
+test_results/
+test_logs/
+*.test.log
 
 # 文档生成
-docs/
+# docs/
 site/
 
 # 备份文件
