@@ -7,7 +7,7 @@ from sja_booking.models import AuthConfig, BookingTarget, EndpointSet, MonitorPl
 
 # Base address for all API requests. Most SJTU deployments respond on this host.
 BASE_URL = "https://sports.sjtu.edu.cn"
-JSESSIONID=""
+JSESSIONID = ""
 # Authentication headers/cookies copied from a successful browser session.
 AUTH = AuthConfig(
     cookie=f"JSESSIONID={JSESSIONID}",  # Paste the full Cookie header value captured from DevTools.
@@ -51,16 +51,16 @@ AUTH = AuthConfig(
 # - duration_hours: 预订时长（小时）
 # =============================================================================
 TARGET = BookingTarget(
-    venue_id=None,                    # 场馆ID（优先使用，为None时使用keyword搜索）
     venue_keyword="学生中心",          # 场馆关键词，用于搜索匹配
-    field_type_id=None,               # 运动类型ID（优先使用，为None时使用keyword搜索）
     field_type_keyword="羽毛球",       # 运动类型关键词，用于搜索匹配
+    date_offset=7,                    # 日期偏移量：7天后（下周今天）
+    start_hour=18,                    # 期望开始时间：18:00（下午6点）
     field_type_code=None,             # 运动类型代码（可选，用于特殊匹配）
     date_token=None,                  # 日期令牌（可选，用于特定日期查询）
     use_all_dates=False,              # 是否使用所有可用日期（False时使用date_offset）
-    date_offset=7,                    # 日期偏移量：7天后（下周今天）
+    venue_id=None,                    # 场馆ID（优先使用，为None时使用keyword搜索）
+    field_type_id=None,               # 运动类型ID（优先使用，为None时使用keyword搜索）
     fixed_dates=[],                   # 固定日期列表（优先级最高）
-    start_hour=18,                    # 期望开始时间：18:00（下午6点）
     duration_hours=1,                 # 预订时长：1小时
 )
 
@@ -85,9 +85,6 @@ ENDPOINTS = EndpointSet(
     appointment_overview="/appointment/disabled/getAppintmentAndSysUserbyUser",
     slot_summary="/manage/fieldDetail/queryFieldReserveSituationIsFull",
     ping="/",
-    login_prepare="https://jaccount.sjtu.edu.cn/jaccount/ulogin",
-    login_submit="https://jaccount.sjtu.edu.cn/jaccount/ulogin",
-    login_captcha="https://jaccount.sjtu.edu.cn/jaccount/captcha",
 )
 
 
