@@ -63,11 +63,11 @@ winetricks corefonts            # 建议安装常用运行库
        "http": {
          "enable": true,
          "host": "0.0.0.0",
-         "port": 6090
+         "port": 6099
        },
        "websocket": {
          "enable": true,
-         "port": 6090,
+         "port": 6099,
          "access_token": ""
        }
      }
@@ -80,7 +80,7 @@ winetricks corefonts            # 建议安装常用运行库
    wine NapCat-CLI.exe start
    ```
    - 首次启动会弹出 QQ 窗口，请使用手机 QQ 扫码或短信验证。
-   - 终端提示 NapCat 已挂载后，HTTP/WebSocket 服务会监听在 6090 端口。
+   - 终端提示 NapCat 已挂载后，HTTP/WebSocket 服务会监听在 6099 端口。
 
 ---
 
@@ -93,8 +93,8 @@ winetricks corefonts            # 建议安装常用运行库
    ```
    `.env` 示例：
    ```ini
-   NTQQ_WS_URL=ws://127.0.0.1:6090/onebot/v11/ws
-   NTQQ_HTTP_URL=http://127.0.0.1:6090
+   NTQQ_WS_URL=ws://127.0.0.1:6099/onebot/v11/ws
+   NTQQ_HTTP_URL=http://127.0.0.1:6099
    NTQQ_ACCESS_TOKEN=              # 若 NapCat 启用了 token，请保持一致
    ```
 

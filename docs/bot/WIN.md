@@ -46,11 +46,11 @@ NapCat-CLI.exe install --qq-path "C:\Program Files\Tencent\QQNT"
     "http": {
       "enable": true,
       "host": "0.0.0.0",
-      "port": 6090
+      "port": 6099
     },
     "websocket": {
       "enable": true,
-      "port": 6090,
+      "port": 6099,
       "access_token": ""
     }
   }
@@ -84,8 +84,8 @@ NapCat-CLI.exe start
 
    `.env` 示例：
    ```ini
-   NTQQ_WS_URL=ws://127.0.0.1:6090/onebot/v11/ws
-   NTQQ_HTTP_URL=http://127.0.0.1:6090
+   NTQQ_WS_URL=ws://127.0.0.1:6099/onebot/v11/ws
+   NTQQ_HTTP_URL=http://127.0.0.1:6099
    NTQQ_ACCESS_TOKEN=        # 若在 NapCat 中设置了 token，这里也需填写
    ```
 
