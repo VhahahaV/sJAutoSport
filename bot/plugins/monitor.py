@@ -17,6 +17,7 @@ import sys
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 from sja_booking.service import start_monitor, stop_monitor, monitor_status
+from bot import services as bot_services
 
 # 命令处理器
 start_monitor_cmd = on_command("开始监控", aliases={"monitor", "监控"}, priority=5)
@@ -43,6 +44,11 @@ async def handle_start_monitor(bot: Bot, event: MessageEvent, args: Message = Co
         monitor_id = f"monitor_{int(datetime.now().timestamp())}"
         
         # 调用服务层
+        target_users = params.get("target_users")
+        exclude_users = params.get("exclude_users")
+
+        base_target = bot_services.build_target(None, target_users, exclude_users)
+
         result = await start_monitor(
             monitor_id=monitor_id,
             preset=params.get("preset"),
@@ -52,6 +58,9 @@ async def handle_start_monitor(bot: Bot, event: MessageEvent, args: Message = Co
             start_hour=params.get("start_hour"),
             interval_seconds=params.get("interval_seconds", 240),
             auto_book=params.get("auto_book", False),
+            base_target=base_target,
+            target_users=target_users,
+            exclude_users=exclude_users,
         )
         
         if result["success"]:
@@ -63,6 +72,10 @@ async def handle_start_monitor(bot: Bot, event: MessageEvent, args: Message = Co
             response += f"🕐 目标时间: {params.get('start_hour', '任意时间')}\n"
             response += f"⏱️ 检查间隔: {params.get('interval_seconds', 240)}秒\n"
             response += f"🤖 自动预订: {'是' if params.get('auto_book', False) else '否'}\n"
+            if target_users:
+                response += f"👥 指定用户: {', '.join(target_users)}\n"
+            if exclude_users:
+                response += f"🚫 排除用户: {', '.join(exclude_users)}\n"
             response += f"📊 状态: {monitor_info['status']}\n"
             response += f"🕐 启动时间: {monitor_info['start_time']}"
             await start_monitor_cmd.finish(response)
@@ -90,6 +103,7 @@ async def handle_monitor_preset(bot: Bot, event: MessageEvent, groups: tuple = R
             preset=preset_id,
             interval_seconds=240,
             auto_book=False,
+            base_target=bot_services.build_target(None, None, None),
         )
         
         if result["success"]:
@@ -210,6 +224,8 @@ def parse_monitor_args(args_str: str) -> dict:
         (r"start=(\d+)", "start_hour"),
         (r"interval=(\d+)", "interval_seconds"),
         (r"auto", "auto_book"),
+        (r"users=([^\s]+)", "target_users"),
+        (r"exclude=([^\s]+)", "exclude_users"),
     ]
     
     for pattern, param_name in patterns:
@@ -219,46 +235,65 @@ def parse_monitor_args(args_str: str) -> dict:
                 params[param_name] = True
             else:
                 value = match.group(1)
-                if param_name in ["preset", "date", "start_hour", "interval_seconds"]:
-                    params[param_name] = int(value)
-                else:
-                    params[param_name] = value
-    
+            if param_name in ["preset", "date", "start_hour", "interval_seconds"]:
+                params[param_name] = int(value)
+            elif param_name in ["target_users", "exclude_users"]:
+                params[param_name] = [item.strip() for item in value.split(',') if item.strip()]
+            else:
+                params[param_name] = value
+
     return params
 
 
 def format_monitor_status(monitor_info: dict, brief: bool = False) -> str:
     """格式化监控状态"""
+    base_target = monitor_info.get("base_target")
+    if base_target and isinstance(base_target, dict):
+        target_users = base_target.get("target_users", [])
+        exclude_users = base_target.get("exclude_users", [])
+    else:
+        target_users = getattr(base_target, "target_users", []) if base_target else []
+        exclude_users = getattr(base_target, "exclude_users", []) if base_target else []
+
     if brief:
         response = f"🆔 {monitor_info['id']}\n"
         response += f"📊 状态: {monitor_info['status']}\n"
         response += f"🏟️ 场馆: 预设{monitor_info.get('preset', 'N/A')}\n"
         response += f"⏱️ 间隔: {monitor_info.get('interval_seconds', 240)}秒\n"
         response += f"🤖 自动预订: {'是' if monitor_info.get('auto_book', False) else '否'}\n"
+        if target_users:
+            response += f"👥 用户: {', '.join(target_users)}\n"
+        if exclude_users:
+            response += f"🚫 排除: {', '.join(exclude_users)}\n"
         response += f"🕐 启动时间: {monitor_info.get('start_time', 'N/A')}\n"
         response += f"🔍 最后检查: {monitor_info.get('last_check', 'N/A')}\n"
         response += f"📋 找到时间段: {len(monitor_info.get('found_slots', []))}个\n"
         response += f"🔄 预订尝试: {monitor_info.get('booking_attempts', 0)}次\n"
         response += f"✅ 成功预订: {monitor_info.get('successful_bookings', 0)}次"
-    else:
-        response = f"📊 监控详细信息\n\n"
-        response += f"🆔 监控ID: {monitor_info['id']}\n"
-        response += f"📊 状态: {monitor_info['status']}\n"
-        response += f"🏟️ 场馆: 预设{monitor_info.get('preset', 'N/A')}\n"
-        response += f"📅 目标日期: {monitor_info.get('date', '所有可用日期')}\n"
-        response += f"🕐 目标时间: {monitor_info.get('start_hour', '任意时间')}\n"
-        response += f"⏱️ 检查间隔: {monitor_info.get('interval_seconds', 240)}秒\n"
-        response += f"🤖 自动预订: {'是' if monitor_info.get('auto_book', False) else '否'}\n"
-        response += f"🕐 启动时间: {monitor_info.get('start_time', 'N/A')}\n"
-        response += f"🔍 最后检查: {monitor_info.get('last_check', 'N/A')}\n"
-        response += f"📋 找到时间段: {len(monitor_info.get('found_slots', []))}个\n"
-        response += f"🔄 预订尝试: {monitor_info.get('booking_attempts', 0)}次\n"
-        response += f"✅ 成功预订: {monitor_info.get('successful_bookings', 0)}次\n"
-        
-        if monitor_info.get('last_error'):
-            response += f"❌ 最后错误: {monitor_info['last_error']}\n"
-        
-        if monitor_info.get('last_booking_error'):
-            response += f"❌ 最后预订错误: {monitor_info['last_booking_error']}\n"
-    
+        return response
+
+    response = f"📊 监控详细信息\n\n"
+    response += f"🆔 监控ID: {monitor_info['id']}\n"
+    response += f"📊 状态: {monitor_info['status']}\n"
+    response += f"🏟️ 场馆: 预设{monitor_info.get('preset', 'N/A')}\n"
+    response += f"📅 目标日期: {monitor_info.get('date', '所有可用日期')}\n"
+    response += f"🕐 目标时间: {monitor_info.get('start_hour', '任意时间')}\n"
+    response += f"⏱️ 检查间隔: {monitor_info.get('interval_seconds', 240)}秒\n"
+    response += f"🤖 自动预订: {'是' if monitor_info.get('auto_book', False) else '否'}\n"
+    if target_users:
+        response += f"👥 指定用户: {', '.join(target_users)}\n"
+    if exclude_users:
+        response += f"🚫 排除用户: {', '.join(exclude_users)}\n"
+    response += f"🕐 启动时间: {monitor_info.get('start_time', 'N/A')}\n"
+    response += f"🔍 最后检查: {monitor_info.get('last_check', 'N/A')}\n"
+    response += f"📋 找到时间段: {len(monitor_info.get('found_slots', []))}个\n"
+    response += f"🔄 预订尝试: {monitor_info.get('booking_attempts', 0)}次\n"
+    response += f"✅ 成功预订: {monitor_info.get('successful_bookings', 0)}次\n"
+
+    if monitor_info.get('last_error'):
+        response += f"❌ 最后错误: {monitor_info['last_error']}\n"
+
+    if monitor_info.get('last_booking_error'):
+        response += f"❌ 最后预订错误: {monitor_info['last_booking_error']}\n"
+
     return response

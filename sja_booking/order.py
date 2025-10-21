@@ -98,12 +98,17 @@ class OrderManager:
             encrypted_key = self._rsa_encrypt(aes_key)
             encrypted_timestamp = self._rsa_encrypt(timestamp)
             # 构建请求头
-            # 获取完整的Cookie字符串
+            # 统一从当前 httpx 客户端获取 Cookie（多用户模式下与当前用户绑定），并确保含有 JSESSIONID
+            # 完全对齐单用户版本：若配置中提供了 cookie，则优先使用（常见为 "JSESSIONID=..."）
             cookie_str = ""
-            if self.api.auth.cookie:
-                cookie_str = self.api.auth.cookie
-            else:
-                # 从httpx客户端获取Cookie
+            try:
+                if getattr(self.api, "auth", None) and getattr(self.api.auth, "users", None):
+                    user0 = self.api.auth.users[0]
+                    if user0 and user0.cookie:
+                        cookie_str = user0.cookie
+            except Exception:
+                cookie_str = ""
+            if not cookie_str:
                 cookies = self.api.client.cookies
                 cookie_parts = []
                 for name, value in cookies.items():
@@ -112,16 +117,20 @@ class OrderManager:
             
             headers = {
                 "Accept": "application/json, text/plain, */*",
+                # 与单用户版本保持一致：application/json;charset=UTF-8
                 "Content-Type": "application/json;charset=UTF-8",
                 "sid": encrypted_key,
                 "tim": encrypted_timestamp,
                 "Cookie": cookie_str,
                 "Origin": "https://sports.sjtu.edu.cn",
                 "Referer": "https://sports.sjtu.edu.cn/pc/",
+                "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Safari/537.36",
             }
             
             # 发送请求
             url = f"{self.api.base_url}{self.api.endpoints.order_confirm}"
+            # 发送加密的载荷作为原始数据
+            # 与单用户版本保持一致：发送原始加密字符串到 body
             response = self.api.client.post(url, data=encrypted_body, headers=headers, timeout=10)
             
             # 解析响应
@@ -132,28 +141,27 @@ class OrderManager:
             
             # 检查HTTP状态码
             if response.status_code != 200:
-                error_msg = result.get('msg', result.get('message', f'HTTP {response.status_code}'))
+                text_preview = response.text[:400]
+                error_msg = result.get('msg', result.get('message', text_preview if text_preview else f'HTTP {response.status_code}')) if isinstance(result, dict) else text_preview
                 return False, f"HTTP错误 {response.status_code}: {error_msg}", result
             
             # 检查业务逻辑错误
             if isinstance(result, dict):
                 code = result.get('code')
                 msg = result.get('msg', result.get('message', ''))
-                
-                # 检查各种错误情况
-                if code == 401:
+
+                # 统一规范化消息
+                if code in (401, "401"):
                     return False, f"登录超时: {msg}", result
-                elif code == 403:
+                if code in (403, "403"):
                     return False, f"权限不足: {msg}", result
-                elif code == 404:
+                if code in (404, "404"):
                     return False, f"资源不存在: {msg}", result
-                elif code == 500:
+                if code in (500, "500"):
                     return False, f"服务器错误: {msg}", result
-                elif code is not None and code != 0 and code != "0":
+                if code not in (None, 0, "0"):
                     return False, f"业务错误 {code}: {msg}", result
-                
-                # 检查消息内容中的错误信息
-                if msg and any(keyword in msg for keyword in ['失败', '错误', '超时', '登录', '权限', '不存在', '已满', '不可用']):
+                if msg and any(keyword in msg for keyword in ['失败', '错误', '超时', '登录', '权限', '不存在', '已满', '不可用', '非法']):
                     return False, f"业务错误: {msg}", result
             
             # 检查是否有订单ID（成功下单的标识）
@@ -216,13 +224,14 @@ class OrderManager:
             OrderResult: 下单结果
         """
         current_slot = slot
+        backoff_base = 2.0
         for attempt in range(max_retries):
             print(f"下单尝试 {attempt + 1}/{max_retries}")
             
             # 构建下单载荷
             payload = self._build_order_payload(current_slot, preset, date, actual_start, actual_end)
             
-            # 发送下单请求
+            # 发送下单请求（加密 ConfirmOrder 流程）
             success, message, response = self._send_order_request(payload)
             
             if success:
@@ -234,6 +243,38 @@ class OrderManager:
                 )
             
             print(f"下单失败: {message}")
+
+            # 回退策略：尝试使用简单提交接口 order_immediately（与旧版一致）
+            try:
+                # 从 slot.raw 中尽可能获取 orderId；否则退化为 slot.slot_id
+                order_identifier = None
+                if isinstance(current_slot.raw, dict):
+                    order_identifier = current_slot.raw.get("orderId") or current_slot.raw.get("id")
+                if not order_identifier:
+                    order_identifier = current_slot.slot_id
+                if order_identifier:
+                    intent = OrderIntent(
+                        venue_id=preset.venue_id,
+                        field_type_id=preset.field_type_id,
+                        slot_id=current_slot.slot_id,
+                        date=date,
+                        order_id=str(order_identifier),
+                        payload=current_slot.raw,
+                    )
+                    resp = self.api.order_immediately(intent)
+                    if isinstance(resp, dict):
+                        code = resp.get("code")
+                        msg = resp.get("msg") or resp.get("message") or ""
+                        if code in (0, "0") and not any(k in str(msg) for k in ["非法", "失败", "错误"]):
+                            return OrderResult(
+                                success=True,
+                                message=msg or "下单成功（简易提交）",
+                                order_id=resp.get("orderId") or resp.get("data") or str(order_identifier),
+                                raw_response=resp,
+                            )
+            except Exception as _:
+                # 忽略回退异常，进入刷新逻辑
+                pass
             
             # 如果不是最后一次尝试，刷新时间段数据
             if attempt < max_retries - 1:
@@ -244,6 +285,9 @@ class OrderManager:
                     print("时间段数据已刷新，准备重试...")
                 else:
                     print("无法刷新时间段数据，使用原始数据重试...")
+                delay_seconds = backoff_base + attempt * 2.0 + random.uniform(0.3, 0.8)
+                print(f"等待 {delay_seconds:.1f} 秒后再次尝试...")
+                time.sleep(delay_seconds)
         
         return OrderResult(
             success=False,

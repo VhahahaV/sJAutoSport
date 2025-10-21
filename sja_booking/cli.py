@@ -6,18 +6,19 @@ import dataclasses
 import getpass
 import os
 from datetime import time as dt_time, datetime, timedelta
-from typing import List, Optional
+from typing import Any, Dict, List, Optional
 
 from rich.console import Console
 from rich.table import Table
 
 from .api import SportsAPI
 from .discovery import discover_endpoints
-from .models import BookingTarget, MonitorPlan, OrderIntent, PresetOption
+from .models import AuthConfig, BookingTarget, MonitorPlan, OrderIntent, PresetOption, UserAuth
 from .monitor import SlotMonitor
 from .scheduler import schedule_daily
 from .auth import AuthManager, perform_login
 from .ocr import solve_captcha_async
+from .multi_user import MultiUserManager, UserBookingResult
 from . import service
 
 
@@ -100,36 +101,173 @@ def apply_target_overrides(target: BookingTarget, args) -> BookingTarget:
     return tgt
 
 
-def cmd_debug_login(api: SportsAPI, console: Console) -> None:
+def _print_user_info(console: Console, header: Optional[str], payload: Dict[str, Any]) -> None:
+    if header:
+        console.print(f"\n[bold blue]{header}[/bold blue]")
+
+    # 首先检查原始响应的状态码
+    response_code = payload.get("code") if isinstance(payload, dict) else None
+    if response_code not in (None, 0, "0"):
+        console.print("[red]❌ 登录失败[/red]")
+        console.print("[yellow]系统提醒：查询用户信息失败，请重新登录[/yellow]")
+        return
+
+    # 然后提取用户信息
+    user_info: Dict[str, Any] = payload
+    for key in ("data", "user", "userInfo", "result", "payload"):
+        candidate = user_info.get(key) if isinstance(user_info, dict) else None
+        if isinstance(candidate, dict) and candidate:
+            user_info = candidate
+            break
+
+    if not isinstance(user_info, dict):
+        console.print("[red]❌ 登录失败[/red]")
+        console.print("[yellow]系统提醒：查询用户信息失败，请重新登录[/yellow]")
+        return
+
+    # 检查是否包含用户详细信息
+    has_user_details = any(key in user_info for key in ['userName', 'loginName', 'createTime', 'phonenumber'])
+    
+    if not has_user_details:
+        # 如果只有基本状态信息，说明认证成功但无法获取详细信息
+        console.print("[green]✅ 登录成功[/green]")
+        console.print("[yellow]⚠️  注意：认证有效但无法获取用户详细信息[/yellow]")
+        console.print("[blue]💡 这通常表示Cookie有效，可以正常使用其他功能（如下单）[/blue]")
+        return
+
+    console.print("[green]✅ 登录成功[/green]")
+
+    create_time = user_info.get("createTime", "未知")
+    login_name = user_info.get("loginName", "未知")
+    user_name = user_info.get("userName", "未知")
+    phone = user_info.get("phonenumber", "未知")
+    sex = user_info.get("sex", "未知")
+    code_value = user_info.get("code", "未知")
+    class_no = user_info.get("classNo", "未知")
+    admin = user_info.get("admin", False)
+
+    sex_display = "男" if sex == "0" else "女" if sex == "1" else "未知"
+
+    dept_name = "未知"
+    if isinstance(user_info.get("dept"), dict):
+        dept_name = user_info["dept"].get("deptName", "未知")
+
+    roles: List[str] = []
+    if isinstance(user_info.get("roles"), list):
+        for role in user_info["roles"]:
+            if isinstance(role, dict) and "roleName" in role:
+                roles.append(str(role["roleName"]))
+
+    table = Table(title="🎉 用户信息", show_header=True, header_style="bold magenta")
+    table.add_column("项目", style="cyan", width=15)
+    table.add_column("信息", style="green")
+
+    table.add_row("创建时间", str(create_time))
+    table.add_row("登录名", str(login_name))
+    table.add_row("姓名", str(user_name))
+    table.add_row("手机号", str(phone))
+    table.add_row("性别", sex_display)
+    table.add_row("部门", str(dept_name))
+    table.add_row("学号", str(code_value))
+    table.add_row("班级", str(class_no))
+    table.add_row("管理员", "是" if admin else "否")
+
+    if roles:
+        table.add_row("角色", "\n".join(roles))
+    else:
+        table.add_row("角色", "无")
+
+    console.print(table)
+
+
+def cmd_show_user_info(api: SportsAPI, console: Console, *, header: Optional[str] = None) -> None:
     try:
         payload = api.check_login()
     except Exception as exc:  # pylint: disable=broad-except
-        console.print(f"[red]Login check failed: {exc}[/red]")
+        console.print(f"[red]Login check failed: {exc}")
         return
-    user_info = payload
+
     if isinstance(payload, dict):
-        for key in ("data", "user", "userInfo", "result", "payload"):
-            candidate = payload.get(key)
-            if isinstance(candidate, dict) and candidate:
-                user_info = candidate
-                break
-    table = Table(title="Account Info", show_lines=False)
-    table.add_column("Field")
-    table.add_column("Value")
-    shown = False
-    if isinstance(user_info, dict):
-        for key in ("realName", "name", "userName", "username", "code", "deptName", "mobile", "email"):
-            if key in user_info and user_info[key] not in (None, ""):
-                table.add_row(key, str(user_info[key]))
-                shown = True
-    if isinstance(payload, dict) and "code" in payload:
-        table.add_row("raw.code", str(payload["code"]))
-        shown = True
-    if shown:
-        console.print(table)
+        _print_user_info(console, header, payload)
     else:
-        console.print("[yellow]No printable user fields found. Raw payload follows:[/yellow]")
+        console.print("[yellow]Unexpected response format[/yellow]")
         console.print(payload)
+
+
+def cmd_list_users(api: SportsAPI, console: Console) -> None:
+    """列出所有配置的用户"""
+    from rich.table import Table
+    
+    users = api.auth.users
+    if not users:
+        console.print("[yellow]没有配置的用户[/yellow]")
+        return
+    
+    console.print("[bold blue]已配置的用户列表:[/bold blue]")
+    table = Table(show_header=True, header_style="bold magenta")
+    table.add_column("昵称", style="cyan")
+    table.add_column("用户名", style="green")
+    table.add_column("密码已保存", style="yellow")
+    table.add_column("状态", style="blue")
+    
+    # 检查当前活跃的 Cookie
+    from .auth import AuthManager
+    auth_manager = AuthManager()
+    cookie_map, active_username = auth_manager.load_all_cookies()
+
+    for user in users:
+        if not user.username:
+            continue
+            
+        password_saved = "是" if user.password else "否"
+        record = cookie_map.get(user.username)
+
+        if record:
+            if active_username == user.username:
+                status = "🟢 当前活跃"
+            else:
+                status = "🟠 已保存"
+        else:
+            status = "⚪ 未登录"
+        
+        table.add_row(
+            user.nickname,
+            user.username,
+            password_saved,
+            status
+        )
+    
+    console.print(table)
+
+
+def cmd_switch_user(api: SportsAPI, console: Console, nickname: str) -> None:
+    """切换到指定用户"""
+    multi_user_manager = MultiUserManager(api.auth, console)
+    user = multi_user_manager.get_user_by_nickname(nickname)
+    
+    if not user:
+        console.print(f"[red]用户 '{nickname}' 不存在[/red]")
+        return
+    
+    if not (user.cookie or user.token):
+        console.print(f"[red]用户 '{nickname}' 没有有效的认证信息[/red]")
+        return
+    
+    api.switch_to_user(user)
+    console.print(f"[green]已切换到用户: {nickname}[/green]")
+
+
+def cmd_validate_users(api: SportsAPI, console: Console) -> None:
+    """验证用户配置"""
+    multi_user_manager = MultiUserManager(api.auth, console)
+    is_valid, errors = multi_user_manager.validate_users()
+    
+    if is_valid:
+        console.print("[green]✅ 所有用户配置有效[/green]")
+    else:
+        console.print("[red]❌ 用户配置存在问题:[/red]")
+        for error in errors:
+            console.print(f"[red]  - {error}[/red]")
 
 
 def cmd_list_venues(api: SportsAPI, console: Console, keyword: Optional[str], page: int, size: int) -> None:
@@ -197,21 +335,35 @@ def cmd_list_venues_sports(console: Console) -> None:
 
 
 def cmd_login(console: Console, cfg, args, auth_manager: AuthManager) -> None:
-    username = args.username or os.getenv("SJABOT_USER") or cfg.AUTH.username
-    if not username:
-        username = input("账号: ").strip()
-    password = args.password or os.getenv("SJABOT_PASS") or cfg.AUTH.password
-    if not password:
-        password = getpass.getpass("密码: ")
+    from .user_manager import select_user, get_login_credentials, save_user_to_config
+    
+    # 如果通过命令行参数提供了用户名和密码，直接使用
+    login_user: Optional["UserAuth"] = None  # type: ignore[name-defined]
+    if args.username and args.password:
+        username = args.username
+        password = args.password
+    else:
+        # 使用用户管理流程
+        selected_user, is_new_user = select_user(cfg.AUTH)
+        if selected_user is None and not is_new_user:
+            console.print("[yellow]取消登录[/yellow]")
+            return
+        
+        try:
+            username, password, login_user_candidate = get_login_credentials(selected_user)
+            login_user = login_user_candidate
+        except ValueError as e:
+            console.print(f"[red]{e}[/red]")
+            return
 
     async def run_login() -> None:
         if args.no_prompt:
             async def _empty_fallback(_: bytes) -> str:
                 return ""
-
             fallback_local = _empty_fallback
         else:
             fallback_local = None
+            
         result = await perform_login(
             cfg.BASE_URL,
             cfg.ENDPOINTS,
@@ -221,8 +373,36 @@ def cmd_login(console: Console, cfg, args, auth_manager: AuthManager) -> None:
             solver=None if args.no_ocr else solve_captcha_async,
             fallback=fallback_local,
         )
-        auth_manager.save_cookie(result.cookie_header, result.expires_at)
-        cfg.AUTH.cookie = result.cookie_header
+        
+        # 保存 Cookie 到持久化存储
+        nickname_for_store: Optional[str] = None
+        if login_user and login_user.nickname:
+            nickname_for_store = login_user.nickname
+        else:
+            nickname_for_store = username.split("@")[0]
+
+        auth_manager.save_cookie(
+            result.cookie_header,
+            result.expires_at,
+            username=username,
+            nickname=nickname_for_store,
+        )
+
+        # 更新内存中的用户配置与状态
+        if login_user:
+            login_user.cookie = result.cookie_header
+            login_user.username = username
+            if login_user.nickname != "临时用户":
+                save_user_to_config(login_user, cfg.AUTH)
+        else:
+            try:
+                for user in getattr(cfg.AUTH, "users", []) or []:
+                    if user.username == username:
+                        user.cookie = result.cookie_header
+                        break
+            except Exception:
+                pass
+        
         console.print(
             f"[green]登录成功，有效期至 {result.expires_at.astimezone().strftime('%Y-%m-%d %H:%M:%S')}[/green]"
         )
@@ -233,6 +413,12 @@ def cmd_login(console: Console, cfg, args, auth_manager: AuthManager) -> None:
 def cmd_logout(console: Console, auth_manager: AuthManager) -> None:
     auth_manager.clear()
     console.print("[green]已清除本地持久化 Cookie[/green]")
+
+
+def cmd_user_management(console: Console, cfg) -> None:
+    """用户管理命令"""
+    from .user_manager import show_user_management_menu
+    show_user_management_menu(cfg.AUTH)
 
 
 def cmd_catalog(api: SportsAPI, console: Console, max_pages: int, page_size: int) -> None:
@@ -360,6 +546,32 @@ def cmd_monitor(api: SportsAPI, console: Console, base_target: BookingTarget, pl
         monitor_plan.interval_seconds = args.interval
     if args.auto_book is not None:
         monitor_plan.auto_book = args.auto_book
+    
+    # 处理多用户参数
+    if hasattr(args, 'users') and args.users:
+        tgt.target_users = [nickname.strip() for nickname in args.users.split(',')]
+        console.print(f"[green]指定预订用户: {tgt.target_users}[/green]")
+    
+    if hasattr(args, 'exclude_users') and args.exclude_users:
+        tgt.exclude_users = [nickname.strip() for nickname in args.exclude_users.split(',')]
+        console.print(f"[green]排除用户: {tgt.exclude_users}[/green]")
+    
+    # 处理优先时间段设置
+    if hasattr(args, 'pt') and args.pt:
+        try:
+            # 解析优先时间段，如 "15,16,17" -> [15, 16, 17]
+            preferred_hours = [int(h.strip()) for h in args.pt.split(',')]
+            monitor_plan.preferred_hours = preferred_hours
+            console.print(f"[green]设置优先时间段: {preferred_hours}[/green]")
+        except ValueError:
+            console.print(f"[red]无效的优先时间段格式: {args.pt}，应为 '15,16,17' 格式[/red]")
+            return
+    elif monitor_plan.preferred_hours:
+        # 显示配置文件中的优先时间段
+        console.print(f"[green]使用配置的优先时间段: {monitor_plan.preferred_hours}[/green]")
+    else:
+        console.print(f"[yellow]没有设置优先时间段[/yellow]")
+    
     monitor_plan.enabled = True
     monitor = SlotMonitor(api, tgt, monitor_plan, console=console)
     monitor.monitor_loop()
@@ -458,32 +670,99 @@ def cmd_order(api: SportsAPI, console: Console, args) -> None:
     import config as CFG  # pylint: disable=import-outside-toplevel
 
     base_target = getattr(CFG, "TARGET", BookingTarget())
-    try:
-        result = asyncio.run(
-            service.order_once(
-                preset=args.preset,
-                date=args.date,
-                start_time=args.start_time,
-                end_time=getattr(args, "end_time", None),
-                base_target=base_target,
-            )
-        )
-    except ValueError as exc:
-        console.print(f"[red]Input error: {exc}[/red]")
+    
+    # 处理多用户参数
+    if hasattr(args, 'users') and args.users:
+        base_target.target_users = [nickname.strip() for nickname in args.users.split(',')]
+        console.print(f"[green]指定预订用户: {base_target.target_users}[/green]")
+    
+    if hasattr(args, 'exclude_users') and args.exclude_users:
+        base_target.exclude_users = [nickname.strip() for nickname in args.exclude_users.split(',')]
+        console.print(f"[green]排除用户: {base_target.exclude_users}[/green]")
+    
+    # 多用户预订
+    multi_user_manager = MultiUserManager(api.auth, console)
+    target_users = multi_user_manager.get_users_for_booking(base_target)
+    
+    if not target_users:
+        console.print("[red]没有可用的用户进行预订[/red]")
         return
-    except Exception as exc:  # pylint: disable=broad-except
-        console.print(f"[red]Order failed: {exc}[/red]")
-        return
+    
+    if len(target_users) == 1:
+        # 单用户预订（向后兼容）
+        user = target_users[0]
+        api.switch_to_user(user)
+        console.print(f"[blue]使用用户: {user.nickname}[/blue]")
+        
+        try:
+                result = asyncio.run(
+                    service.order_once(
+                        preset=args.preset,
+                        date=args.date,
+                        start_time=args.start_time,
+                        end_time=getattr(args, "end_time", None),
+                        base_target=base_target,
+                        user=user.username or user.nickname,
+                    )
+                )
+        except ValueError as exc:
+            console.print(f"[red]Input error: {exc}[/red]")
+            return
+        except Exception as exc:  # pylint: disable=broad-except
+            console.print(f"[red]Order failed: {exc}[/red]")
+            return
 
-    if result.success:
-        console.print("[bold green]Order succeeded[/bold green]")
-        console.print(f"Message: {result.message}")
-        if result.order_id:
-            console.print(f"Order ID: {result.order_id}")
+        if result.success:
+            console.print("[bold green]Order succeeded[/bold green]")
+            console.print(f"Message: {result.message}")
+            if result.order_id:
+                console.print(f"Order ID: {result.order_id}")
+        else:
+            console.print(f"[red]Order failed: {result.message}")
+            if result.raw_response:
+                console.print(f"[yellow]Raw response:[/yellow] {result.raw_response}")
     else:
-        console.print(f"[red]Order failed: {result.message}")
-        if result.raw_response:
-            console.print(f"[yellow]Raw response:[/yellow] {result.raw_response}")
+        # 多用户预订
+        console.print(f"[blue]为 {len(target_users)} 个用户进行预订: {[u.nickname for u in target_users]}[/blue]")
+        
+        results = []
+        for user in target_users:
+            console.print(f"\n[blue]--- 为用户 {user.nickname} 预订 ---[/blue]")
+            api.switch_to_user(user)
+            
+            try:
+                result = asyncio.run(
+                    service.order_once(
+                        preset=args.preset,
+                        date=args.date,
+                        start_time=args.start_time,
+                        end_time=getattr(args, "end_time", None),
+                        base_target=base_target,
+                        user=user.username or user.nickname,
+                    )
+                )
+                
+                user_result = UserBookingResult(
+                    nickname=user.nickname,
+                    success=result.success,
+                    message=result.message,
+                    order_id=result.order_id,
+                    error=result.message if not result.success else None
+                )
+                results.append(user_result)
+                
+            except Exception as exc:
+                user_result = UserBookingResult(
+                    nickname=user.nickname,
+                    success=False,
+                    message="预订失败",
+                    error=str(exc)
+                )
+                results.append(user_result)
+                console.print(f"[red]用户 {user.nickname} 预订失败: {exc}[/red]")
+        
+        # 打印汇总结果
+        multi_user_manager.print_user_status(results)
 
 
 def cmd_schedule(api_factory, console: Console, base_target: BookingTarget, plan: MonitorPlan, args) -> None:
@@ -492,7 +771,126 @@ def cmd_schedule(api_factory, console: Console, base_target: BookingTarget, plan
     def job() -> None:
         api = api_factory()
         try:
-            cmd_book_now(api, console, base_target, args)
+            print(f"[DEBUG] 开始执行预订任务...")
+            print(f"[DEBUG] 目标配置: preset={getattr(args, 'preset', None)}, start_hour={getattr(args, 'start_hour', None)}")
+            print(f"[DEBUG] 日期偏移: {getattr(args, 'date_offset', None)}")
+            
+            # 使用 order 模块的逻辑
+            import config as CFG
+            from .multi_user import MultiUserManager, UserBookingResult
+            
+            # 处理多用户参数
+            if hasattr(args, 'users') and args.users:
+                base_target.target_users = [nickname.strip() for nickname in args.users.split(',')]
+                console.print(f"[green]指定预订用户: {base_target.target_users}[/green]")
+            
+            if hasattr(args, 'exclude_users') and args.exclude_users:
+                base_target.exclude_users = [nickname.strip() for nickname in args.exclude_users.split(',')]
+                console.print(f"[green]排除用户: {base_target.exclude_users}[/green]")
+            
+            # 多用户预订
+            multi_user_manager = MultiUserManager(api.auth, console)
+            target_users = multi_user_manager.get_users_for_booking(base_target)
+            
+            if not target_users:
+                console.print("[red]没有可用的用户进行预订[/red]")
+                return
+            
+            # 计算目标日期
+            from datetime import datetime, timedelta
+            date_offset = getattr(args, 'date_offset', 1)
+            target_date = datetime.now() + timedelta(days=date_offset)
+            date_str = target_date.strftime("%Y-%m-%d")
+            
+            # 计算开始时间
+            start_hour = getattr(args, 'start_hour', 18)
+            start_time = str(start_hour)
+            
+            print(f"[DEBUG] 预订日期: {date_str}")
+            print(f"[DEBUG] 预订时间: {start_time}:00")
+            print(f"[DEBUG] 目标用户: {[u.nickname for u in target_users]}")
+            
+            if len(target_users) == 1:
+                # 单用户预订
+                user = target_users[0]
+                api.switch_to_user(user)
+                console.print(f"[blue]使用用户: {user.nickname}[/blue]")
+                
+                try:
+                        result = asyncio.run(
+                        service.order_once(
+                            preset=args.preset,
+                            date=date_str,
+                            start_time=start_time,
+                            end_time=None,
+                            base_target=base_target,
+                            user=user.username or user.nickname,
+                        )
+                        )
+                except ValueError as exc:
+                    console.print(f"[red]Input error: {exc}[/red]")
+                    return
+                except Exception as exc:
+                    console.print(f"[red]Order failed: {exc}[/red]")
+                    return
+
+                if result.success:
+                    console.print("[bold green]Order succeeded[/bold green]")
+                    console.print(f"Message: {result.message}")
+                    if result.order_id:
+                        console.print(f"Order ID: {result.order_id}")
+                else:
+                    console.print(f"[red]Order failed: {result.message}")
+                    if result.raw_response:
+                        console.print(f"[yellow]Raw response:[/yellow] {result.raw_response}")
+            else:
+                # 多用户预订
+                console.print(f"[blue]为 {len(target_users)} 个用户进行预订: {[u.nickname for u in target_users]}[/blue]")
+                
+                results = []
+                for user in target_users:
+                    console.print(f"\n[blue]--- 为用户 {user.nickname} 预订 ---[/blue]")
+                    api.switch_to_user(user)
+                    
+                    try:
+                        result = asyncio.run(
+                            service.order_once(
+                                preset=args.preset,
+                                date=date_str,
+                                start_time=start_time,
+                                end_time=None,
+                                base_target=base_target,
+                                user=user.nickname,
+                            )
+                        )
+                        
+                        user_result = UserBookingResult(
+                            nickname=user.nickname,
+                            success=result.success,
+                            message=result.message,
+                            order_id=result.order_id,
+                            error=result.raw_response if not result.success else None,
+                        )
+                        results.append(user_result)
+                        
+                    except Exception as exc:
+                        console.print(f"[red]用户 {user.nickname} 预订失败: {exc}[/red]")
+                        user_result = UserBookingResult(
+                            nickname=user.nickname,
+                            success=False,
+                            message=f"异常: {exc}",
+                            order_id=None,
+                            error=str(exc),
+                        )
+                        results.append(user_result)
+                
+                # 打印汇总结果
+                multi_user_manager.print_user_status(results)
+                
+        except Exception as e:
+            print(f"[DEBUG] 预订任务异常: {e}")
+            import traceback
+            traceback.print_exc()
         finally:
             api.close()
 
@@ -514,14 +912,57 @@ def run_cli(args) -> None:
     console = Console()
     auth_manager = AuthManager()
 
-    stored_cookie = auth_manager.load_cookie()
-    if stored_cookie:
-        cookie_value, expires_at = stored_cookie
-        if cookie_value:
-            CFG.AUTH.cookie = cookie_value
-            console.log(
-                f"Loaded persisted cookie (expires {expires_at.astimezone().strftime('%Y-%m-%d %H:%M:%S')})"
+    stored_cookies, active_username = auth_manager.load_all_cookies()
+    if stored_cookies:
+        # 如果配置中没有用户，基于持久化信息创建一个临时用户
+        if not getattr(CFG.AUTH, "users", None):
+            from .models import UserAuth
+
+            key = (
+                active_username
+                if active_username and active_username in stored_cookies
+                else next(iter(stored_cookies.keys()))
             )
+            record = stored_cookies[key]
+            nickname = record.get("nickname") or (
+                (record.get("username") or "默认用户").split("@")[0]
+                if record.get("username")
+                else "默认用户"
+            )
+            CFG.AUTH.users = [
+                UserAuth(
+                    nickname=nickname,
+                    cookie=record["cookie"],
+                    username=record.get("username"),
+                )
+            ]
+            console.log(
+                f"Loaded persisted cookie for {nickname} (expires {record['expires_at'].astimezone().strftime('%Y-%m-%d %H:%M:%S')})"
+            )
+        else:
+            logged_users: set[str] = set()
+            for user in CFG.AUTH.users:
+                record = None
+                if user.username and user.username in stored_cookies:
+                    record = stored_cookies[user.username]
+                    logged_users.add(user.username)
+                elif "__default__" in stored_cookies and not user.username:
+                    record = stored_cookies["__default__"]
+
+                if record:
+                    user.cookie = record["cookie"]
+                    label = user.nickname or user.username or "默认用户"
+                    console.log(
+                        f"Loaded persisted cookie for {label} (expires {record['expires_at'].astimezone().strftime('%Y-%m-%d %H:%M:%S')})"
+                    )
+
+            # 如果存在其他持久化用户但当前配置未跟踪，尝试记录日志提醒
+            for username, record in stored_cookies.items():
+                if username == "__default__":
+                    continue
+                if username not in logged_users and username != active_username:
+                    label = record.get("nickname") or username
+                    console.log(f"Persisted cookie available for {label} (expires {record['expires_at'].astimezone().strftime('%Y-%m-%d %H:%M:%S')})")
 
     def api_factory() -> SportsAPI:
         return SportsAPI(CFG.BASE_URL, CFG.ENDPOINTS, CFG.AUTH, preset_targets=CFG.PRESET_TARGETS)
@@ -537,6 +978,42 @@ def run_cli(args) -> None:
         cmd_logout(console, auth_manager)
         return
 
+    if args.command == "user-management":
+        cmd_user_management(console, CFG)
+        return
+
+    if args.command in ("userinfo", "debug-login"):
+        cookie_map, active_username = auth_manager.load_all_cookies()
+        if not cookie_map:
+            console.print("[yellow]尚未保存任何登录凭据[/yellow]")
+            return
+
+        from .models import UserAuth, AuthConfig
+
+        for idx, (key, record) in enumerate(cookie_map.items(), start=1):
+            label = record.get("nickname") or record.get("username") or "默认用户"
+            if key == "__default__":
+                label = f"{label} (默认)"
+            if active_username and key == active_username:
+                label = f"{label} [当前活跃]"
+
+            expires_at = record.get("expires_at")
+            if isinstance(expires_at, datetime):
+                label = f"{label} (expires {expires_at.astimezone().strftime('%Y-%m-%d %H:%M:%S')})"
+
+            temp_user = UserAuth(
+                nickname=record.get("nickname") or label,
+                cookie=record.get("cookie"),
+                username=record.get("username"),
+            )
+            temp_auth = AuthConfig(users=[temp_user])
+            temp_api = SportsAPI(CFG.BASE_URL, CFG.ENDPOINTS, temp_auth, preset_targets=CFG.PRESET_TARGETS)
+            try:
+                cmd_show_user_info(temp_api, console, header=f"用户 {idx}: {label}")
+            finally:
+                temp_api.close()
+        return
+
     if args.command == "presets":
         cmd_list_presets(console)
         return
@@ -547,8 +1024,12 @@ def run_cli(args) -> None:
 
     api = api_factory()
     try:
-        if args.command == "debug-login":
-            cmd_debug_login(api, console)
+        if args.command == "list-users":
+            cmd_list_users(api, console)
+        elif args.command == "switch-user":
+            cmd_switch_user(api, console, args.nickname)
+        elif args.command == "validate-users":
+            cmd_validate_users(api, console)
         elif args.command == "discover":
             base_url = getattr(args, "base", None) or CFG.BASE_URL
             discover_endpoints(base_url, console=console)
@@ -581,7 +1062,14 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="SJTU Sports Automation CLI")
     sub = parser.add_subparsers(dest="command")
 
-    sub.add_parser("debug-login", help="Check login status and show account information")
+    sub.add_parser("userinfo", help="Show account information for stored users", aliases=["debug-login"])
+    
+    # 多用户相关命令
+    sub.add_parser("list-users", help="List all configured users")
+    p_switch_user = sub.add_parser("switch-user", help="Switch to a specific user")
+    p_switch_user.add_argument("nickname", type=str, help="User nickname to switch to")
+    sub.add_parser("validate-users", help="Validate user configuration")
+    
     p_discover = sub.add_parser("discover", help="Scan pages and JS files for candidate API endpoints")
     p_discover.add_argument("--base", type=str, help="Override BASE_URL when scanning")
 
@@ -592,6 +1080,8 @@ def build_parser() -> argparse.ArgumentParser:
     p_login.add_argument("--no-prompt", action="store_true", help="Skip CLI prompt fallback (for external collaboration)")
 
     sub.add_parser("logout", help="Remove persisted cookies and re-authenticate next time")
+    
+    sub.add_parser("user-management", help="Manage saved users (add, delete, view)")
 
     sub.add_parser("presets", help="List preset venue/sport mappings defined in config")
     sub.add_parser("list", help="List all available venues and sports with index numbers")
@@ -626,6 +1116,9 @@ def build_parser() -> argparse.ArgumentParser:
     add_target_args(p_monitor)
     p_monitor.add_argument("--interval", type=int, help="Polling interval in seconds")
     p_monitor.add_argument("--auto-book", action="store_true", help="Attempt booking automatically when possible")
+    p_monitor.add_argument("--pt", "--preferred-times", type=str, help="Preferred hours for booking (e.g., '15,16,17')")
+    p_monitor.add_argument("--users", type=str, help="Comma-separated list of user nicknames to book for (e.g., 'user1,user2')")
+    p_monitor.add_argument("--exclude-users", type=str, help="Comma-separated list of user nicknames to exclude")
 
     p_book = sub.add_parser("book-now", help="Run a single booking attempt")
     add_target_args(p_book)
@@ -641,5 +1134,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_order.add_argument("--date", type=str, required=True, help="Date: 0-8 (offset) or YYYY-MM-DD format")
     p_order.add_argument("--start-time", "--st", type=str, default="21", help="Start time: 0-23 (hour) or HH:MM format")
     p_order.add_argument("--end-time", type=str, help="End time: 0-23 (hour) or HH:MM format (auto: start+1h if not provided)")
+    p_order.add_argument("--users", type=str, help="Comma-separated list of user nicknames to book for (e.g., 'user1,user2')")
+    p_order.add_argument("--exclude-users", type=str, help="Comma-separated list of user nicknames to exclude")
 
     return parser

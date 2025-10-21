@@ -27,7 +27,15 @@ def load_env() -> None:
 def configure_driver(driver) -> None:
     """Apply configuration values to the initialized NoneBot driver."""
     driver.config.nickname = os.getenv("BOT_NICKNAME", "体育预订助手")
-    driver.config.command_prefix = os.getenv("BOT_COMMAND_PREFIX", "!")
+
+    command_prefix = os.getenv("BOT_COMMAND_PREFIX", "!").strip()
+    command_starts = {"/"}
+    if command_prefix:
+        command_starts.add(command_prefix)
+    # 允许无前缀命令，但仅在事件预处理器确认是 @ 机器人的情况下放行
+    command_starts.add("")
+    driver.config.command_prefix = command_prefix or "/"
+    driver.config.command_start = command_starts
 
     ntqq_ws = os.getenv("NTQQ_WS_URL")
     ntqq_http = os.getenv("NTQQ_HTTP_URL")

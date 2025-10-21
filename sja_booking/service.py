@@ -9,13 +9,10 @@ from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 from .api import SportsAPI
+from urllib.parse import urlparse
+
 from .auth import AuthManager, AuthClient, AuthState, _cookie_header
-from .models import (
-    BookingTarget,
-    MonitorPlan,
-    PresetOption,
-    Slot,
-)
+from .models import BookingTarget, MonitorPlan, PresetOption, Slot, UserAuth
 from .monitor import SlotMonitor
 from .order import OrderManager, OrderResult
 from .database import get_db_manager
@@ -96,21 +93,71 @@ def _get_preset(index: Optional[int]) -> Optional[PresetOption]:
     raise ValueError(f"unknown preset index: {index}")
 
 
-def _create_api() -> SportsAPI:
+def _find_user(identifier: Optional[str]) -> Optional[UserAuth]:
+    if not identifier:
+        return None
+    for user in getattr(CFG.AUTH, "users", []) or []:
+        if identifier in {user.nickname, user.username}:
+            return user
+    return None
+
+
+def _sync_users_from_store(store: Dict[str, Dict[str, Any]]) -> None:
+    users: List[UserAuth] = getattr(CFG.AUTH, "users", []) or []
+
+    for user in users:
+        entry = None
+        if user.username and user.username in store:
+            entry = store[user.username]
+        elif user.nickname and user.nickname in store:
+            entry = store[user.nickname]
+        elif user.username is None and "__default__" in store:
+            entry = store["__default__"]
+        if entry:
+            user.cookie = entry.get("cookie") or user.cookie
+            if entry.get("nickname"):
+                user.nickname = entry["nickname"]
+
+    for key, entry in store.items():
+        username = entry.get("username")
+        nickname = entry.get("nickname") or (
+            username.split("@")[0] if username and "@" in username else username or key
+        )
+        if username and not any(u.username == username for u in users):
+            users.append(UserAuth(nickname=nickname or "用户", username=username, cookie=entry.get("cookie")))
+        elif key == "__default__" and not username:
+            if not users:
+                users.append(UserAuth(nickname=nickname or "默认用户", username=None, cookie=entry.get("cookie")))
+
+    CFG.AUTH.users = users
+
+
+def _create_api(*, active_user: Optional[str] = None) -> SportsAPI:
     try:
-        stored = _auth_manager.load_cookie()
-        if stored:
-            cookie, _ = stored
-            if cookie:
-                CFG.AUTH.cookie = cookie
+        cookies_map, active_username = _auth_manager.load_all_cookies()
+        if cookies_map:
+            _sync_users_from_store(cookies_map)
+        else:
+            active_username = None
     except Exception:  # pylint: disable=broad-except
-        pass
-    return SportsAPI(
+        active_username = None
+
+    api = SportsAPI(
         CFG.BASE_URL,
         CFG.ENDPOINTS,
         CFG.AUTH,
         preset_targets=list(_iter_presets()),
     )
+
+    target_identifier = active_user or active_username
+    target_user = _find_user(target_identifier)
+    if target_user:
+        try:
+            api.switch_to_user(target_user)
+        except Exception:  # pylint: disable=broad-except
+            pass
+
+    return api
 
 
 def _parse_date_input(value: str) -> str:
@@ -322,8 +369,9 @@ def _order_once_sync(
     start_time: str,
     end_time: Optional[str],
     base_target: Optional[BookingTarget],
+    user: Optional[str],
 ) -> OrderResult:
-    api = _create_api()
+    api = _create_api(active_user=user)
     manager = OrderManager(api, CFG.ENCRYPTION_CONFIG)
     try:
         parsed_date = _parse_date_input(date)
@@ -351,6 +399,7 @@ async def order_once(
     start_time: str,
     end_time: Optional[str] = None,
     base_target: Optional[BookingTarget] = None,
+    user: Optional[str] = None,
 ) -> OrderResult:
     result = await asyncio.to_thread(
         _order_once_sync,
@@ -359,6 +408,7 @@ async def order_once(
         start_time=start_time,
         end_time=end_time,
         base_target=base_target,
+        user=user,
     )
     
     # 保存预订记录到数据库
@@ -374,11 +424,11 @@ async def order_once(
                 start_time=start_time,
                 end_time=end_time or f"{int(start_time.split(':')[0]) + 1}:00",
                 status="success" if result.success else "failed",
-                message=result.message
+                message=result.message if not user else f"[{user}] {result.message}",
             )
         except Exception as e:
             print(f"保存预订记录失败: {e}")
-    
+
     return result
 
 
@@ -402,6 +452,7 @@ class LoginSession:
     created_at: datetime
     user_id: Optional[str] = None
     attempts: int = 0
+    nickname: Optional[str] = None
 
 
 _login_sessions: Dict[str, LoginSession] = {}
@@ -419,6 +470,8 @@ async def start_monitor(
     interval_seconds: int = 240,
     auto_book: bool = False,
     base_target: Optional[BookingTarget] = None,
+    target_users: Optional[List[str]] = None,
+    exclude_users: Optional[List[str]] = None,
 ) -> Dict[str, Any]:
     """
     启动监控任务
@@ -441,6 +494,12 @@ async def start_monitor(
         return {"success": False, "message": f"监控任务 {monitor_id} 已存在"}
     
     # 创建监控任务信息
+    working_target = dataclasses.replace(base_target or getattr(CFG, "TARGET", BookingTarget()))
+    if target_users is not None:
+        working_target.target_users = list(target_users)
+    if exclude_users is not None:
+        working_target.exclude_users = list(exclude_users)
+
     monitor_info = {
         "id": monitor_id,
         "preset": preset,
@@ -450,7 +509,7 @@ async def start_monitor(
         "start_hour": start_hour,
         "interval_seconds": interval_seconds,
         "auto_book": auto_book,
-        "base_target": base_target,
+        "base_target": working_target,
         "status": "starting",
         "start_time": datetime.now().isoformat(),
         "last_check": None,
@@ -711,29 +770,83 @@ async def _auto_book_from_monitor(monitor_id: str, slots: List[Dict]) -> None:
     monitor_info = _active_monitors.get(monitor_id)
     if not monitor_info:
         return
-    
+
     monitor_info["booking_attempts"] += 1
-    
-    # 选择第一个可用时间段进行预订
-    for slot in slots:
-        if slot.get("available", False):
+    monitor_info.setdefault("last_booking_results", [])
+
+    base_target = monitor_info.get("base_target") or BookingTarget()
+    target_users = list(getattr(base_target, "target_users", []) or [])
+    exclude_users = set(getattr(base_target, "exclude_users", []) or [])
+
+    available_users = [u for u in getattr(CFG.AUTH, "users", []) or [] if u.cookie]
+    if target_users:
+        user_sequence = [u for u in available_users if u.nickname in target_users]
+    else:
+        user_sequence = [u for u in available_users if u.nickname not in exclude_users]
+
+    if not user_sequence:
+        user_sequence = available_users[:1]
+
+    # 逐个用户尝试预订
+    for user_index, user in enumerate(user_sequence, 1):
+        last_message = "未尝试"
+        success_for_user = False
+        user_id = user.username or user.nickname
+
+        for slot_index, slot in enumerate(slots, 1):
+            if not slot.get("available", False):
+                continue
+
             try:
-                # 执行预订
                 result = await order_once(
                     preset=monitor_info["preset"],
                     date=slot.get("date", ""),
                     start_time=slot.get("start", ""),
                     end_time=slot.get("end", ""),
-                    base_target=monitor_info["base_target"],
+                    base_target=base_target,
+                    user=user_id,
                 )
-                
+                last_message = result.message
+
+                monitor_info["last_booking_results"].append(
+                    {
+                        "user": user.nickname,
+                        "username": user.username,
+                        "slot": {
+                            "date": slot.get("date"),
+                            "start": slot.get("start"),
+                            "end": slot.get("end"),
+                        },
+                        "success": result.success,
+                        "message": result.message,
+                        "order_id": result.order_id,
+                    }
+                )
+
                 if result.success:
                     monitor_info["successful_bookings"] += 1
                     monitor_info["status"] = "completed"
+                    success_for_user = True
                     break
-                    
-            except Exception as e:
-                monitor_info["last_booking_error"] = str(e)
+
+            except Exception as exc:  # pylint: disable=broad-except
+                last_message = str(exc)
+                monitor_info["last_booking_error"] = last_message
+
+            await asyncio.sleep(min(6.0, 2.0 + slot_index * 1.5))
+
+        if not success_for_user:
+            monitor_info["last_booking_results"].append(
+                {
+                    "user": user.nickname,
+                    "username": user.username,
+                    "success": False,
+                    "message": last_message,
+                }
+            )
+
+        if user_index < len(user_sequence):
+            await asyncio.sleep(2.5)
 
 
 async def _schedule_worker(job_id: str) -> None:
@@ -781,16 +894,35 @@ async def _execute_scheduled_job(job_id: str) -> None:
     job_info["run_count"] += 1
     
     try:
-        # 执行预订
-        result = await order_once(
-            preset=job_info["preset"],
-            date=job_info["date"] or "0",  # 默认今天
-            start_time=job_info["start_hour"] or "18",
-            base_target=job_info["base_target"],
-        )
-        
-        if result.success:
-            job_info["success_count"] += 1
+        base_target = job_info.get("base_target") or BookingTarget()
+        target_users = list(getattr(base_target, "target_users", []) or [])
+        exclude_users = set(getattr(base_target, "exclude_users", []) or [])
+
+        available_users = [u for u in getattr(CFG.AUTH, "users", []) or [] if u.cookie]
+        if target_users:
+            user_sequence = [u for u in available_users if u.nickname in target_users]
+        else:
+            user_sequence = [u for u in available_users if u.nickname not in exclude_users]
+
+        if not user_sequence:
+            user_sequence = available_users[:1]
+
+        for user in user_sequence:
+            user_id = user.username or user.nickname
+            result = await order_once(
+                preset=job_info["preset"],
+                date=job_info["date"] or "0",
+                start_time=job_info["start_hour"] or "18",
+                base_target=base_target,
+                user=user_id,
+            )
+
+            if result.success:
+                job_info["success_count"] += 1
+            else:
+                job_info.setdefault("last_error", result.message)
+
+            await asyncio.sleep(2.5)
             
     except Exception as e:
         job_info["last_error"] = str(e)
@@ -802,8 +934,28 @@ async def _execute_scheduled_job(job_id: str) -> None:
 
 
 def _resolve_credentials(username: Optional[str], password: Optional[str]) -> Tuple[Optional[str], Optional[str]]:
+    # 如果直接提供了用户名和密码，直接使用
+    if username and password:
+        return username, password
+    
+    # 检查单个用户配置
     resolved_user = username or getattr(CFG.AUTH, "username", None) or os.getenv("SJABOT_USER")
     resolved_pass = password or getattr(CFG.AUTH, "password", None) or os.getenv("SJABOT_PASS")
+    
+    if resolved_user and resolved_pass:
+        return resolved_user, resolved_pass
+    
+    # 检查多用户配置
+    if hasattr(CFG.AUTH, "users") and CFG.AUTH.users:
+        # 优先使用第一个有密码的用户
+        for user in CFG.AUTH.users:
+            if user.username and user.password:
+                return user.username, user.password
+        # 如果没有密码，使用第一个有用户名的用户（需要手动输入密码）
+        for user in CFG.AUTH.users:
+            if user.username:
+                return user.username, None
+    
     return resolved_user, resolved_pass
 
 
@@ -812,6 +964,7 @@ async def start_login_session(
     user_id: Optional[str] = None,
     username: Optional[str] = None,
     password: Optional[str] = None,
+    nickname: Optional[str] = None,
 ) -> Dict[str, Any]:
     """启动登录流程，必要时返回验证码图片。"""
     resolved_user, resolved_pass = _resolve_credentials(username, password)
@@ -834,6 +987,7 @@ async def start_login_session(
         password=resolved_pass,
         created_at=datetime.now(timezone.utc),
         user_id=user_id,
+        nickname=nickname,
     )
 
     if state.captcha_required:
@@ -849,19 +1003,44 @@ async def start_login_session(
             "session_id": session_id,
             "captcha_image": image,
             "message": "已生成验证码，请在 5 分钟内输入",
+            "username": resolved_user,
+            "nickname": nickname,
         }
 
     # 无验证码，直接尝试登录
     try:
         submit_resp = await client.submit(state, resolved_user, resolved_pass, None)
         await client.follow_redirects(submit_resp)
-        cookie_header = _cookie_header(client._client.cookies)  # type: ignore[attr-defined]
+        sports_domain = urlparse(CFG.BASE_URL).hostname
+        cookie_header = _cookie_header(client._client.cookies, domain=sports_domain)  # type: ignore[attr-defined]
         if not cookie_header:
             raise RuntimeError("登录失败，未获得 Cookie")
 
         expires_at = datetime.now(timezone.utc) + timedelta(hours=8)
-        _auth_manager.save_cookie(cookie_header, expires_at)
-        CFG.AUTH.cookie = cookie_header
+
+        resolved_nickname = nickname
+        try:
+            if getattr(CFG.AUTH, "users", None):
+                for user in CFG.AUTH.users:
+                    if user.username == resolved_user:
+                        user.cookie = cookie_header
+                        resolved_nickname = resolved_nickname or user.nickname
+                        break
+            if not resolved_nickname:
+                from .models import UserAuth
+                nickname_guess = nickname or (resolved_user.split("@")[0] if "@" in resolved_user else resolved_user)
+                new_user = UserAuth(nickname=nickname_guess, cookie=cookie_header, username=resolved_user)
+                if not getattr(CFG.AUTH, "users", None):
+                    CFG.AUTH.users = [new_user]
+                else:
+                    # 避免重复添加
+                    if not any(u.username == resolved_user for u in CFG.AUTH.users):
+                        CFG.AUTH.users.append(new_user)
+                resolved_nickname = nickname_guess
+        except Exception:
+            resolved_nickname = nickname
+
+        _auth_manager.save_cookie(cookie_header, expires_at, username=resolved_user, nickname=resolved_nickname)
 
         # 校验登录态
         api = SportsAPI(CFG.BASE_URL, CFG.ENDPOINTS, CFG.AUTH)
@@ -878,6 +1057,8 @@ async def start_login_session(
             "message": "登录成功",
             "cookie": cookie_header,
             "expires_at": expires_at.isoformat(),
+            "username": resolved_user,
+            "nickname": resolved_nickname,
         }
     except Exception as exc:  # pylint: disable=broad-except
         await client.close()
@@ -900,13 +1081,35 @@ async def submit_login_session_code(session_id: str, code: str) -> Dict[str, Any
         submit_resp = await session.client.submit(session.state, session.username, session.password, code)
         await session.client.follow_redirects(submit_resp)
 
-        cookie_header = _cookie_header(session.client._client.cookies)  # type: ignore[attr-defined]
+        sports_domain = urlparse(CFG.BASE_URL).hostname
+        cookie_header = _cookie_header(session.client._client.cookies, domain=sports_domain)  # type: ignore[attr-defined]
         if not cookie_header:
             raise RuntimeError("验证码可能错误，未获取到 Cookie")
 
         expires_at = datetime.now(timezone.utc) + timedelta(hours=8)
-        _auth_manager.save_cookie(cookie_header, expires_at)
-        CFG.AUTH.cookie = cookie_header
+
+        resolved_nickname = session.nickname
+        try:
+            if getattr(CFG.AUTH, "users", None):
+                for user in CFG.AUTH.users:
+                    if user.username == session.username:
+                        user.cookie = cookie_header
+                        resolved_nickname = resolved_nickname or user.nickname
+                        break
+            if not resolved_nickname:
+                from .models import UserAuth
+                nickname_guess = session.nickname or (session.username.split("@")[0] if "@" in session.username else session.username)
+                new_user = UserAuth(nickname=nickname_guess, cookie=cookie_header, username=session.username)
+                if not getattr(CFG.AUTH, "users", None):
+                    CFG.AUTH.users = [new_user]
+                else:
+                    if not any(u.username == session.username for u in CFG.AUTH.users):
+                        CFG.AUTH.users.append(new_user)
+                resolved_nickname = nickname_guess
+        except Exception:
+            resolved_nickname = session.nickname
+
+        _auth_manager.save_cookie(cookie_header, expires_at, username=session.username, nickname=resolved_nickname)
 
         api = SportsAPI(CFG.BASE_URL, CFG.ENDPOINTS, CFG.AUTH)
         try:
@@ -922,6 +1125,8 @@ async def submit_login_session_code(session_id: str, code: str) -> Dict[str, Any
             "message": "登录成功",
             "cookie": cookie_header,
             "expires_at": expires_at.isoformat(),
+            "username": session.username,
+            "nickname": resolved_nickname,
         }
     except Exception as exc:  # pylint: disable=broad-except
         if session.attempts >= 3:
@@ -942,6 +1147,8 @@ async def submit_login_session_code(session_id: str, code: str) -> Dict[str, Any
                     "session_id": session_id,
                     "captcha_image": image,
                     "message": f"验证码错误，请重试 ({session.attempts}/3)",
+                    "username": session.username,
+                    "nickname": resolved_nickname,
                 }
             await session.client.close()
             del _login_sessions[session_id]
@@ -966,14 +1173,33 @@ async def cancel_login_session(session_id: str) -> Dict[str, Any]:
 
 def login_status() -> Dict[str, Any]:
     """获取当前登录状态信息。"""
-    record = _auth_manager.load_cookie()
-    if not record:
+    cookies_map, active_username = _auth_manager.load_all_cookies()
+    if not cookies_map:
         return {"success": False, "message": "尚未保存任何登录凭据"}
-    cookie, expires_at = record
+
+    entries: List[Dict[str, Any]] = []
+    for key, record in cookies_map.items():
+        expires_at = record.get("expires_at")
+        if isinstance(expires_at, datetime):
+            expires_str = expires_at.isoformat()
+        else:
+            expires_str = str(expires_at)
+
+        entries.append(
+            {
+                "key": key,
+                "username": record.get("username"),
+                "nickname": record.get("nickname"),
+                "cookie": record.get("cookie"),
+                "expires_at": expires_str,
+                "is_active": key == active_username,
+            }
+        )
+
     return {
         "success": True,
-        "cookie": cookie,
-        "expires_at": expires_at.isoformat(),
+        "active_user": active_username,
+        "users": entries,
     }
 
 

@@ -5,9 +5,31 @@ Automation helpers for the Shanghai Jiao Tong University venue booking platform.
 ## Features
 
 - Pure HTTP workflow (no browser automation) with optional credential login automation.
+- **🆕 多用户Token管理**：支持多个用户同时预订，智能切换避免频率限制
+- **🆕 批量预订功能**：一次命令为多个用户预订场地
+- **🆕 用户筛选功能**：可指定特定用户或排除某些用户
 - Modular components for API access, monitoring, scheduling, and endpoint discovery.
 - Multiple booking modes: one-off queries, continuous monitoring with optional auto-book, and daily scheduling.
 - Configurable defaults and presets maintained in `config.py`.
+
+## 🚀 快速开始
+
+```bash
+# 1. 克隆项目
+git clone <repository-url>
+cd sJAutoSport
+
+# 2. 安装依赖（macOS）
+brew install tesseract
+conda create -n sJAutoSport python=3.10
+conda activate sJAutoSport
+pip install -r requirements.txt
+
+# 3. 登录并开始使用
+python main.py login
+python main.py list  # 查看可用场馆
+python main.py slots --preset 13  # 查看南洋北苑健身房时间段
+```
 
 ## 📚 Documentation
 
@@ -45,11 +67,55 @@ README.md           # This file
 
 ## Installation
 
+### 1. 创建 Python 环境
+
 ```bash
 conda create -n sJAutoSport python=3.10
+conda activate sJAutoSport
+```
+
+### 2. 安装 Python 依赖
+
+```bash
 pip install httpx[http2] apscheduler rich tzlocal pycryptodome
-# optional for OCR/encryption support
+# OCR 和加密支持（推荐）
 pip install pytesseract opencv-python cryptography
+```
+
+### 3. 安装系统依赖
+
+#### macOS
+```bash
+# 安装 Tesseract OCR
+brew install tesseract
+
+# 可选：安装中文语言包
+brew install tesseract-lang
+```
+
+#### Ubuntu/Debian
+```bash
+# 安装 Tesseract OCR
+sudo apt-get update
+sudo apt-get install tesseract-ocr
+
+# 可选：安装中文语言包
+sudo apt-get install tesseract-ocr-chi-sim tesseract-ocr-chi-tra
+```
+
+#### Windows
+1. 下载 Tesseract 安装包：https://github.com/UB-Mannheim/tesseract/wiki
+2. 安装后将 Tesseract 路径添加到系统 PATH 环境变量
+3. 或者设置环境变量：`set TESSDATA_PREFIX=C:\Program Files\Tesseract-OCR\tessdata`
+
+### 4. 验证安装
+
+```bash
+# 验证 Tesseract 安装
+tesseract --version
+
+# 验证 Python 环境
+python main.py --help
 ```
 
 ## Configuration (`config.py`)
@@ -74,6 +140,63 @@ PRESET_TARGETS = [
 ]
 ```
 
+## 🆕 多用户Token管理
+
+### 配置多用户
+
+在 `config.py` 中配置多个用户的认证信息：
+
+```python
+AUTH = AuthConfig(
+    users=[
+        UserAuth(
+            nickname="用户1",
+            cookie="JSESSIONID=第一个用户的cookie",
+            token=None,
+            username=None,
+            password=None,
+        ),
+        UserAuth(
+            nickname="用户2", 
+            cookie="JSESSIONID=第二个用户的cookie",
+            token=None,
+            username="用户名2",
+            password="密码2",
+        ),
+    ]
+)
+```
+
+### 多用户命令
+
+```bash
+# 列出所有用户
+python main.py list-users
+
+# 验证用户配置
+python main.py validate-users
+
+# 切换到指定用户
+python main.py switch-user 用户1
+
+# 为所有用户预订
+python main.py order --preset 13 --date 1 --st 17
+
+# 为指定用户预订
+python main.py order --preset 13 --date 1 --st 17 --users "用户1,用户2"
+
+# 多用户监控
+python main.py monitor --preset 13 --interval 300 --date 2 --auto-book --users "用户1,用户2"
+```
+
+### 智能切换机制
+
+- 当遇到频率限制时，自动切换到下一个用户
+- 支持批量预订，提高成功率
+- 简洁的配置结构，只需配置users列表
+
+详细使用指南请参考：[多用户管理指南](MULTI_USER_GUIDE.md)
+
 ## Credential Management & Login
 
 Use the dedicated login/logout commands to maintain a valid session without manually copying cookies every day.
@@ -85,13 +208,15 @@ Use the dedicated login/logout commands to maintain a valid session without manu
    python main.py login --username 2022xxxx --no-ocr  # 手动输入验证码
    ```
 3. **Captcha resolution**
-   - OCR 首选：安装 `pytesseract`（配合 `opencv-python` 提升效果）。
-   - 当 OCR 置信度不足，CLI 会将验证码保存至临时文件并提示输入；传入 `--no-prompt` 可改为外部协同（如 QQ 机器人）。
+   - **OCR 首选**：需要安装 `pytesseract` 和系统 Tesseract OCR（配合 `opencv-python` 提升效果）
+   - **系统依赖**：macOS 使用 `brew install tesseract`，Ubuntu 使用 `sudo apt-get install tesseract-ocr`
+   - **兜底方案**：当 OCR 置信度不足时，CLI 会将验证码保存至临时文件并提示手动输入
+   - **外部协同**：传入 `--no-prompt` 可改为外部协同（如 QQ 机器人）
 4. **持久化 Cookie**
    - 登录成功后，Cookie 会（在提供 `SJABOT_SECRET` 且安装 `cryptography` 时）加密存储于 `~/.sja/credentials.json`。
    - 其他命令自动加载该 Cookie；执行 `python main.py logout` 可清理持久化会话。
 
-> Optional packages: `pytesseract`, `opencv-python`, and `cryptography` are recommended for full automation but not mandatory.
+> **重要**：`pytesseract`、`opencv-python` 和 `cryptography` 是实现自动验证码识别和安全存储的关键依赖，强烈建议安装以获得完整功能。
 
 ## CLI Commands
 
@@ -104,7 +229,7 @@ All functionality is exposed through `python main.py <command> [options]`.
 | `list`        | 显示场馆和运动类型的序号映射表（推荐使用）                | – |
 | `presets`     | Show the preset table defined in `config.PRESET_TARGETS`| – |
 | `catalog`     | Enumerate venues and field types with generated indices | `--pages`, `--size` |
-| `debug-login` | Validate the current cookies/token and show account info| – |
+| `userinfo`    | Validate saved cookies/tokens and show account info | – |
 | `discover`    | Scan the base page and JS assets for candidate API paths| `--base` |
 | `venues`      | List venues from the official API                       | `--keyword`, `--page`, `--size` |
 | `slots`       | Query slot availability and render a table              | `--preset`, `--date`, `--start-hour`, `--show-full` |
@@ -135,7 +260,7 @@ All functionality is exposed through `python main.py <command> [options]`.
    python main.py book-now --preset 1
    
    # 直接下单预订指定时间段（简化格式）
-   python main.py order --preset 13 --date 0 --st 21
+   python main.py order --preset 13 --date 0 --st 20
    python main.py order --preset 14 --date 1 --st 17
    ```
 
@@ -203,7 +328,7 @@ This removes the need to memorise UUID-style `--venue-id` or `--field-type-id` v
 
 ## Tips
 
-- Start with `python main.py debug-login` to ensure cookies/tokens are still valid.
+- Start with `python main.py userinfo` to ensure cookies/tokens are still valid.
 - When you add a new venue/sport pair to `PRESET_TARGETS`, rerun `python main.py presets` (and update the table below) so everyone can reference the latest indices.
 - Use `python main.py catalog` to export the full venue/sport list directly from the platform when building or verifying presets.
 

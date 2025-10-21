@@ -6,11 +6,18 @@ from typing import Any, Dict, List, Optional
 
 
 @dataclass
-class AuthConfig:
+class UserAuth:
+    """单个用户的认证信息"""
+    nickname: str
     cookie: Optional[str] = None
     token: Optional[str] = None
     username: Optional[str] = None
     password: Optional[str] = None
+
+@dataclass
+class AuthConfig:
+    """认证配置，支持多用户"""
+    users: List[UserAuth] = field(default_factory=list)
 
 
 @dataclass
@@ -54,6 +61,9 @@ class BookingTarget:
     fixed_dates: List[str] = field(default_factory=list)
     start_hour: int = 18
     duration_hours: int = 1
+    # 多用户支持
+    target_users: List[str] = field(default_factory=list)  # 指定预订的用户昵称列表，空表示所有用户
+    exclude_users: List[str] = field(default_factory=list)  # 排除的用户昵称列表
 
 
 @dataclass
@@ -72,6 +82,7 @@ class MonitorPlan:
     interval_seconds: int = 30
     auto_book: bool = False
     notify_stdout: bool = True
+    preferred_hours: Optional[List[int]] = None  # 优先时间段，如 [15, 16, 17]
 
 
 @dataclass
