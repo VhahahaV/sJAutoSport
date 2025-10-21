@@ -16,7 +16,8 @@ from nonebot.params import CommandArg, RegexGroup
 import sys
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
-from sja_booking.service import order_once, schedule_daily_job, list_scheduled_jobs, cancel_scheduled_job
+from sja_booking.service import schedule_daily_job, list_scheduled_jobs, cancel_scheduled_job
+from bot import services as bot_services
 
 # 命令处理器
 book_now_cmd = on_command("预订", aliases={"book", "立即预订"}, priority=5)
@@ -41,24 +42,30 @@ async def handle_book_now(bot: Bot, event: MessageEvent, args: Message = Command
             await book_now_cmd.finish("❌ 请指定场馆，使用 preset=数字 或 venue=场馆名")
         
         # 调用服务层
-        result = await order_once(
+        target_users = params.pop("target_users", None)
+        exclude_users = params.pop("exclude_users", None)
+
+        booking_results = await bot_services.order_for_users(
             preset=params.get("preset"),
-            date=params.get("date", "0"),
-            start_time=params.get("start_time", "18"),
+            date=str(params.get("date", "0")),
+            start_time=params.get("start_time", "18:00"),
             end_time=params.get("end_time"),
+            target_users=target_users,
+            exclude_users=exclude_users,
         )
-        
-        if result.success:
-            response = f"✅ 预订成功！\n"
-            response += f"📅 日期: {params.get('date', '今天')}\n"
-            response += f"⏰ 时间: {params.get('start_time', '18:00')}\n"
-            response += f"🏟️ 场馆: 预设{params.get('preset', 'N/A')}\n"
-            response += f"📝 消息: {result.message}"
+
+        if not booking_results:
+            await book_now_cmd.finish("❌ 没有可用的用户或预订失败")
+
+        success_count = sum(1 for r in booking_results if r.success)
+        response_lines = [f"📋 预订结果（成功 {success_count}/{len(booking_results)}）"]
+        for result in booking_results:
+            icon = "✅" if result.success else "❌"
+            line = f"{icon} {result.nickname}: {result.message}"
             if result.order_id:
-                response += f"\n🆔 订单ID: {result.order_id}"
-            await book_now_cmd.finish(response)
-        else:
-            await book_now_cmd.finish(f"❌ 预订失败: {result.message}")
+                line += f" (订单ID: {result.order_id})"
+            response_lines.append(line)
+        await book_now_cmd.finish("\n".join(response_lines))
             
     except Exception as e:
         logger.error(f"立即预订出错: {e}")
@@ -73,23 +80,24 @@ async def handle_book_preset(bot: Bot, event: MessageEvent, groups: tuple = Rege
         logger.info(f"收到预设预订命令: preset={preset_id}")
         
         # 调用服务层
-        result = await order_once(
+        booking_results = await bot_services.order_for_users(
             preset=preset_id,
-            date="0",  # 默认今天
-            start_time="18",  # 默认18点
+            date="0",
+            start_time="18:00",
         )
-        
-        if result.success:
-            response = f"✅ 预订成功！\n"
-            response += f"🏟️ 预设场馆: {preset_id}\n"
-            response += f"📅 日期: 今天\n"
-            response += f"⏰ 时间: 18:00\n"
-            response += f"📝 消息: {result.message}"
+
+        if not booking_results:
+            await book_preset_cmd.finish(f"❌ 预订失败: 未找到可用用户或无可用场次")
+
+        success_count = sum(1 for r in booking_results if r.success)
+        response_lines = [f"📋 预设{preset_id} 预订结果（成功 {success_count}/{len(booking_results)}）"]
+        for result in booking_results:
+            icon = "✅" if result.success else "❌"
+            line = f"{icon} {result.nickname}: {result.message}"
             if result.order_id:
-                response += f"\n🆔 订单ID: {result.order_id}"
-            await book_preset_cmd.finish(response)
-        else:
-            await book_preset_cmd.finish(f"❌ 预订失败: {result.message}")
+                line += f" (订单ID: {result.order_id})"
+            response_lines.append(line)
+        await book_preset_cmd.finish("\n".join(response_lines))
             
     except Exception as e:
         logger.error(f"预设预订出错: {e}")
@@ -114,6 +122,8 @@ async def handle_book_schedule(bot: Bot, event: MessageEvent, args: Message = Co
         job_id = f"job_{int(datetime.now().timestamp())}"
         
         # 调用服务层
+        base_target = bot_services.build_target(None, params.get("target_users"), params.get("exclude_users"))
+
         result = await schedule_daily_job(
             job_id=job_id,
             hour=params.get("hour", 8),
@@ -121,8 +131,9 @@ async def handle_book_schedule(bot: Bot, event: MessageEvent, args: Message = Co
             preset=params.get("preset"),
             date=params.get("date", "0"),
             start_hour=params.get("start_hour", 18),
+            base_target=base_target,
         )
-        
+
         if result["success"]:
             job_info = result["job_info"]
             response = f"✅ 定时任务创建成功！\n"
@@ -131,6 +142,10 @@ async def handle_book_schedule(bot: Bot, event: MessageEvent, args: Message = Co
             response += f"🏟️ 场馆: 预设{params.get('preset', 'N/A')}\n"
             response += f"📅 预订日期: {params.get('date', '今天')}\n"
             response += f"🕐 预订时间: {params.get('start_hour', 18):02d}:00\n"
+            if params.get("target_users"):
+                response += f"👥 指定用户: {', '.join(params['target_users'])}\n"
+            if params.get("exclude_users"):
+                response += f"🚫 排除用户: {', '.join(params['exclude_users'])}\n"
             response += f"📝 状态: {job_info['status']}"
             await book_schedule_cmd.finish(response)
         else:
@@ -163,6 +178,11 @@ async def handle_list_jobs(bot: Bot, event: MessageEvent):
                 response += f"📊 状态: {job['status']}\n"
                 response += f"🔄 运行次数: {job.get('run_count', 0)}\n"
                 response += f"✅ 成功次数: {job.get('success_count', 0)}\n"
+                base_target = job.get("base_target")
+                if base_target and getattr(base_target, "target_users", None):
+                    response += f"👥 用户: {', '.join(base_target.target_users)}\n"
+                if base_target and getattr(base_target, "exclude_users", None):
+                    response += f"🚫 排除: {', '.join(base_target.exclude_users)}\n"
                 if job.get('last_run'):
                     response += f"🕐 最后运行: {job['last_run']}\n"
                 if job.get('next_run'):
@@ -219,6 +239,8 @@ def parse_booking_args(args_str: str) -> dict:
         (r"time=(\d+)", "start_hour"),
         (r"start=(\d+)", "start_hour"),
         (r"end=(\d+)", "end_hour"),
+        (r"users=([^\s]+)", "target_users"),
+        (r"exclude=([^\s]+)", "exclude_users"),
     ]
     
     for pattern, param_name in patterns:
@@ -227,6 +249,8 @@ def parse_booking_args(args_str: str) -> dict:
             value = match.group(1)
             if param_name in ["preset", "date", "start_hour", "end_hour"]:
                 params[param_name] = int(value)
+            elif param_name in ["target_users", "exclude_users"]:
+                params[param_name] = [item.strip() for item in value.split(',') if item.strip()]
             else:
                 params[param_name] = value
     
@@ -256,6 +280,8 @@ def parse_schedule_args(args_str: str) -> dict:
         (r"start=(\d+)", "start_hour"),
         (r"hour=(\d+)", "hour"),
         (r"minute=(\d+)", "minute"),
+        (r"users=([^\s]+)", "target_users"),
+        (r"exclude=([^\s]+)", "exclude_users"),
     ]
     
     for pattern, param_name in patterns:
@@ -264,6 +290,8 @@ def parse_schedule_args(args_str: str) -> dict:
             value = match.group(1)
             if param_name in ["preset", "date", "start_hour", "hour", "minute"]:
                 params[param_name] = int(value)
+            elif param_name in ["target_users", "exclude_users"]:
+                params[param_name] = [item.strip() for item in value.split(',') if item.strip()]
             else:
                 params[param_name] = value
     

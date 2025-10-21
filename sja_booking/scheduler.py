@@ -15,6 +15,32 @@ def schedule_daily(
     warmup: Optional[Callable[[], None]] = None,
     warmup_offset_seconds: int = 3,
 ) -> None:
+    # 调试模式：立即执行
+    import os
+    debug_mode = os.getenv("SCHEDULE_DEBUG", "false").lower() == "true"
+    
+    if debug_mode:
+        print(f"[DEBUG] 调试模式：立即执行任务（原计划时间：{run_time.hour}:{run_time.minute:02d}:{run_time.second:02d}）")
+        
+        # 执行 warmup
+        if warmup:
+            print("[DEBUG] 执行 warmup...")
+            try:
+                warmup()
+            except Exception as e:
+                print(f"[DEBUG] Warmup 失败: {e}")
+        
+        # 立即执行主任务
+        print("[DEBUG] 执行主任务...")
+        try:
+            job()
+        except Exception as e:
+            print(f"[DEBUG] 主任务失败: {e}")
+        
+        print("[DEBUG] 调试执行完成")
+        return
+    
+    # 正常模式：按计划时间执行
     tz = get_localzone()
     scheduler = BlockingScheduler(timezone=str(tz))
 

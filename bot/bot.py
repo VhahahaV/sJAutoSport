@@ -60,7 +60,26 @@ def init_bot() -> None:
     setup_logging(driver)
 
     driver.register_adapter(OneBotAdapter)
-    nonebot.load_plugins("bot.plugins")
+
+    plugins_dir = Path(__file__).parent / "plugins"
+    nonebot.load_plugins(str(plugins_dir.resolve()))
+
+    # Ensure hooks are registered (filters, preprocessors, etc.)
+    from bot import hooks  # noqa: F401  pylint: disable=unused-import
+
+    from nonebot.matcher import matchers
+    from nonebot.plugin import get_loaded_plugins
+
+    total_matchers = sum(len(group) for group in matchers.values())
+    plugin_names = ", ".join(
+        sorted(plugin.id_ for plugin in get_loaded_plugins())
+    ) or "无"
+
+    logger.debug(
+        "插件加载完成: %s (匹配器=%s)",
+        plugin_names,
+        total_matchers,
+    )
 
     logger.info("SJTU Sports Booking Bot 初始化完成")
     logger.info("机器人昵称: %s", getattr(driver.config, "nickname", "体育预订助手"))

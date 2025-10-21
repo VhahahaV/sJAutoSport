@@ -4,6 +4,8 @@ import json
 import base64
 import re
 from datetime import datetime, timedelta
+import time
+import random
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 import httpx
@@ -16,6 +18,7 @@ from .models import (
     OrderIntent,
     Slot,
     Venue,
+    UserAuth,
 )
 
 
@@ -181,27 +184,118 @@ class SportsAPI:
         self.endpoints = endpoints
         self.auth = auth
         self.preset_targets = preset_targets or []
+        self._current_user = None
+        self._clients: Dict[str, httpx.Client] = {}
+        
+        # 初始化多用户客户端
+        self._init_multi_user_clients(timeout)
+        
+        # 设置默认客户端
+        default_user = self._get_default_user()
+        if default_user and default_user.nickname in self._clients:
+            self.client = self._clients[default_user.nickname]
+        elif self._clients:
+            # 如果有其他用户客户端，使用第一个
+            self.client = list(self._clients.values())[0]
+        else:
+            # 如果没有用户，创建一个空的客户端
+            self.client = httpx.Client(
+                base_url=self.base_url,
+                headers={
+                    "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Safari/537.36",
+                    "Accept": "application/json, text/plain, */*",
+                    "Referer": f"{self.base_url}/pc/",
+                    "Origin": self.base_url,
+                },
+                timeout=timeout,
+                http2=True
+            )
+    
+    def _get_default_user(self) -> Optional[UserAuth]:
+        """获取默认用户"""
+        if self.auth.users:
+            return self.auth.users[0]
+        return None
+    
+    def _init_multi_user_clients(self, timeout: float):
+        """初始化多用户客户端"""
+        users = self.auth.users or []
+        
+        for user in users:
+            if user.cookie or user.token:
+                self._clients[user.nickname] = self._create_client_for_user(user, timeout)
+    
+    def _create_client_for_user(self, user: UserAuth, timeout: float) -> httpx.Client:
+        """为特定用户创建HTTP客户端"""
         headers = {
             "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Safari/537.36",
             "Accept": "application/json, text/plain, */*",
             "Referer": f"{self.base_url}/pc/",
             "Origin": self.base_url,
         }
-        if auth.token:
-            headers["Authorization"] = auth.token
+        
+        if user.token:
+            headers["Authorization"] = user.token
+        
         cookies: Dict[str, str] = {}
-        if auth.cookie:
-            for kv in auth.cookie.split(";"):
+        if user.cookie and user.cookie.strip():
+            # 只使用JSESSIONID，过滤掉无效的Cookie
+            for kv in user.cookie.split(";"):
                 if "=" in kv:
                     k, v = kv.strip().split("=", 1)
-                    cookies[k] = v
-        self._client = httpx.Client(base_url=self.base_url, headers=headers, cookies=cookies, timeout=timeout, http2=True)
-        self.client = self._client  # 提供公共访问接口
+                    # 只使用JSESSIONID，且过滤掉.jaccount106后缀
+                    if k == "JSESSIONID":
+                        # 过滤掉.jaccount106等后缀，只保留纯JSESSIONID
+                        if "." in v and not v.startswith("http"):
+                            # 如果包含点但不是URL，可能是带后缀的JSESSIONID，跳过
+                            continue
+                        cookies[k] = v
+        
+        return httpx.Client(
+            base_url=self.base_url,
+            headers=headers,
+            cookies=cookies,
+            timeout=timeout,
+            http2=True
+        )
+    
+    def _get_client_for_user(self, user: Optional[UserAuth]) -> httpx.Client:
+        """获取特定用户的客户端"""
+        if user and user.nickname in self._clients:
+            return self._clients[user.nickname]
+        
+        # 如果没有找到用户客户端，返回第一个可用的客户端
+        if self._clients:
+            return list(self._clients.values())[0]
+        
+        # 如果没有任何客户端，创建一个默认客户端
+        return httpx.Client(
+            base_url=self.base_url,
+            headers={
+                "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Safari/537.36",
+                "Accept": "application/json, text/plain, */*",
+                "Referer": f"{self.base_url}/pc/",
+                "Origin": self.base_url,
+            },
+            timeout=10.0,
+            http2=True
+        )
+    
+    def switch_to_user(self, user: UserAuth):
+        """切换到指定用户"""
+        self._current_user = user
+        self.client = self._get_client_for_user(user)
+    
+    def get_available_users(self) -> List[UserAuth]:
+        """获取可用的用户列表"""
+        return [user for user in (self.auth.users or []) if user.nickname in self._clients]
 
     # -------------------- generic helpers --------------------
 
     def close(self) -> None:
-        self._client.close()
+        """关闭所有客户端连接"""
+        for client in self._clients.values():
+            client.close()
 
     def _req(
         self,
@@ -218,7 +312,18 @@ class SportsAPI:
             url = path
         else:
             url = path if path.startswith("/") else f"/{path}"
-        resp = self._client.request(
+        # POST 节流控制，避免相邻 POST 过快
+        if not hasattr(self, "_last_post_time"):
+            self._last_post_time = 0.0  # type: ignore[attr-defined]
+            self._min_post_interval = 1.0  # type: ignore[attr-defined]
+        if method.upper() == "POST":
+            now = time.time()
+            elapsed = now - float(getattr(self, "_last_post_time", 0.0))
+            if elapsed < float(getattr(self, "_min_post_interval", 1.0)):
+                wait = float(getattr(self, "_min_post_interval", 1.0)) - elapsed + random.uniform(0.1, 0.3)
+                if wait > 0:
+                    time.sleep(wait)
+        resp = self.client.request(
             method,
             url,
             params=params,
@@ -226,28 +331,40 @@ class SportsAPI:
             data=data,
             headers=headers,
         )
+        if method.upper() == "POST":
+            self._last_post_time = time.time()  # type: ignore[attr-defined]
         if resp.status_code not in expected:
             detail = resp.text[:400]
             raise RuntimeError(f"{method} {url} -> {resp.status_code}: {detail}")
         return resp
 
     def check_login(self) -> Dict[str, Any]:
-        resp = self._req("GET", self.endpoints.current_user)
-        data = resp.json()
-        if not isinstance(data, dict):
-            raise RuntimeError("profile interface returned non-dict payload")
-        return data
+        try:
+            resp = self._req("GET", self.endpoints.current_user)
+            data = resp.json()
+            if not isinstance(data, dict):
+                raise RuntimeError("profile interface returned non-dict payload")
+            return data
+        except Exception as e:
+            # 如果API请求失败，返回错误信息而不是抛出异常
+            return {
+                "error": True,
+                "message": f"API请求失败: {str(e)}",
+                "code": -1
+            }
 
     def check_auth_status(self) -> bool:
         try:
             data = self.check_login()
+            if not isinstance(data, dict):
+                return False
+            # 检查是否有错误
+            if data.get("error"):
+                return False
+            code = data.get("code")
+            return code in (None, 0, "0")
         except Exception:
             return False
-        if isinstance(data, dict):
-            code = data.get("code")
-            if code not in (None, 0, "0"):
-                return False
-        return True
 
     def ping(self) -> None:
         try:

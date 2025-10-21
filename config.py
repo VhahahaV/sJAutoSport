@@ -3,17 +3,24 @@
 Fill in the values below with the details captured from the sports platform.
 """
 
-from sja_booking.models import AuthConfig, BookingTarget, EndpointSet, MonitorPlan, PresetOption
+from urllib.parse import quote_plus
+
+from sja_booking.models import AuthConfig, BookingTarget, EndpointSet, MonitorPlan, PresetOption, UserAuth
 
 # Base address for all API requests. Most SJTU deployments respond on this host.
 BASE_URL = "https://sports.sjtu.edu.cn"
-JSESSIONID = ""
-# Authentication headers/cookies copied from a successful browser session.
+
+# 多用户认证配置 - 只存储用户基本信息，Cookie等时效性信息存储在 ~/.sja/credentials.json
 AUTH = AuthConfig(
-    cookie=f"JSESSIONID={JSESSIONID}",  # Paste the full Cookie header value captured from DevTools.
-    token=None,  # Optional Authorization header such as "Bearer ...".
-    username=None,  # Optional fallback if the platform requires credential login flows.
-    password=None,
+    users=[
+        # 示例：添加多个用户的基本信息
+        UserAuth(
+            nickname="",
+            username="",
+            password="",  # 密码可选存储，建议不存储
+        ),
+
+    ]
 )
 
 
@@ -66,14 +73,22 @@ TARGET = BookingTarget(
 
 # Default monitor behaviour for the `monitor` and `schedule` commands.
 MONITOR_PLAN = MonitorPlan(
-    enabled=False,
+    enabled=True,
     interval_seconds=4*60,
     auto_book=True,
     notify_stdout=True,
+    preferred_hours=[19,20],  # 默认无优先时间段
 )
 
 
 # Default API endpoints discovered from the current platform version.
+_JACCOUNT_CLIENT_ID = "mB5nKHqC00MusWAgnqSF"
+_JACCOUNT_REDIRECT = f"{BASE_URL}/oauth2Login"
+_JACCOUNT_AUTHORIZE = (
+    "https://jaccount.sjtu.edu.cn/oauth2/authorize"
+    f"?response_type=code&client_id={_JACCOUNT_CLIENT_ID}"
+    f"&redirect_uri={quote_plus(_JACCOUNT_REDIRECT)}"
+)
 ENDPOINTS = EndpointSet(
     current_user="/system/user/currentUser",
     list_venues="/manage/venue/listOrderCount",
@@ -85,6 +100,10 @@ ENDPOINTS = EndpointSet(
     appointment_overview="/appointment/disabled/getAppintmentAndSysUserbyUser",
     slot_summary="/manage/fieldDetail/queryFieldReserveSituationIsFull",
     ping="/",
+    # jAccount credential login flow
+    login_prepare=_JACCOUNT_AUTHORIZE,
+    login_submit="https://jaccount.sjtu.edu.cn/jaccount/ulogin",
+    login_captcha="https://jaccount.sjtu.edu.cn/jaccount/captcha",
 )
 
 
