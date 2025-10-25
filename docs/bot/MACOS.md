@@ -84,7 +84,7 @@ NapCatQQ 依赖官方 Windows NTQQ 客户端。本指南提供在 macOS 上通�
    `.env` 示例：
    ```ini
    NTQQ_WS_URL=ws://127.0.0.1:6099/onebot/v11/ws
-   NTQQ_HTTP_URL=http://127.0.0.1:6099
+   NTQQ_HTTP_URL=http://127.0.0.1:3000
    NTQQ_ACCESS_TOKEN=              # 若 NapCat 设置了 token，这里也需填写
    ```
 

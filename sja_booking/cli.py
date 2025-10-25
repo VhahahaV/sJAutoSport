@@ -5,6 +5,7 @@ import asyncio
 import dataclasses
 import getpass
 import os
+import re
 from datetime import time as dt_time, datetime, timedelta
 from typing import Any, Dict, List, Optional
 
@@ -49,6 +50,31 @@ def parse_time_input(time_input: str) -> str:
     else:
         # 标准时间格式，直接返回
         return time_input
+
+
+def parse_start_hours_arg(raw: Optional[str]) -> List[int]:
+    """解析逗号或空格分隔的开始时间列表"""
+    if not raw:
+        return []
+    segments = re.split(r"[\s,]+", raw.strip())
+    result: List[int] = []
+    for segment in segments:
+        if not segment:
+            continue
+        try:
+            value = int(segment)
+        except ValueError:
+            continue
+        if 0 <= value <= 23:
+            result.append(value)
+    # 去重保持顺序
+    seen = set()
+    unique: List[int] = []
+    for value in result:
+        if value not in seen:
+            seen.add(value)
+            unique.append(value)
+    return unique
 
 
 def clone_target(base: BookingTarget) -> BookingTarget:
@@ -372,6 +398,8 @@ def cmd_login(console: Console, cfg, args, auth_manager: AuthManager) -> None:
             password,
             solver=None if args.no_ocr else solve_captcha_async,
             fallback=fallback_local,
+            max_retries=5,  # 最多重试5次
+            retry_delay=3,  # 每次重试间隔3秒
         )
         
         # 保存 Cookie 到持久化存储
@@ -609,7 +637,13 @@ def cmd_book_now(api: SportsAPI, console: Console, base_target: BookingTarget, a
             chosen_entry = entry
             break
         try:
-            slot_hour = int(str(slot.start).split(":")[0])
+            # 处理 slot-X 格式的时间
+            if str(slot.start).startswith("slot-"):
+                slot_num = int(str(slot.start).split("-")[1])
+                slot_hour = (7 + slot_num) % 24  # slot-0对应07:00
+            else:
+                # 处理 HH:MM 格式的时间
+                slot_hour = int(str(slot.start).split(":")[0])
         except Exception:  # pylint: disable=broad-except
             continue
         if slot_hour == preferred_hour:
@@ -766,6 +800,13 @@ def cmd_order(api: SportsAPI, console: Console, args) -> None:
 
 
 def cmd_schedule(api_factory, console: Console, base_target: BookingTarget, plan: MonitorPlan, args) -> None:
+    schedule_defaults = None
+    try:
+        import config as CFG  # pylint: disable=import-outside-toplevel
+        schedule_defaults = getattr(CFG, "SCHEDULE_PLAN", None)
+    except Exception:  # pylint: disable=broad-except
+        schedule_defaults = None
+
     run_time = dt_time(hour=args.hour, minute=args.minute, second=args.second)
 
     def job() -> None:
@@ -776,16 +817,15 @@ def cmd_schedule(api_factory, console: Console, base_target: BookingTarget, plan
             print(f"[DEBUG] 日期偏移: {getattr(args, 'date_offset', None)}")
             
             # 使用 order 模块的逻辑
-            import config as CFG
             from .multi_user import MultiUserManager, UserBookingResult
             
             # 处理多用户参数
             if hasattr(args, 'users') and args.users:
-                base_target.target_users = [nickname.strip() for nickname in args.users.split(',')]
+                base_target.target_users = list(dict.fromkeys(nickname.strip() for nickname in args.users.split(',') if nickname.strip()))
                 console.print(f"[green]指定预订用户: {base_target.target_users}[/green]")
             
             if hasattr(args, 'exclude_users') and args.exclude_users:
-                base_target.exclude_users = [nickname.strip() for nickname in args.exclude_users.split(',')]
+                base_target.exclude_users = list(dict.fromkeys(nickname.strip() for nickname in args.exclude_users.split(',') if nickname.strip()))
                 console.print(f"[green]排除用户: {base_target.exclude_users}[/green]")
             
             # 多用户预订
@@ -798,16 +838,31 @@ def cmd_schedule(api_factory, console: Console, base_target: BookingTarget, plan
             
             # 计算目标日期
             from datetime import datetime, timedelta
-            date_offset = getattr(args, 'date_offset', 1)
+            date_offset = getattr(args, 'date_offset', None)
+            if date_offset is None and schedule_defaults is not None:
+                date_offset = schedule_defaults.date_offset
+            if date_offset is None:
+                date_offset = 1
             target_date = datetime.now() + timedelta(days=date_offset)
             date_str = target_date.strftime("%Y-%m-%d")
             
             # 计算开始时间
-            start_hour = getattr(args, 'start_hour', 18)
-            start_time = str(start_hour)
+            start_hours = parse_start_hours_arg(getattr(args, 'start_hours', None))
+            if not start_hours and getattr(args, 'start_hour', None) is not None:
+                start_hours = [int(getattr(args, 'start_hour'))]
+            if not start_hours and schedule_defaults is not None:
+                if getattr(schedule_defaults, 'start_hours', None):
+                    start_hours = list(getattr(schedule_defaults, 'start_hours'))
+                elif getattr(schedule_defaults, 'start_hour', None) is not None:
+                    start_hours = [int(getattr(schedule_defaults, 'start_hour'))]
+            if not start_hours:
+                start_hours = [base_target.start_hour or 18]
+
+            base_target.start_hour = start_hours[0]
+            start_time = f"{start_hours[0]:02d}"
             
             print(f"[DEBUG] 预订日期: {date_str}")
-            print(f"[DEBUG] 预订时间: {start_time}:00")
+            print(f"[DEBUG] 预订时间: {', '.join(f'{h:02d}:00' for h in start_hours)}")
             print(f"[DEBUG] 目标用户: {[u.nickname for u in target_users]}")
             
             if len(target_users) == 1:
@@ -1052,6 +1107,28 @@ def run_cli(args) -> None:
             cmd_schedule(api_factory, console, CFG.TARGET, CFG.MONITOR_PLAN, args)
         elif args.command == "order":
             cmd_order(api, console, args)
+        elif args.command == "jobs":
+            cmd_list_jobs(console)
+        elif args.command == "jobs-cleanup":
+            cmd_cleanup_jobs(console)
+        elif args.command == "jobs-delete-all":
+            cmd_delete_all_jobs(console, args.type, args.force)
+        elif args.command == "job-start":
+            cmd_start_job(console, args.job_id)
+        elif args.command == "job-stop":
+            cmd_stop_job(console, args.job_id)
+        elif args.command == "job-delete":
+            cmd_delete_job(console, args.job_id)
+        elif args.command == "job-logs":
+            cmd_show_job_logs(console, args.job_id, args.lines)
+        elif args.command == "create-monitor":
+            cmd_create_monitor_job(console, CFG.TARGET, CFG.MONITOR_PLAN, args)
+        elif args.command == "create-schedule":
+            cmd_create_schedule_job(console, CFG.TARGET, args)
+        elif args.command == "create-keep-alive":
+            cmd_create_keep_alive_job(console, args)
+        elif args.command == "keep-alive":
+            cmd_keep_alive(console, args)
         else:
             console.print("[yellow]Unknown command[/yellow]")
     finally:
@@ -1061,6 +1138,22 @@ def run_cli(args) -> None:
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="SJTU Sports Automation CLI")
     sub = parser.add_subparsers(dest="command")
+
+    schedule_defaults = None
+    try:
+        import config as CFG  # pylint: disable=import-outside-toplevel
+        schedule_defaults = getattr(CFG, "SCHEDULE_PLAN", None)
+    except Exception:  # pylint: disable=broad-except
+        schedule_defaults = None
+
+    default_hour = getattr(schedule_defaults, "hour", 12)
+    default_minute = getattr(schedule_defaults, "minute", 0)
+    default_second = getattr(schedule_defaults, "second", 0)
+    default_date_offset = getattr(schedule_defaults, "date_offset", None)
+    default_start_hours = getattr(schedule_defaults, "start_hours", None)
+    default_start_hour = getattr(schedule_defaults, "start_hour", None)
+    default_duration_hours = getattr(schedule_defaults, "duration_hours", None)
+    default_no_start = not getattr(schedule_defaults, "auto_start", True) if schedule_defaults else False
 
     sub.add_parser("userinfo", help="Show account information for stored users", aliases=["debug-login"])
     
@@ -1125,9 +1218,22 @@ def build_parser() -> argparse.ArgumentParser:
 
     p_sched = sub.add_parser("schedule", help="Schedule a booking attempt every day at a fixed time")
     add_target_args(p_sched)
-    p_sched.add_argument("--hour", type=int, default=12)
-    p_sched.add_argument("--minute", type=int, default=0)
-    p_sched.add_argument("--second", type=int, default=0)
+    p_sched.add_argument("--hour", type=int, default=default_hour)
+    p_sched.add_argument("--minute", type=int, default=default_minute)
+    p_sched.add_argument("--second", type=int, default=default_second)
+    p_sched.add_argument(
+        "--start-hours",
+        type=str,
+        help="以逗号分隔的开始小时列表，例如 '18,19'",
+    )
+    if default_date_offset is not None:
+        p_sched.set_defaults(date_offset=default_date_offset)
+    if default_start_hour is not None:
+        p_sched.set_defaults(start_hour=default_start_hour)
+    if default_start_hours:
+        p_sched.set_defaults(start_hours=",".join(str(h) for h in default_start_hours))
+    if default_duration_hours is not None:
+        p_sched.set_defaults(duration_hours=default_duration_hours)
 
     p_order = sub.add_parser("order", help="Place an order for a specific time slot")
     p_order.add_argument("--preset", type=int, required=True, help="Preset index from config.PRESET_TARGETS")
@@ -1137,4 +1243,414 @@ def build_parser() -> argparse.ArgumentParser:
     p_order.add_argument("--users", type=str, help="Comma-separated list of user nicknames to book for (e.g., 'user1,user2')")
     p_order.add_argument("--exclude-users", type=str, help="Comma-separated list of user nicknames to exclude")
 
+    # 任务管理命令
+    sub.add_parser("jobs", help="List all background jobs")
+    sub.add_parser("jobs-cleanup", help="Clean up dead jobs")
+    
+    p_job_start = sub.add_parser("job-start", help="Start a background job")
+    p_job_start.add_argument("job_id", type=str, help="Job ID to start")
+    
+    p_job_stop = sub.add_parser("job-stop", help="Stop a background job")
+    p_job_stop.add_argument("job_id", type=str, help="Job ID to stop")
+    
+    p_job_delete = sub.add_parser("job-delete", help="Delete a background job")
+    p_job_delete.add_argument("job_id", type=str, help="Job ID to delete")
+    
+    p_jobs_delete_all = sub.add_parser("jobs-delete-all", help="Delete all background jobs")
+    p_jobs_delete_all.add_argument("--type", type=str, choices=["monitor", "schedule", "auto_booking", "keep_alive"], help="Delete only jobs of specific type")
+    p_jobs_delete_all.add_argument("--force", action="store_true", help="Force delete without confirmation")
+    
+    p_job_logs = sub.add_parser("job-logs", help="Show job logs")
+    p_job_logs.add_argument("job_id", type=str, help="Job ID to show logs for")
+    p_job_logs.add_argument("--lines", type=int, default=500, help="Number of log lines to show")
+    
+    # 创建任务命令
+    p_create_monitor = sub.add_parser("create-monitor", help="Create a monitor job")
+    add_target_args(p_create_monitor)
+    p_create_monitor.add_argument("--name", type=str, required=True, help="Job name")
+    p_create_monitor.add_argument("--interval", type=int, help="Polling interval in seconds")
+    p_create_monitor.add_argument("--auto-book", action="store_true", help="Attempt booking automatically when possible")
+    p_create_monitor.add_argument("--pt", "--preferred-times", type=str, help="Preferred hours for booking (e.g., '15,16,17')")
+    p_create_monitor.add_argument("--preferred-days", type=str, help="Preferred days for monitoring (e.g., '0,1,2,3,4,5,6,7,8')")
+    p_create_monitor.add_argument("--users", type=str, help="Comma-separated list of user nicknames to book for")
+    p_create_monitor.add_argument("--exclude-users", type=str, help="Comma-separated list of user nicknames to exclude")
+    p_create_monitor.add_argument("--no-start", action="store_true", help="Create job but don't start it")
+    
+    p_create_schedule = sub.add_parser("create-schedule", help="Create a schedule job")
+    add_target_args(p_create_schedule)
+    p_create_schedule.add_argument("--name", type=str, required=True, help="Job name")
+    p_create_schedule.add_argument("--hour", type=int, default=default_hour, help="Schedule hour")
+    p_create_schedule.add_argument("--minute", type=int, default=default_minute, help="Schedule minute")
+    p_create_schedule.add_argument("--second", type=int, default=default_second, help="Schedule second")
+    p_create_schedule.add_argument(
+        "--start-hours",
+        type=str,
+        help="Comma separated start hours list (e.g., '18,19')",
+    )
+    p_create_schedule.add_argument("--users", type=str, help="Comma-separated list of user nicknames to book for")
+    p_create_schedule.add_argument("--exclude-users", type=str, help="Comma-separated list of user nicknames to exclude")
+    p_create_schedule.add_argument("--no-start", action="store_true", help="Create job but don't start it")
+    if default_date_offset is not None:
+        p_create_schedule.set_defaults(date_offset=default_date_offset)
+    if default_start_hour is not None:
+        p_create_schedule.set_defaults(start_hour=default_start_hour)
+    if default_start_hours:
+        p_create_schedule.set_defaults(start_hours=",".join(str(h) for h in default_start_hours))
+    if default_duration_hours is not None:
+        p_create_schedule.set_defaults(duration_hours=default_duration_hours)
+    p_create_schedule.set_defaults(no_start=default_no_start)
+    
+    # Keep-Alive命令
+    p_create_keep_alive = sub.add_parser("create-keep-alive", help="Create a keep-alive job")
+    p_create_keep_alive.add_argument("--name", type=str, required=True, help="Job name")
+    p_create_keep_alive.add_argument("--interval", type=int, default=15, help="Keep-alive interval in minutes")
+    p_create_keep_alive.add_argument("--no-start", action="store_true", help="Create job but don't start it")
+    
+    p_keep_alive = sub.add_parser("keep-alive", help="Manual keep-alive operations")
+    p_keep_alive.add_argument("action", choices=["refresh", "status"], help="Keep-alive action")
+    p_keep_alive.add_argument("--user", type=str, help="Specific user to refresh (optional)")
+
     return parser
+
+
+# =============================================================================
+# 任务管理命令
+# =============================================================================
+
+def cmd_list_jobs(console: Console) -> None:
+    """列出所有任务"""
+    from .job_manager import get_job_manager
+    
+    job_manager = get_job_manager()
+    job_manager.show_jobs_table()
+
+
+def cmd_cleanup_jobs(console: Console) -> None:
+    """清理已死亡的任务"""
+    from .job_manager import get_job_manager
+    
+    job_manager = get_job_manager()
+    cleaned = job_manager.cleanup_dead_jobs()
+    
+    if cleaned == 0:
+        console.print("[green]✅ 没有需要清理的任务[/green]")
+    else:
+        console.print(f"[green]✅ 已清理 {cleaned} 个已死亡的任务[/green]")
+
+
+def cmd_delete_all_jobs(console: Console, job_type: Optional[str] = None, force: bool = False) -> None:
+    """删除所有任务"""
+    from .job_manager import get_job_manager, JobType
+    
+    job_manager = get_job_manager()
+    
+    # 转换任务类型
+    job_type_enum = None
+    if job_type:
+        try:
+            job_type_enum = JobType(job_type)
+        except ValueError:
+            console.print(f"[red]❌ 无效的任务类型: {job_type}[/red]")
+            return
+    
+    deleted_count = job_manager.delete_all_jobs(job_type_enum, force)
+    
+    if deleted_count == 0:
+        console.print("[yellow]⚠️  没有任务被删除[/yellow]")
+    else:
+        console.print(f"[green]✅ 成功删除 {deleted_count} 个任务[/green]")
+
+
+def cmd_start_job(console: Console, job_id: str) -> None:
+    """启动任务"""
+    from .job_manager import get_job_manager
+    
+    job_manager = get_job_manager()
+    success = job_manager.start_job(job_id)
+    
+    if success:
+        console.print(f"[green]✅ 任务 {job_id} 已启动[/green]")
+    else:
+        console.print(f"[red]❌ 启动任务 {job_id} 失败[/red]")
+
+
+def cmd_stop_job(console: Console, job_id: str) -> None:
+    """停止任务"""
+    from .job_manager import get_job_manager
+    
+    job_manager = get_job_manager()
+    success = job_manager.stop_job(job_id)
+    
+    if success:
+        console.print(f"[green]✅ 任务 {job_id} 已停止[/green]")
+    else:
+        console.print(f"[red]❌ 停止任务 {job_id} 失败[/red]")
+
+
+def cmd_delete_job(console: Console, job_id: str) -> None:
+    """删除任务"""
+    from .job_manager import get_job_manager
+    
+    job_manager = get_job_manager()
+    success = job_manager.delete_job(job_id)
+    
+    if success:
+        console.print(f"[green]✅ 任务 {job_id} 已删除[/green]")
+    else:
+        console.print(f"[red]❌ 删除任务 {job_id} 失败[/red]")
+
+
+def cmd_show_job_logs(console: Console, job_id: str, lines: int) -> None:
+    """显示任务日志"""
+    from .job_manager import get_job_manager
+    
+    job_manager = get_job_manager()
+    logs = job_manager.get_job_logs(job_id, lines)
+    
+    if not logs:
+        console.print(f"[yellow]⚠️  任务 {job_id} 没有日志[/yellow]")
+        return
+    
+    console.print(f"[blue]📋 任务 {job_id} 的最近 {lines} 行日志：[/blue]")
+    console.print("-" * 60)
+    for log in logs:
+        console.print(log)
+    console.print("-" * 60)
+
+
+def cmd_create_monitor_job(console: Console, base_target: BookingTarget, plan: MonitorPlan, args) -> None:
+    """创建监控任务"""
+    from .job_manager import get_job_manager, JobType
+    
+    # 应用目标覆盖
+    target = apply_target_overrides(base_target, args)
+    
+    # 创建监控计划
+    monitor_plan = dataclasses.replace(plan)
+    if args.interval:
+        monitor_plan.interval_seconds = args.interval
+    if args.auto_book is not None:
+        monitor_plan.auto_book = args.auto_book
+    
+    # 处理多用户参数
+    if hasattr(args, 'users') and args.users:
+        target.target_users = list(dict.fromkeys(nickname.strip() for nickname in args.users.split(',') if nickname.strip()))
+        console.print(f"[green]指定预订用户: {target.target_users}[/green]")
+
+    if hasattr(args, 'exclude_users') and args.exclude_users:
+        target.exclude_users = list(dict.fromkeys(nickname.strip() for nickname in args.exclude_users.split(',') if nickname.strip()))
+        console.print(f"[green]排除用户: {target.exclude_users}[/green]")
+    
+    # 处理优先时间段设置
+    if hasattr(args, 'pt') and args.pt:
+        try:
+            preferred_hours = [int(h.strip()) for h in args.pt.split(',')]
+            monitor_plan.preferred_hours = preferred_hours
+            console.print(f"[green]设置优先时间段: {preferred_hours}[/green]")
+        except ValueError:
+            console.print(f"[red]无效的优先时间段格式: {args.pt}，应为 '15,16,17' 格式[/red]")
+            return
+    
+    # 处理优先天数设置
+    if hasattr(args, 'preferred_days') and args.preferred_days:
+        try:
+            preferred_days = [int(d.strip()) for d in args.preferred_days.split(',')]
+            monitor_plan.preferred_days = preferred_days
+            console.print(f"[green]设置优先天数: {preferred_days}[/green]")
+        except ValueError:
+            console.print(f"[red]无效的优先天数格式: {args.preferred_days}，应为 '0,1,2,3,4,5,6,7,8' 格式[/red]")
+            return
+    
+    # 如果没有指定优先天数，使用默认值（0-8）
+    if not monitor_plan.preferred_days:
+        monitor_plan.preferred_days = list(range(9))  # 0-8
+        console.print(f"[green]使用默认优先天数: {monitor_plan.preferred_days}[/green]")
+    
+    # 设置目标的日期偏移为优先天数
+    target.date_offset = monitor_plan.preferred_days
+    target.use_all_dates = False  # 确保不使用 use_all_dates
+    console.print(f"[green]设置监控日期范围: {target.date_offset}[/green]")
+    
+    # 创建任务配置
+    config = {
+        'target': dataclasses.asdict(target),
+        'plan': dataclasses.asdict(monitor_plan)
+    }
+    
+    # 创建任务
+    job_manager = get_job_manager()
+    job_id = job_manager.create_job(
+        job_type=JobType.MONITOR,
+        name=args.name,
+        config=config,
+        auto_start=not args.no_start
+    )
+    
+    console.print(f"[green]✅ 监控任务已创建: {args.name} (ID: {job_id})[/green]")
+    if not args.no_start:
+        console.print(f"[green]🚀 任务已自动启动[/green]")
+
+
+def cmd_create_schedule_job(console: Console, base_target: BookingTarget, args) -> None:
+    """创建定时任务"""
+    from .job_manager import get_job_manager, JobType
+    
+    try:
+        import config as CFG  # pylint: disable=import-outside-toplevel
+        schedule_defaults = getattr(CFG, "SCHEDULE_PLAN", None)
+    except Exception:  # pylint: disable=broad-except
+        schedule_defaults = None
+    
+    # 应用目标覆盖
+    target = apply_target_overrides(base_target, args)
+    
+    # 处理多用户参数
+    if hasattr(args, 'users') and args.users:
+        target.target_users = [nickname.strip() for nickname in args.users.split(',')]
+        console.print(f"[green]指定预订用户: {target.target_users}[/green]")
+    
+    if hasattr(args, 'exclude_users') and args.exclude_users:
+        target.exclude_users = [nickname.strip() for nickname in args.exclude_users.split(',')]
+        console.print(f"[green]排除用户: {target.exclude_users}[/green]")
+    
+    hour = getattr(args, 'hour', None)
+    if hour is None:
+        hour = getattr(schedule_defaults, "hour", 12)
+    minute = getattr(args, 'minute', None)
+    if minute is None:
+        minute = getattr(schedule_defaults, "minute", 0)
+    second = getattr(args, 'second', None)
+    if second is None:
+        second = getattr(schedule_defaults, "second", 0)
+
+    date_offset = getattr(args, 'date_offset', None)
+    if date_offset is None:
+        date_offset = getattr(schedule_defaults, "date_offset", 1)
+
+    start_hours = parse_start_hours_arg(getattr(args, 'start_hours', None))
+    if not start_hours and getattr(args, 'start_hour', None) is not None:
+        try:
+            start_hours = [int(getattr(args, 'start_hour'))]
+        except (TypeError, ValueError):
+            start_hours = []
+    if not start_hours and schedule_defaults and getattr(schedule_defaults, "start_hours", None):
+        start_hours = list(getattr(schedule_defaults, "start_hours"))
+    if not start_hours and getattr(schedule_defaults, "start_hour", None) is not None:
+        start_hours = [int(getattr(schedule_defaults, "start_hour"))]
+    if not start_hours:
+        start_hours = [target.start_hour or 18]
+
+    start_hour_primary = start_hours[0]
+    target.start_hour = start_hour_primary
+
+    duration_hours = getattr(args, 'duration_hours', None)
+    if duration_hours is None:
+        duration_hours = getattr(schedule_defaults, "duration_hours", target.duration_hours)
+    if duration_hours is None:
+        duration_hours = target.duration_hours or 1
+
+    # 创建任务配置
+    config = {
+        'target': dataclasses.asdict(target),
+        'schedule': {
+            'hour': hour,
+            'minute': minute,
+            'second': second,
+            'preset': getattr(args, 'preset', None),
+            'date_offset': date_offset,
+            'start_hour': start_hour_primary,
+            'start_hours': start_hours,
+            'duration_hours': duration_hours,
+        }
+    }
+    
+    # 创建任务
+    job_manager = get_job_manager()
+    job_id = job_manager.create_job(
+        job_type=JobType.SCHEDULE,
+        name=args.name,
+        config=config,
+        auto_start=not args.no_start
+    )
+    
+    console.print(f"[green]✅ 定时任务已创建: {args.name} (ID: {job_id})[/green]")
+    console.print(f"[blue]⏰ 计划时间: {hour:02d}:{minute:02d}:{second:02d}[/blue]")
+    console.print(f"[blue]🕒 预订时段: {', '.join(f'{h:02d}:00' for h in start_hours)}[/blue]")
+    if not args.no_start:
+        console.print(f"[green]🚀 任务已自动启动[/green]")
+
+
+def cmd_create_keep_alive_job(console: Console, args) -> None:
+    """创建Keep-Alive任务"""
+    from .job_manager import get_job_manager, JobType
+    
+    interval_minutes = max(1, args.interval)
+    
+    # 创建任务配置
+    config = {
+        'interval_seconds': interval_minutes * 60
+    }
+    
+    # 创建任务
+    job_manager = get_job_manager()
+    job_id = job_manager.create_job(
+        job_type=JobType.KEEP_ALIVE,
+        name=args.name,
+        config=config,
+        auto_start=not args.no_start
+    )
+    
+    console.print(f"[green]✅ Keep-Alive任务已创建: {args.name} (ID: {job_id})[/green]")
+    console.print(f"[blue]⏰ 刷新间隔: {interval_minutes}分钟[/blue]")
+    if not args.no_start:
+        console.print(f"[green]🚀 任务已自动启动[/green]")
+
+
+def cmd_keep_alive(console: Console, args) -> None:
+    """Keep-Alive操作"""
+    import asyncio
+    from .keep_alive import KeepAliveResult, run_keep_alive_for_user, run_keep_alive_once
+    
+    if args.action == "refresh":
+        if args.user:
+            # 刷新特定用户
+            console.print(f"[blue]🔄 刷新用户 {args.user} 的Cookie...[/blue]")
+            result: KeepAliveResult = asyncio.run(run_keep_alive_for_user(args.user))
+            display_name = result.nickname or result.username or args.user
+            if result.success:
+                console.print(f"[green]✅ {display_name}: {result.message}[/green]")
+            else:
+                console.print(f"[red]❌ {display_name}: {result.message}[/red]")
+        else:
+            # 刷新所有用户
+            console.print("[blue]🔄 刷新所有用户的Cookie...[/blue]")
+            results = asyncio.run(run_keep_alive_once())
+            
+            success_count = sum(1 for r in results if r.success)
+            total_count = len(results)
+            
+            console.print(f"[green]✅ 刷新完成: {success_count}/{total_count} 成功[/green]")
+            
+            for result in results:
+                display_name = result.nickname or result.username or "未命名用户"
+                if result.success:
+                    console.print(f"[green]  ✅ {display_name}: {result.message}[/green]")
+                else:
+                    console.print(f"[red]  ❌ {display_name}: {result.message}[/red]")
+    
+    elif args.action == "status":
+        # 显示Keep-Alive状态
+        from .job_manager import get_job_manager
+        job_manager = get_job_manager()
+        
+        # 查找Keep-Alive任务
+        keep_alive_jobs = [job for job in job_manager.jobs.values() if job.job_type.value == "keep_alive"]
+        
+        if not keep_alive_jobs:
+            console.print("[yellow]⚠️  没有找到Keep-Alive任务[/yellow]")
+            return
+            
+        console.print("[blue]📋 Keep-Alive任务状态:[/blue]")
+        for job in keep_alive_jobs:
+            status_color = "green" if job.status.value == "running" else "yellow"
+            console.print(f"  [{status_color}]{job.name}[/{status_color}] (ID: {job.job_id}) - {job.status.value}")

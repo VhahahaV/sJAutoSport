@@ -124,13 +124,24 @@ async def handle_book_schedule(bot: Bot, event: MessageEvent, args: Message = Co
         # 调用服务层
         base_target = bot_services.build_target(None, params.get("target_users"), params.get("exclude_users"))
 
+        start_hours = params.get("start_hours") or []
+        if start_hours:
+            seen = set()
+            start_hours = [h for h in start_hours if not (h in seen or seen.add(h))]
+        if not start_hours and params.get("start_hour") is not None:
+            start_hours = [params["start_hour"]]
+        if not start_hours:
+            start_hours = [18]
+
+        base_target.start_hour = start_hours[0]
+
         result = await schedule_daily_job(
             job_id=job_id,
             hour=params.get("hour", 8),
             minute=params.get("minute", 0),
             preset=params.get("preset"),
             date=params.get("date", "0"),
-            start_hour=params.get("start_hour", 18),
+            start_hours=start_hours,
             base_target=base_target,
         )
 
@@ -141,7 +152,7 @@ async def handle_book_schedule(bot: Bot, event: MessageEvent, args: Message = Co
             response += f"⏰ 执行时间: {job_info['hour']:02d}:{job_info['minute']:02d}\n"
             response += f"🏟️ 场馆: 预设{params.get('preset', 'N/A')}\n"
             response += f"📅 预订日期: {params.get('date', '今天')}\n"
-            response += f"🕐 预订时间: {params.get('start_hour', 18):02d}:00\n"
+            response += f"🕐 预订时段: {', '.join(f'{h:02d}:00' for h in start_hours)}\n"
             if params.get("target_users"):
                 response += f"👥 指定用户: {', '.join(params['target_users'])}\n"
             if params.get("exclude_users"):
@@ -238,6 +249,7 @@ def parse_booking_args(args_str: str) -> dict:
         (r"date=(\d+)", "date"),
         (r"time=(\d+)", "start_hour"),
         (r"start=(\d+)", "start_hour"),
+        (r"times=([^\s]+)", "start_hours"),
         (r"end=(\d+)", "end_hour"),
         (r"users=([^\s]+)", "target_users"),
         (r"exclude=([^\s]+)", "exclude_users"),
@@ -292,6 +304,8 @@ def parse_schedule_args(args_str: str) -> dict:
                 params[param_name] = int(value)
             elif param_name in ["target_users", "exclude_users"]:
                 params[param_name] = [item.strip() for item in value.split(',') if item.strip()]
+            elif param_name == "start_hours":
+                params[param_name] = [int(item.strip()) for item in value.split(',') if item.strip().isdigit()]
             else:
                 params[param_name] = value
     

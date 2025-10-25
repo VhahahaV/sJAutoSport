@@ -3,12 +3,13 @@ SJTU Sports Booking Bot entrypoint.
 """
 
 import asyncio
+import os
 import sys
 from pathlib import Path
 
 import nonebot
 from nonebot import get_driver, logger
-from nonebot.adapters.onebot.v11 import Adapter as OneBotAdapter
+from nonebot.adapters.onebot.v11 import Adapter as OneBotAdapter, Bot
 from nonebot.log import default_format
 
 # add project root to sys.path for sja_booking imports
@@ -54,12 +55,27 @@ def init_bot() -> None:
     global driver
 
     load_env()
-    nonebot.init()
+    
+    # 根据环境变量选择驱动
+    driver_type = os.getenv("DRIVER", "~fastapi")
+    if driver_type == "~fastapi":
+        nonebot.init(driver="nonebot.drivers.fastapi")
+    else:
+        nonebot.init()
+    
     driver = get_driver()
     configure_driver(driver)
     setup_logging(driver)
 
     driver.register_adapter(OneBotAdapter)
+
+    @driver.on_bot_connect
+    async def _(bot: Bot) -> None:  # pylint: disable=unused-argument
+        logger.success("OneBot 连接成功: %s", bot.self_id)
+
+    @driver.on_bot_disconnect
+    async def _(bot: Bot) -> None:  # pylint: disable=unused-argument
+        logger.warning("OneBot 连接断开: %s", bot.self_id)
 
     plugins_dir = Path(__file__).parent / "plugins"
     nonebot.load_plugins(str(plugins_dir.resolve()))

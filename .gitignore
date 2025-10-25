@@ -154,6 +154,11 @@ debug_*.txt
 endpoints.auto.json
 *.auto.json
 
+# 前端构建
+frontend/node_modules/
+frontend/dist/
+sJAutoSport/
+
 # IDE 文件
 .vscode/
 .idea/

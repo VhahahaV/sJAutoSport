@@ -102,7 +102,10 @@ class OrderManager:
             # 完全对齐单用户版本：若配置中提供了 cookie，则优先使用（常见为 "JSESSIONID=..."）
             cookie_str = ""
             try:
-                if getattr(self.api, "auth", None) and getattr(self.api.auth, "users", None):
+                # 优先使用当前切换到的用户
+                if getattr(self.api, "_current_user", None) and self.api._current_user.cookie:
+                    cookie_str = self.api._current_user.cookie
+                elif getattr(self.api, "auth", None) and getattr(self.api.auth, "users", None):
                     user0 = self.api.auth.users[0]
                     if user0 and user0.cookie:
                         cookie_str = user0.cookie

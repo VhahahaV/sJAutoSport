@@ -37,11 +37,18 @@ def configure_driver(driver) -> None:
     driver.config.command_prefix = command_prefix or "/"
     driver.config.command_start = command_starts
 
-    ntqq_ws = os.getenv("NTQQ_WS_URL")
+    # 反向 WebSocket 配置：NoneBot 作为 WS 服务端，NapCat 作为客户端连接
+    # 不需要设置 onebot_ws_url，因为 NapCat 会主动连接 NoneBot
     ntqq_http = os.getenv("NTQQ_HTTP_URL")
-    driver.config.onebot_ws_url = ntqq_ws or os.getenv("ONEBOT_WS_URL", "ws://127.0.0.1:6099/onebot/v11/ws")
-    driver.config.onebot_http_url = ntqq_http or os.getenv("ONEBOT_HTTP_URL", "http://127.0.0.1:6099")
+    driver.config.onebot_http_url = ntqq_http or os.getenv("ONEBOT_HTTP_URL", "http://127.0.0.1:3000")
     driver.config.onebot_access_token = os.getenv("NTQQ_ACCESS_TOKEN") or os.getenv("ONEBOT_ACCESS_TOKEN")
+    
+    # 关闭 HTTP 上报服务（反向 WS 不需要）
+    http_enabled = os.getenv("BOT_HTTP_SERVER_ENABLED", "false").lower() != "false"
+    driver.config.onebot_http_enabled = http_enabled
+    if http_enabled:
+        driver.config.onebot_http_host = os.getenv("BOT_HTTP_SERVER_HOST", "127.0.0.1")
+        driver.config.onebot_http_port = int(os.getenv("BOT_HTTP_SERVER_PORT", "6700"))
 
     driver.config.log_level = os.getenv("LOG_LEVEL", "INFO")
     driver.config.log_file = os.getenv("LOG_FILE", "logs/bot.log")
@@ -59,6 +66,15 @@ def configure_driver(driver) -> None:
 
     driver.config.plugins_dirs = ["bot/plugins"]
     driver.config.plugin_dirs = [str(BASE_DIR / "plugins")]
+
+    # 热加载配置
+    hot_reload = os.getenv("HOT_RELOAD", "false").lower() == "true"
+    driver.config.hot_reload = hot_reload
+    
+    if hot_reload:
+        # 热加载模式下，允许动态加载插件
+        driver.config.reload = True
+        driver.config.reload_dirs = [str(BASE_DIR / "plugins"), str(BASE_DIR.parent / "sja_booking")]
 
     superusers = os.getenv("SUPERUSERS", "")
     driver.config.superusers = {ident for ident in superusers.split(",") if ident.strip()}

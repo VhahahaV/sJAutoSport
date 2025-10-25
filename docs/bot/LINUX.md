@@ -94,7 +94,7 @@ winetricks corefonts            # 建议安装常用运行库
    `.env` 示例：
    ```ini
    NTQQ_WS_URL=ws://127.0.0.1:6099/onebot/v11/ws
-   NTQQ_HTTP_URL=http://127.0.0.1:6099
+   NTQQ_HTTP_URL=http://127.0.0.1:3000
    NTQQ_ACCESS_TOKEN=              # 若 NapCat 启用了 token，请保持一致
    ```
 

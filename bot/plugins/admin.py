@@ -7,7 +7,7 @@ import asyncio
 from datetime import datetime
 from typing import Optional
 
-from nonebot import on_command
+from nonebot import on_command, CommandGroup
 from nonebot.adapters.onebot.v11 import Bot, Message, MessageEvent
 from nonebot.log import logger
 from nonebot.params import CommandArg
@@ -18,10 +18,11 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 from sja_booking.service import monitor_status, list_scheduled_jobs, cancel_scheduled_job, stop_monitor
 
-# 命令处理器
-system_status_cmd = on_command("系统状态", aliases={"status", "系统"}, priority=5)
-cleanup_cmd = on_command("清理", aliases={"cleanup", "清理任务"}, priority=5)
-help_cmd = on_command("管理帮助", aliases={"admin_help", "管理"}, priority=5)
+admin_cmd = CommandGroup("admin", priority=5)
+
+system_status_cmd = admin_cmd.command("系统状态")
+cleanup_cmd = admin_cmd.command("清理")
+help_cmd = admin_cmd.command("管理帮助")
 
 
 @system_status_cmd.handle()
@@ -193,4 +194,3 @@ async def handle_admin_help(bot: Bot, event: MessageEvent):
 • 预订 preset=13 time=18
     """
     await help_cmd.finish(help_text)
-
