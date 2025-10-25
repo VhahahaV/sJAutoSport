@@ -66,21 +66,50 @@ async def handle_login(bot: Bot, event: MessageEvent, args: Message = CommandArg
             
             # 直接获取用户列表，不依赖会话状态
             from sja_booking.auth import AuthManager
+            import config as CFG
+            
             auth_manager = AuthManager()
             cookie_map, active_username = auth_manager.load_all_cookies()
+            config_users = getattr(CFG.AUTH, "users", []) or []
             
-            if not cookie_map:
-                await login_cmd.finish("❌ 没有保存的用户，请先使用 !login user=用户名 pass=密码 创建用户")
+            # 优先使用已保存cookie的用户，然后使用config.py中的用户
+            user_list = []
             
-            user_list = list(cookie_map.items())
+            # 添加已保存cookie的用户
+            for key, record in cookie_map.items():
+                user_list.append({
+                    "type": "cookie",
+                    "key": key,
+                    "username": record.get("username"),
+                    "password": record.get("password"),
+                    "nickname": record.get("nickname"),
+                })
+            
+            # 添加config.py中的用户（如果还没有cookie）
+            for user in config_users:
+                if not any(u.get("username") == user.username for u in user_list):
+                    user_list.append({
+                        "type": "config",
+                        "key": user.nickname,
+                        "username": user.username,
+                        "password": user.password,
+                        "nickname": user.nickname,
+                    })
+            
+            if not user_list:
+                await login_cmd.finish("❌ 没有可用的用户，请先使用 !login user=用户名 pass=密码 创建用户")
+            
             if 0 <= user_index < len(user_list):
-                key, record = user_list[user_index]
-                username = record.get("username")
-                password = record.get("password")
-                nickname = record.get("nickname")
+                user_info = user_list[user_index]
+                username = user_info.get("username")
+                password = user_info.get("password")
+                nickname = user_info.get("nickname")
                 
                 if not username:
                     await login_cmd.finish("❌ 该用户没有用户名")
+                
+                if not password:
+                    await login_cmd.finish("❌ 该用户没有保存密码，请使用 !login user=用户名 pass=密码 直接登录")
                 
                 # 使用保存的凭据登录
                 result = await service.start_login_session(
@@ -245,9 +274,33 @@ async def handle_login(bot: Bot, event: MessageEvent, args: Message = CommandArg
         auth_manager = AuthManager()
         cookie_map, active_username = auth_manager.load_all_cookies()
         
+        # 检查config.py中的用户配置
+        config_users = getattr(CFG.AUTH, "users", []) or []
+        
+        if not cookie_map and not config_users:
+            # 既没有保存的cookie，也没有config.py中的用户配置
+            await login_cmd.finish("❌ 没有配置任何用户，请使用以下格式直接登录：\n!login user=用户名 pass=密码 nick=昵称")
+        
         if not cookie_map:
-            # 没有保存的用户，直接创建新用户
-            await login_cmd.finish("❌ 没有保存的用户，请使用以下格式直接登录：\n!login user=用户名 pass=密码 nick=昵称")
+            # 没有保存的cookie，但有config.py中的用户配置，显示这些用户
+            response_parts = ["📋 已配置的用户列表（需要登录）："]
+            for idx, user in enumerate(config_users, start=1):
+                nickname = user.nickname or "未命名"
+                username = user.username or "未设置"
+                response_parts.append(f"{idx}. {nickname} ({username})")
+            
+            response_parts.append("")
+            response_parts.append("请选择操作：")
+            response_parts.append("1. 选择已有用户登录")
+            response_parts.append("2. 创建新用户")
+            response_parts.append("3. 取消")
+            response_parts.append("")
+            response_parts.append("使用方法：")
+            response_parts.append("• 选择用户：!login select 1")
+            response_parts.append("• 创建用户：!login new user=用户名 pass=密码 nick=昵称")
+            response_parts.append("• 取消：!login cancel")
+            
+            await login_cmd.finish("\n".join(response_parts))
         
         # 显示用户列表
         response_parts = ["📋 已保存的用户列表："]

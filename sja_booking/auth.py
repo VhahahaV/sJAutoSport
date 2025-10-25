@@ -46,6 +46,31 @@ def _now_utc() -> datetime:
     return datetime.now(timezone.utc)
 
 
+def _save_login_debug(prefix: str, content: str, url: httpx.URL) -> None:
+    try:
+        debug_dir = Path.home() / ".sja" / "debug"
+        debug_dir.mkdir(parents=True, exist_ok=True)
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        base_name = f"{prefix}_{timestamp}"
+        html_path = debug_dir / f"{base_name}.html"
+        meta_path = debug_dir / f"{base_name}.meta"
+        html_path.write_text(content, encoding="utf-8", errors="ignore")
+        meta_path.write_text(
+            json.dumps(
+                {
+                    "url": str(url),
+                    "saved_at": datetime.now(timezone.utc).isoformat(),
+                },
+                ensure_ascii=False,
+                indent=2,
+            ),
+            encoding="utf-8",
+        )
+        print(f"[yellow]登录失败调试信息已保存: {html_path}[/yellow]")
+    except Exception:  # pragma: no cover - debug helper best effort
+        pass
+
+
 def _cookie_header(cookies: httpx.Cookies, *, domain: Optional[str] = None) -> str:
     cookie_pairs = []
     norm_domain = domain.lstrip(".") if domain else None
@@ -94,7 +119,14 @@ class AuthStore:
     """文件持久化，支持可选 Fernet 加密。"""
 
     def __init__(self, path: Optional[Path] = None, *, secret_env: str = "SJABOT_SECRET") -> None:
-        self.path = path or Path.home() / ".sja" / "credentials.json"
+        default_store = os.getenv("SJABOT_CREDENTIAL_STORE") or os.getenv("SJA_CREDENTIAL_STORE")
+        if default_store:
+            default_path = Path(default_store).expanduser()
+        else:
+            default_path = Path(__file__).resolve().parent.parent / "data" / "credentials.json"
+
+        self.path = Path(path).expanduser() if path else default_path
+        self.path = self.path.resolve()
         self.path.parent.mkdir(parents=True, exist_ok=True)
         secret = os.getenv(secret_env)
         self._fernet: Optional[Any] = None
@@ -345,10 +377,13 @@ class AuthClient:
             re.compile(r"<p[^>]+class=\"error[^>]*>(?P<msg>[^<]+)<", re.IGNORECASE),
             re.compile(r"showMessage\(['\"](?P<msg>[^'\"]+)['\"]\)", re.IGNORECASE),
             re.compile(r"msg\s*:\s*['\"](?P<msg>[^'\"]+)['\"]", re.IGNORECASE),
+            re.compile(r"<div[^>]+class=\"alert[^>]*>(?P<msg>[^<]+)<", re.IGNORECASE),
+            re.compile(r"Missing your account[^<]*", re.IGNORECASE),
         ):
             match = pattern.search(html)
             if match:
-                return match.group("msg").strip()
+                group = match.groupdict().get("msg") if match.groups() else match.group(0)
+                return group.strip()
         return None
 
     @staticmethod
@@ -503,11 +538,11 @@ class AuthClient:
                     captcha_text = await fallback(image)
             elif confidence < threshold:
                 # 如果置信度低但结果长度合理，仍然尝试使用
-                if 4 <= len(captcha_text) <= 6:
-                    print(f"[yellow]验证码识别置信度较低 ({confidence:.2f})，但将尝试使用识别结果: {captcha_text}[/yellow]")
-                else:
-                    if fallback:
-                        captcha_text = await fallback(image)
+                # if 4 <= len(captcha_text) <= 6:
+                #     print(f"[yellow]验证码识别置信度较低 ({confidence:.2f})，但将尝试使用识别结果: {captcha_text}[/yellow]")
+                # else:
+                if fallback:
+                    captcha_text = await fallback(image)
             else:
                 print(f"[green]验证码识别成功，置信度: {confidence:.2f}, 结果: {captcha_text}[/green]")
         submit_resp = await self.submit(state, username, password, captcha_text)
@@ -516,14 +551,17 @@ class AuthClient:
         final_host = final_resp.request.url.host or ""
         if "jaccount" in final_host.lower():
             error_message = self._extract_error_message(final_resp.text) or f"{final_resp.status_code}"
+            _save_login_debug("login_failure", final_resp.text, final_resp.request.url)
             raise RuntimeError(f"登录失败：{error_message}")
 
         if final_resp.status_code >= 400:
+            _save_login_debug("login_failure", final_resp.text, final_resp.request.url)
             raise RuntimeError(f"登录失败：{final_resp.status_code}")
 
         sports_domain = urlparse(self.base_url).hostname
         cookie_header = _cookie_header(self._client.cookies, domain=sports_domain)
         if not cookie_header:
+            _save_login_debug("login_no_cookie", final_resp.text, final_resp.request.url)
             raise RuntimeError("登录失败：未获得场馆系统会话 Cookie")
         expires_at = _now_utc() + timedelta(hours=expires_in_hours)
         return AuthResult(_clone_cookies(self._client.cookies), cookie_header, expires_at)
@@ -565,12 +603,74 @@ async def perform_login(
     solver: Optional[CaptchaSolver] = None,
     fallback: Optional[HumanFallback] = None,
     threshold: float = 0.3,
+    max_retries: int = 5,
+    retry_delay: float = 2.0,
 ) -> AuthResult:
-    async with AuthClient(base_url, endpoints, auth_config) as client:
-        return await client.login(
-            username,
-            password,
-            solver=solver,
-            fallback=fallback or default_fallback_prompt,
-            threshold=threshold,
-        )
+    """
+    执行登录，支持重试机制
+    
+    Args:
+        base_url: 基础URL
+        endpoints: 端点配置
+        auth_config: 认证配置
+        username: 用户名
+        password: 密码
+        solver: 验证码求解器
+        fallback: 人工回退函数
+        threshold: 验证码置信度阈值
+        max_retries: 最大重试次数
+        retry_delay: 重试间隔（秒）
+    
+    Returns:
+        AuthResult: 认证结果
+        
+    Raises:
+        RuntimeError: 所有重试都失败后抛出最后一次的错误
+    """
+    last_error = None
+    
+    for attempt in range(max_retries):
+        try:
+            async with AuthClient(base_url, endpoints, auth_config) as client:
+                result = await client.login(
+                    username,
+                    password,
+                    solver=solver,
+                    fallback=fallback or default_fallback_prompt,
+                    threshold=threshold,
+                )
+                
+                if attempt > 0:
+                    print(f"[green]✅ 登录成功（第{attempt + 1}次尝试）[/green]")
+                
+                return result
+                
+        except RuntimeError as e:
+            last_error = e
+            error_msg = str(e)
+            
+            # 检查是否是验证码相关的错误
+            if "验证码" in error_msg or "captcha" in error_msg.lower():
+                print(f"[yellow]⚠️  验证码错误（第{attempt + 1}次尝试）: {error_msg}[/yellow]")
+            elif "Missing your account" in error_msg:
+                print(f"[yellow]⚠️  账号信息错误（第{attempt + 1}次尝试）: {error_msg}[/yellow]")
+            else:
+                print(f"[yellow]⚠️  登录失败（第{attempt + 1}次尝试）: {error_msg}[/yellow]")
+            
+            # 如果不是最后一次尝试，等待后重试
+            if attempt < max_retries - 1:
+                print(f"[blue]⏳ 等待 {retry_delay} 秒后重试...[/blue]")
+                await asyncio.sleep(retry_delay)
+            else:
+                print(f"[red]❌ 登录失败，已尝试 {max_retries} 次[/red]")
+        
+        except Exception as e:
+            last_error = e
+            print(f"[red]❌ 登录过程中发生错误（第{attempt + 1}次尝试）: {e}[/red]")
+            
+            if attempt < max_retries - 1:
+                print(f"[blue]⏳ 等待 {retry_delay} 秒后重试...[/blue]")
+                await asyncio.sleep(retry_delay)
+    
+    # 所有重试都失败了
+    raise RuntimeError(f"登录失败，已尝试 {max_retries} 次。最后一次错误: {last_error}")

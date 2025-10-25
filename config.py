@@ -1,26 +1,212 @@
 """Runtime configuration for the SJTU Sports CLI.
 
-Fill in the values below with the details captured from the sports platform.
-"""
+Configuration is loaded from environment variables so the same codebase can
+run in different environments (development, staging, production) without
+modifying source files.  See README/Docs for variable descriptions."""
+
+import json
+import os
+from pathlib import Path
+from typing import Any, Dict, Iterable, List, Optional
 
 from urllib.parse import quote_plus
 
-from sja_booking.models import AuthConfig, BookingTarget, EndpointSet, MonitorPlan, PresetOption, UserAuth
+from sja_booking.models import AuthConfig, BookingTarget, EndpointSet, MonitorPlan, PresetOption, SchedulePlan, UserAuth
+
+
+ENVIRONMENT = os.getenv("SJA_ENV", "development").lower()
+CONFIG_ROOT = Path(os.getenv("SJA_CONFIG_ROOT", Path(__file__).resolve().parent / "data")).resolve()
+CONFIG_ROOT.mkdir(parents=True, exist_ok=True)
+os.environ.setdefault("SJABOT_CREDENTIAL_STORE", str(CONFIG_ROOT / "credentials.json"))
+
+
+def _env_bool(name: str, default: bool = False) -> bool:
+    value = os.getenv(name)
+    if value is None:
+        return default
+    return value.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _split_env_list(name: str) -> List[str]:
+    value = os.getenv(name, "")
+    if not value:
+        return []
+    return [item.strip() for item in value.replace(";", ",").split(",") if item.strip()]
+
+
+def _load_json_from_env(env_key: str) -> Optional[Any]:
+    raw = os.getenv(env_key)
+    if not raw:
+        return None
+    try:
+        return json.loads(raw)
+    except json.JSONDecodeError:
+        raise RuntimeError(f"环境变量 {env_key} 不是有效的 JSON") from None
+
+
+def _load_json_from_file(path: Optional[str]) -> Optional[Any]:
+    if not path:
+        return None
+    file_path = Path(path).expanduser().resolve()
+    if not file_path.exists():
+        raise RuntimeError(f"配置文件 {file_path} 不存在")
+    try:
+        return json.loads(file_path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as exc:
+        raise RuntimeError(f"配置文件 {file_path} 不是有效的 JSON: {exc}") from exc
+
+
+def _load_users() -> List[UserAuth]:
+    data = _load_json_from_env("SJA_USERS_JSON")
+    if data is None:
+        data = _load_json_from_file(os.getenv("SJA_USERS_FILE"))
+
+    users: List[UserAuth] = []
+    if isinstance(data, list):
+        for entry in data:
+            if not isinstance(entry, dict):
+                continue
+            users.append(
+                UserAuth(
+                    nickname=entry.get("nickname"),
+                    username=entry.get("username"),
+                    password=entry.get("password"),
+                    token=entry.get("token"),
+                )
+            )
+
+    if users:
+        return users
+
+    # 开发环境提供示例用户，生产环境默认空列表
+    if ENVIRONMENT == "development":
+        sample = [
+            {
+                "nickname": os.getenv("SJA_USER0_NICK", "sample"),
+                "username": os.getenv("SJA_USER0_USERNAME", "sample@example.com"),
+                "password": os.getenv("SJA_USER0_PASSWORD"),
+            }
+        ]
+        return [
+            UserAuth(
+                nickname=item.get("nickname"),
+                username=item.get("username"),
+                password=item.get("password"),
+            )
+            for item in sample
+            if item.get("username")
+        ]
+
+    return []
+
+
+def _load_notification_targets(default: Dict[str, List[str]]) -> Dict[str, List[str]]:
+    groups = _split_env_list("SJA_NOTIFICATION_GROUPS")
+    users = _split_env_list("SJA_NOTIFICATION_USERS")
+    if groups:
+        default = {**default, "groups": groups}
+    if users:
+        default = {**default, "users": users}
+    return default
+
+
+def _load_target(default_target: BookingTarget) -> BookingTarget:
+    override = _load_json_from_env("SJA_TARGET_JSON")
+    if not isinstance(override, dict):
+        file_override = _load_json_from_file(os.getenv("SJA_TARGET_FILE"))
+        if isinstance(file_override, dict):
+            override = file_override
+    if isinstance(override, dict):
+        payload = default_target.__dict__.copy()
+        payload.update(override)
+        return BookingTarget(**payload)
+    return default_target
+
+
+def _load_presets(default_presets: List[PresetOption]) -> List[PresetOption]:
+    override = _load_json_from_env("SJA_PRESETS_JSON")
+    if override is None:
+        override = _load_json_from_file(os.getenv("SJA_PRESETS_FILE"))
+    presets: List[PresetOption] = []
+    if isinstance(override, list):
+        for entry in override:
+            if not isinstance(entry, dict):
+                continue
+            try:
+                presets.append(
+                    PresetOption(
+                        index=int(entry["index"]),
+                        venue_id=str(entry["venue_id"]),
+                        venue_name=str(entry["venue_name"]),
+                        field_type_id=str(entry["field_type_id"]),
+                        field_type_name=str(entry["field_type_name"]),
+                        field_type_code=entry.get("field_type_code"),
+                    )
+                )
+            except (KeyError, ValueError):
+                continue
+    if presets:
+        return presets
+    return default_presets
+
+
+def _parse_int_list(name: str) -> Optional[List[int]]:
+    values = _split_env_list(name)
+    if not values:
+        return None
+    result: List[int] = []
+    for item in values:
+        try:
+            result.append(int(item))
+        except ValueError:
+            continue
+    return result or None
 
 # Base address for all API requests. Most SJTU deployments respond on this host.
-BASE_URL = "https://sports.sjtu.edu.cn"
+BASE_URL = os.getenv("SJA_BASE_URL", "https://sports.sjtu.edu.cn")
 
-# 多用户认证配置 - 只存储用户基本信息，Cookie等时效性信息存储在 ~/.sja/credentials.json
-AUTH = AuthConfig(
-    users=[
-        # 示例：添加多个用户的基本信息
-        UserAuth(
-            nickname="",
-            username="",
-            password="",  # 密码可选存储，建议不存储
-        ),
+# 多用户认证配置 - 用户基础信息从环境/外部 JSON 文件加载
+AUTH = AuthConfig(users=_load_users())
 
-    ]
+# =============================================================================
+# 通知配置
+# =============================================================================
+_default_notification_targets = {
+    "groups": ["1071889524"],
+    "users": ["2890095056"],
+}
+_module_targets: Optional[Dict[str, List[str]]] = None
+_module_enable: Optional[bool] = None
+
+try:  # backwards compatibility with legacy notification_config.py
+    from notification_config import (  # type: ignore
+        NOTIFICATION_GROUPS,
+        NOTIFICATION_USERS,
+        BOT_HTTP_URL as NOTIFICATION_BOT_HTTP_URL,
+        BOT_ACCESS_TOKEN as NOTIFICATION_BOT_ACCESS_TOKEN,
+        ENABLE_NOTIFICATION,
+    )
+
+    BOT_HTTP_URL = os.getenv("BOT_HTTP_URL", NOTIFICATION_BOT_HTTP_URL)
+    BOT_ACCESS_TOKEN = os.getenv("BOT_ACCESS_TOKEN", NOTIFICATION_BOT_ACCESS_TOKEN)
+    _module_targets = {
+        "groups": list(NOTIFICATION_GROUPS),
+        "users": list(NOTIFICATION_USERS),
+    }
+    _module_enable = bool(ENABLE_NOTIFICATION)
+except ImportError:
+    BOT_HTTP_URL = os.getenv("BOT_HTTP_URL")
+    BOT_ACCESS_TOKEN = os.getenv("BOT_ACCESS_TOKEN")
+
+if not BOT_HTTP_URL:
+    BOT_HTTP_URL = "http://127.0.0.1:3000"
+if BOT_ACCESS_TOKEN is None:
+    BOT_ACCESS_TOKEN = ""
+
+NOTIFICATION_TARGETS = _load_notification_targets(_module_targets or _default_notification_targets)
+ENABLE_ORDER_NOTIFICATION = _env_bool(
+    "SJA_ENABLE_NOTIFICATION",
+    _module_enable if _module_enable is not None else ENVIRONMENT != "development",
 )
 
 
@@ -57,7 +243,7 @@ AUTH = AuthConfig(
 # - start_hour: 期望的开始时间（24小时制）
 # - duration_hours: 预订时长（小时）
 # =============================================================================
-TARGET = BookingTarget(
+DEFAULT_TARGET = BookingTarget(
     venue_keyword="学生中心",          # 场馆关键词，用于搜索匹配
     field_type_keyword="羽毛球",       # 运动类型关键词，用于搜索匹配
     date_offset=7,                    # 日期偏移量：7天后（下周今天）
@@ -71,13 +257,32 @@ TARGET = BookingTarget(
     duration_hours=1,                 # 预订时长：1小时
 )
 
+TARGET = _load_target(DEFAULT_TARGET)
+
 # Default monitor behaviour for the `monitor` and `schedule` commands.
+monitor_interval = int(os.getenv("SJA_MONITOR_INTERVAL", str(4 * 60)))
+monitor_preferred_hours = _parse_int_list("SJA_MONITOR_PREFERRED_HOURS") or [19, 20]
+monitor_preferred_days = _parse_int_list("SJA_MONITOR_PREFERRED_DAYS") or [0, 1, 2, 3, 4, 5, 6, 7, 8]
+
 MONITOR_PLAN = MonitorPlan(
-    enabled=True,
-    interval_seconds=4*60,
-    auto_book=True,
-    notify_stdout=True,
-    preferred_hours=[19,20],  # 默认无优先时间段
+    enabled=_env_bool("SJA_MONITOR_ENABLED", True),
+    interval_seconds=monitor_interval,
+    auto_book=_env_bool("SJA_MONITOR_AUTO_BOOK", True),
+    notify_stdout=_env_bool("SJA_MONITOR_NOTIFY_STDOUT", True),
+    preferred_hours=monitor_preferred_hours,
+    preferred_days=monitor_preferred_days,
+)
+
+schedule_start_hours = _parse_int_list("SJA_SCHEDULE_START_HOURS") or [18]
+
+SCHEDULE_PLAN = SchedulePlan(
+    hour=int(os.getenv("SJA_SCHEDULE_HOUR", "12")),
+    minute=int(os.getenv("SJA_SCHEDULE_MINUTE", "0")),
+    second=int(os.getenv("SJA_SCHEDULE_SECOND", "0")),
+    date_offset=int(os.getenv("SJA_SCHEDULE_DATE_OFFSET", "1")),
+    start_hours=schedule_start_hours,
+    duration_hours=int(os.getenv("SJA_SCHEDULE_DURATION", "1")),
+    auto_start=_env_bool("SJA_SCHEDULE_AUTO_START", True),
 )
 
 
@@ -113,11 +318,11 @@ ENCRYPTION_CONFIG = {
 MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEArKZOdKQAL+iYzJ4Q5EQzwv/yvVPnfdNVKRgNG19HbCYM4qIzFPEOFv28SVFQh+xqAj8tAfjpMSTihFwt6BQuWfZXWYpAqf4jF4cU7ez/VHJyzsn8Cb7Lf/1KsLpuz+MbqufrA57AysnLAnRXHOwik+QnpsXZYjTcjgxQ0iLMe5iJyo06CKFxH1rmgYMwS4E89kNg1VtYrFKs1MajApfhu9hTEXnm/lP24TPdefRXbf+z84p1GLue2HRhZs3wECH1HJWZOsrdL/M+wigWldY0fHoiaKsjD9rK1NyaPtk4bIYuwPsfQu5RN4hkEPpTvdw1nKzOdo77zNa5ovCY0uNLZwIDAQAB
 -----END PUBLIC KEY-----""",
     "aes_key_length": 16,  # AES-128
-    "return_url": "https://sports.sjtu.edu.cn/#/paymentResult/1",
+    "return_url": os.getenv("SJA_ENCRYPTION_RETURN_URL", "https://sports.sjtu.edu.cn/#/paymentResult/1"),
 }
 
 # 场馆和运动类型映射表 - 用户可以通过序号选择
-PRESET_TARGETS = [
+DEFAULT_PRESET_TARGETS = [
     PresetOption(
         index=1,
         venue_id="d784ad7c-cb24-4282-afd6-a67aec68c675",
@@ -392,6 +597,23 @@ PRESET_TARGETS = [
     ),
 ]
 
+PRESET_TARGETS = _load_presets(DEFAULT_PRESET_TARGETS)
 
 
-__all__ = ["BASE_URL", "AUTH", "ENDPOINTS", "TARGET", "MONITOR_PLAN", "PRESET_TARGETS", "ENCRYPTION_CONFIG"]
+
+__all__ = [
+    "ENVIRONMENT",
+    "CONFIG_ROOT",
+    "BASE_URL",
+    "AUTH",
+    "ENDPOINTS",
+    "TARGET",
+    "MONITOR_PLAN",
+    "SCHEDULE_PLAN",
+    "PRESET_TARGETS",
+    "ENCRYPTION_CONFIG",
+    "BOT_HTTP_URL",
+    "BOT_ACCESS_TOKEN",
+    "NOTIFICATION_TARGETS",
+    "ENABLE_ORDER_NOTIFICATION",
+]

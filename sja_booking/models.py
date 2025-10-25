@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import time
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Union
 
 
 @dataclass
@@ -57,7 +57,7 @@ class BookingTarget:
     field_type_code: Optional[str] = None
     date_token: Optional[str] = None
     use_all_dates: bool = False
-    date_offset: Optional[int] = 7
+    date_offset: Optional[Union[int, List[int]]] = 7
     fixed_dates: List[str] = field(default_factory=list)
     start_hour: int = 18
     duration_hours: int = 1
@@ -83,6 +83,24 @@ class MonitorPlan:
     auto_book: bool = False
     notify_stdout: bool = True
     preferred_hours: Optional[List[int]] = None  # 优先时间段，如 [15, 16, 17]
+    preferred_days: Optional[List[int]] = None  # 优先天数，0-8，0表示今天，1表示明天，以此类推
+
+
+@dataclass
+class SchedulePlan:
+    hour: int = 12
+    minute: int = 0
+    second: int = 0
+    date_offset: int = 1
+    start_hours: List[int] = field(default_factory=lambda: [18])
+    duration_hours: int = 1
+    auto_start: bool = True
+
+    @property
+    def start_hour(self) -> int:
+        if self.start_hours:
+            return self.start_hours[0]
+        return 18
 
 
 @dataclass

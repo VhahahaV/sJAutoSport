@@ -709,10 +709,28 @@ class SportsAPI:
         base = today or datetime.now()
         if target.fixed_dates:
             return target.fixed_dates
+        
+        # 如果 use_all_dates 为 True，返回空列表让系统自动发现所有可用日期
         if getattr(target, "use_all_dates", False):
             return []
+        
         if target.date_offset is None:
             return []
+        
+        # 如果指定了单个日期偏移，返回该日期
+        if isinstance(target.date_offset, int):
+            goal = base + timedelta(days=target.date_offset)
+            return [goal.strftime("%Y-%m-%d")]
+        
+        # 如果 date_offset 是列表，返回所有指定的日期
+        if isinstance(target.date_offset, list):
+            dates = []
+            for offset in target.date_offset:
+                goal = base + timedelta(days=offset)
+                dates.append(goal.strftime("%Y-%m-%d"))
+            return dates
+        
+        # 默认情况：返回单个日期
         goal = base + timedelta(days=target.date_offset)
         return [goal.strftime("%Y-%m-%d")]
 
