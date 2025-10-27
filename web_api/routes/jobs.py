@@ -58,6 +58,8 @@ def _build_monitor_summaries(monitors: List[Dict[str, Any]]) -> List[JobSummary]
         monitor_id = str(monitor.get("id") or monitor.get("monitor_id") or "monitor")
         label = monitor.get("resolved", {}).get("label") if isinstance(monitor.get("resolved"), dict) else None
         name = label or f"监控任务 {monitor_id}"
+        # 尝试获取PID
+        pid = monitor.get("pid")
         results.append(
             JobSummary(
                 job_id=f"monitor:{monitor_id}",
@@ -67,7 +69,7 @@ def _build_monitor_summaries(monitors: List[Dict[str, Any]]) -> List[JobSummary]
                 created_at=_parse_datetime(monitor.get("start_time") or monitor.get("created_at")),
                 started_at=_parse_optional_datetime(monitor.get("start_time")),
                 stopped_at=_parse_optional_datetime(monitor.get("stop_time")),
-                pid=None,
+                pid=pid,
             )
         )
     return results
@@ -78,6 +80,8 @@ def _build_schedule_summaries(schedules: List[Dict[str, Any]]) -> List[JobSummar
     for schedule in schedules:
         schedule_id = str(schedule.get("id") or schedule.get("job_id") or "schedule")
         name = schedule.get("name") or f"定时任务 {schedule_id}"
+        # 尝试获取PID，定时任务可能需要从系统进程获取
+        pid = schedule.get("pid")
         results.append(
             JobSummary(
                 job_id=f"schedule:{schedule_id}",
@@ -87,7 +91,7 @@ def _build_schedule_summaries(schedules: List[Dict[str, Any]]) -> List[JobSummar
                 created_at=_parse_datetime(schedule.get("created_time") or schedule.get("created_at")),
                 started_at=_parse_optional_datetime(schedule.get("next_run") or schedule.get("last_run")),
                 stopped_at=_parse_optional_datetime(schedule.get("cancelled_time") or schedule.get("stopped_at")),
-                pid=None,
+                pid=pid,
             )
         )
     return results

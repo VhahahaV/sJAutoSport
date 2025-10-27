@@ -155,7 +155,8 @@ def check_catnapqq_connection():
     """检查CatNapQQ连接"""
     try:
         import requests
-        response = requests.get("http://127.0.0.1:3000/", timeout=5)
+        headers = {"Authorization": "Bearer 123456"}
+        response = requests.get("http://127.0.0.1:3000/", headers=headers, timeout=5)
         return response.status_code == 200
     except:
         return False

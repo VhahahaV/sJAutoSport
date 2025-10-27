@@ -6,6 +6,7 @@ import DashboardPage from "./pages/Dashboard";
 import LoginStatusPage from "./pages/LoginStatus";
 import MonitorPage from "./pages/Monitor";
 import OrderPage from "./pages/Order";
+import OrdersPage from "./pages/Orders";
 import SchedulePage from "./pages/Schedule";
 import SlotsPage from "./pages/Slots";
 
@@ -18,6 +19,7 @@ const App = () => (
         <Route path="/login-status" element={<Navigate to="/sessions" replace />} />
         <Route path="/slots" element={<SlotsPage />} />
         <Route path="/order" element={<OrderPage />} />
+        <Route path="/orders" element={<OrdersPage />} />
         <Route path="/monitor" element={<MonitorPage />} />
         <Route path="/schedule" element={<SchedulePage />} />
       </Routes>

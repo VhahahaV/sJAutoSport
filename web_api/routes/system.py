@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any, Dict
 
-from fastapi import APIRouter
+from fastapi import APIRouter, Query
 
 from sja_booking import service
 
@@ -34,3 +34,12 @@ async def users_info() -> Dict[str, Any]:
     """Return detailed profile information for stored users."""
     records = await service.fetch_user_infos()
     return {"users": records}
+
+
+@router.get("/orders")
+async def get_orders(
+    page_no: int = Query(1, ge=1),
+    page_size: int = Query(10, ge=1, le=100)
+) -> Dict[str, Any]:
+    """获取用户订单列表"""
+    return service.get_user_orders(page_no=page_no, page_size=page_size)

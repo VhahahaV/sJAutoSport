@@ -72,6 +72,8 @@ class JobManager:
         self.jobs: Dict[str, JobInfo] = {}
         self.console = Console()
         self._load_jobs()
+        # 自动恢复失败的KeepAlive任务
+        self._auto_recover_jobs()
     
     def _load_jobs(self) -> None:
         """加载任务列表"""
@@ -504,6 +506,36 @@ class JobManager:
             self.console.print(f"[green]🧹 清理了 {cleaned} 个已死亡的任务[/green]")
         
         return cleaned
+    
+    def _auto_recover_jobs(self) -> None:
+        """自动恢复失败的KeepAlive任务"""
+        recovered = 0
+        
+        for job_id, job in list(self.jobs.items()):
+            if job.job_type == JobType.KEEP_ALIVE and job.status in (JobStatus.FAILED, JobStatus.STOPPED):
+                # 检查进程是否真的死亡
+                if job.pid:
+                    try:
+                        os.kill(job.pid, 0)
+                        # 进程还在运行，更新状态
+                        job.status = JobStatus.RUNNING
+                        recovered += 1
+                        continue
+                    except ProcessLookupError:
+                        # 进程已死亡，尝试重启
+                        pass
+                
+                # 尝试重启KeepAlive任务
+                try:
+                    self.console.print(f"[yellow]🔄 自动恢复KeepAlive任务: {job.name}[/yellow]")
+                    self.start_job(job_id)
+                    recovered += 1
+                except Exception as e:
+                    self.console.print(f"[red]❌ 恢复KeepAlive任务失败: {e}[/red]")
+        
+        if recovered > 0:
+            self._save_jobs()
+            self.console.print(f"[green]✅ 已恢复 {recovered} 个KeepAlive任务[/green]")
     
     def _start_keep_alive_job(self, job: JobInfo) -> int:
         """启动Keep-Alive任务"""

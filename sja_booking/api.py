@@ -777,6 +777,12 @@ class SportsAPI:
                 if keyword in ft.name:
                     return ft
         return field_types[0] if field_types else None
+    
+    def list_orders(self, page_no: int = 1, page_size: int = 10) -> Dict[str, Any]:
+        """获取用户订单列表"""
+        path = "/venue/personal/personalOrderlist"
+        resp = self._req("GET", path, params={"pageNo": page_no, "pageSize": page_size})
+        return resp.json()
 
 
 

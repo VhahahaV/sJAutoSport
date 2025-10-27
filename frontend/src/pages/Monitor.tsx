@@ -6,8 +6,12 @@ import {
   type Preset,
   type UserSummary,
 } from "../lib/api";
-import { buildDayOffsetOptions, buildHourOptions, MONITOR_HOURS } from "../lib/options";
-import DebugPanel from "../components/DebugPanel";
+import { buildDayOffsetOptions, buildHourOptions } from "../lib/options";
+
+// 只显示 12:00 到 21:00
+const PREFERRED_HOURS = [12, 13, 14, 15, 16, 17, 18, 19, 20, 21];
+const MAX_SLOT_PREVIEW = 5;
+// Debug panel removed per requirements
 
 type UserOption = {
   id: string;
@@ -46,15 +50,13 @@ const MonitorPage = () => {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [message, setMessage] = useState<string | null>(null);
-  const [debugRequest, setDebugRequest] = useState<unknown>();
-  const [debugResponse, setDebugResponse] = useState<unknown>();
-  const [debugError, setDebugError] = useState<string | null>(null);
-  const [deleteDebug, setDeleteDebug] = useState<{ id: string; response?: unknown; error?: string | null }>();
+  // Debug states removed per requirements
 
-  const [monitorId, setMonitorId] = useState("");
+  const [monitorId, setMonitorId] = useState("monitor-" + Date.now().toString().slice(-6));
   const [presetIndex, setPresetIndex] = useState<number | "">("");
-  const [intervalMinutes, setIntervalMinutes] = useState(4);
-  const [autoBook, setAutoBook] = useState(false);
+  const [intervalMinutes, setIntervalMinutes] = useState(15);
+  const [autoBook, setAutoBook] = useState(true);  // 默认打开
+  const [requireAllUsersSuccess, setRequireAllUsersSuccess] = useState(false);
   const [includeAllTargets, setIncludeAllTargets] = useState(true);
   const [selectedTargetUsers, setSelectedTargetUsers] = useState<string[]>([]);
   const [selectedExcludeUsers, setSelectedExcludeUsers] = useState<string[]>([]);
@@ -62,7 +64,7 @@ const MonitorPage = () => {
   const [selectedPreferredDays, setSelectedPreferredDays] = useState<number[]>([]);
   const [deleteAllLoading, setDeleteAllLoading] = useState(false);
 
-  const monitorHourOptions = useMemo(() => buildHourOptions(MONITOR_HOURS), []);
+  const monitorHourOptions = useMemo(() => buildHourOptions(PREFERRED_HOURS), []);
   const dayOptions = useMemo(
     () => buildDayOffsetOptions().map((option) => ({ value: Number(option.value), label: option.label })),
     [],
@@ -171,25 +173,20 @@ const MonitorPage = () => {
         preset: presetIndex ? Number(presetIndex) : undefined,
         interval_seconds: intervalMinutes * 60,
         auto_book: autoBook,
+        require_all_users_success: requireAllUsersSuccess,
         target_users: targetUsersPayload,
         exclude_users: excludeUsersPayload,
         preferred_hours: preferredHoursPayload,
         preferred_days: preferredDaysPayload,
       };
 
-      setDebugRequest(payload);
-      setDebugResponse(undefined);
-      setDebugError(null);
-
-      const response = await api.createMonitor(payload);
+      await api.createMonitor(payload);
       setMessage("监控任务已创建");
-      setDebugResponse(response);
       resetForm();
       await loadMonitors();
     } catch (err) {
       const messageText = (err as Error).message;
       setError(messageText);
-      setDebugError(messageText);
     } finally {
       setLoading(false);
     }
@@ -200,15 +197,12 @@ const MonitorPage = () => {
       setLoading(true);
       setError(null);
       setMessage(null);
-      setDeleteDebug({ id, response: undefined, error: null });
-      const response = await api.deleteMonitor(id);
+      await api.deleteMonitor(id);
       setMessage(`已停止监控任务 ${id}`);
-      setDeleteDebug({ id, response, error: null });
       await loadMonitors();
     } catch (err) {
       const messageText = (err as Error).message;
       setError(messageText);
-      setDeleteDebug({ id, error: messageText });
     } finally {
       setLoading(false);
     }
@@ -350,19 +344,43 @@ const MonitorPage = () => {
 
           <label className="form-label">
             <span>监控间隔（分钟）</span>
-            <input
-              type="number"
-              min={1}
+            <select
               value={intervalMinutes}
-              onChange={(event) => setIntervalMinutes(Number(event.target.value) || 1)}
+              onChange={(event) => setIntervalMinutes(Number(event.target.value))}
               className="input"
-            />
+            >
+              <option value={5}>5分钟</option>
+              <option value={10}>10分钟</option>
+              <option value={15}>15分钟</option>
+              <option value={20}>20分钟</option>
+              <option value={25}>25分钟</option>
+              <option value={30}>30分钟</option>
+              <option value={60}>60分钟</option>
+            </select>
           </label>
 
-          <label style={{ display: "flex", alignItems: "center", gap: "8px" }}>
-            <input type="checkbox" checked={autoBook} onChange={(event) => setAutoBook(event.target.checked)} />
-            自动预订
-          </label>
+          <div className="panel" style={{ gridColumn: "1 / -1", border: "2px solid #F97316", background: "#FFF7ED", padding: "16px" }}>
+            <label style={{ display: "flex", alignItems: "center", gap: "12px", fontWeight: "600", fontSize: "16px" }}>
+              <input 
+                type="checkbox" 
+                checked={autoBook} 
+                onChange={(event) => setAutoBook(event.target.checked)}
+                style={{ width: "20px", height: "20px" }}
+              />
+              <span style={{ color: "#EA580C" }}>🤖 自动预订 - 发现可用场次时自动下单</span>
+            </label>
+            {autoBook && (
+              <label style={{ display: "flex", alignItems: "center", gap: "12px", marginTop: "12px", fontSize: "14px" }}>
+                <input 
+                  type="checkbox" 
+                  checked={requireAllUsersSuccess} 
+                  onChange={(event) => setRequireAllUsersSuccess(event.target.checked)}
+                  style={{ width: "18px", height: "18px" }}
+                />
+                <span style={{ color: "#0891B2" }}>✓ 要求所有用户都成功 - 所有指定用户都预订成功才算任务完成（否则一人成功即完成）</span>
+              </label>
+            )}
+          </div>
 
           <fieldset className="fieldset" style={{ gridColumn: "1 / -1" }}>
             <legend>指定用户</legend>
@@ -568,18 +586,7 @@ const MonitorPage = () => {
                     <strong>排除账号：</strong>
                     {excludeUserList.length ? excludeUserList.join(", ") : "-"}
                   </div>
-                  <div style={{ gridColumn: "1 / -1" }}>
-                    <strong>可用场次：</strong>
-                    {slotPreview.length === 0 ? (
-                      <span style={{ marginLeft: "6px" }}>暂未发现符合条件的场次</span>
-                    ) : (
-                      <ul style={{ margin: "6px 0 0 18px", padding: 0, listStyle: "disc" }}>
-                        {slotPreview.map((item, slotIndex) => (
-                          <li key={`${monitorKey}-slot-${slotIndex}`}>{item}</li>
-                        ))}
-                      </ul>
-                    )}
-                  </div>
+                  {/* 场地信息已移除 */}
                   <div style={{ gridColumn: "1 / -1" }}>
                     <button
                       className="button button-secondary"
@@ -597,20 +604,6 @@ const MonitorPage = () => {
         </div>
       </section>
 
-      <DebugPanel
-        title="创建监控调试信息"
-        request={debugRequest}
-        response={debugResponse}
-        error={debugError}
-      />
-      {deleteDebug ? (
-        <DebugPanel
-          title="停止监控调试信息"
-          request={{ monitor_id: deleteDebug.id }}
-          response={deleteDebug.response}
-          error={deleteDebug.error}
-        />
-      ) : null}
     </>
   );
 };

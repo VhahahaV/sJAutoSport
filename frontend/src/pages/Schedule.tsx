@@ -8,20 +8,21 @@ import {
   type UserSummary,
 } from "../lib/api";
 import {
-  DEFAULT_HOURS,
-  HOURS_24,
   buildDayOffsetOptions,
   buildHourOptions,
   buildMinuteOptions,
   buildSecondOptions,
 } from "../lib/options";
 
+// 只显示 12:00 到 21:00
+const SCHEDULE_HOURS = [12, 13, 14, 15, 16, 17, 18, 19, 20, 21];
+
 type UserOption = {
   id: string;
   label: string;
   description?: string;
 };
-import DebugPanel from "../components/DebugPanel";
+// Debug panel removed per requirements
 
 const SchedulePage = () => {
   const [presets, setPresets] = useState<Preset[]>([]);
@@ -29,23 +30,21 @@ const SchedulePage = () => {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [message, setMessage] = useState<string | null>(null);
-  const [debugRequest, setDebugRequest] = useState<unknown>();
-  const [debugResponse, setDebugResponse] = useState<unknown>();
-  const [debugError, setDebugError] = useState<string | null>(null);
-  const [deleteDebug, setDeleteDebug] = useState<{ id: string; response?: unknown; error?: string | null }>();
+  // Debug states removed per requirements
 
-  const [jobId, setJobId] = useState("");
-  const [executeHour, setExecuteHour] = useState(8);
+  const [jobId, setJobId] = useState("schedule-" + Date.now().toString().slice(-6));
+  const [executeHour, setExecuteHour] = useState(12);
   const [executeMinute, setExecuteMinute] = useState(0);
   const [executeSecond, setExecuteSecond] = useState(0);
   const [presetIndex, setPresetIndex] = useState<number | "">("");
-  const [selectedDate, setSelectedDate] = useState<string>("0");
+  const [selectedDate, setSelectedDate] = useState<string>("7");
   const [selectedStartHours, setSelectedStartHours] = useState<number[]>([]);
   const [availableUsers, setAvailableUsers] = useState<UserSummary[]>([]);
   const [userError, setUserError] = useState<string | null>(null);
   const [userLoading, setUserLoading] = useState(false);
   const [includeAllUsers, setIncludeAllUsers] = useState(true);
   const [selectedUsers, setSelectedUsers] = useState<string[]>([]);
+  const [requireAllUsersSuccess, setRequireAllUsersSuccess] = useState(true);
   const userOptions = useMemo(
     () =>
       availableUsers.map((user, index) => {
@@ -61,8 +60,8 @@ const SchedulePage = () => {
     [availableUsers],
   );
 
-  const bookingHourOptions = useMemo(() => buildHourOptions(DEFAULT_HOURS), []);
-  const executionHourOptions = useMemo(() => buildHourOptions(HOURS_24), []);
+  const bookingHourOptions = useMemo(() => buildHourOptions(SCHEDULE_HOURS), []);
+  const executionHourOptions = useMemo(() => buildHourOptions(SCHEDULE_HOURS), []);
   const minuteOptions = useMemo(() => buildMinuteOptions(), []);
   const secondOptions = useMemo(() => buildSecondOptions(), []);
   const dayOptions = useMemo(() => buildDayOffsetOptions(), []);
@@ -138,6 +137,7 @@ const SchedulePage = () => {
         second: executeSecond,
         preset: presetIndex ? Number(presetIndex) : undefined,
         date: selectedDate || undefined,
+        require_all_users_success: requireAllUsersSuccess,
       };
 
       if (selectedStartHours.length > 0) {
@@ -147,12 +147,9 @@ const SchedulePage = () => {
       if (!includeAllUsers && selectedUsers.length > 0) {
         payload.target_users = selectedUsers;
       }
-      setDebugRequest(payload);
-      setDebugResponse(undefined);
-      setDebugError(null);
-      const response = await api.createSchedule(payload);
+      
+      await api.createSchedule(payload);
       setMessage("定时任务已创建");
-      setDebugResponse(response);
       setJobId("");
       setSelectedUsers([]);
       setSelectedStartHours([]);
@@ -161,7 +158,6 @@ const SchedulePage = () => {
     } catch (err) {
       const messageText = (err as Error).message;
       setError(messageText);
-      setDebugError(messageText);
     } finally {
       setLoading(false);
     }
@@ -172,15 +168,12 @@ const SchedulePage = () => {
       setLoading(true);
       setError(null);
       setMessage(null);
-      setDeleteDebug({ id, response: undefined, error: null });
-      const response = await api.deleteSchedule(id);
+      await api.deleteSchedule(id);
       setMessage(`已删除定时任务 ${id}`);
-      setDeleteDebug({ id, response, error: null });
       await loadSchedules();
     } catch (err) {
       const messageText = (err as Error).message;
       setError(messageText);
-      setDeleteDebug({ id, error: messageText });
     } finally {
       setLoading(false);
     }
@@ -348,6 +341,20 @@ const SchedulePage = () => {
             ) : null}
           </fieldset>
 
+          {!includeAllUsers && selectedUsers.length > 0 && (
+            <div className="panel" style={{ gridColumn: "1 / -1", border: "2px solid #0891B2", background: "#ECFEFF", padding: "16px" }}>
+              <label style={{ display: "flex", alignItems: "center", gap: "12px", fontSize: "14px" }}>
+                <input 
+                  type="checkbox" 
+                  checked={requireAllUsersSuccess} 
+                  onChange={(event) => setRequireAllUsersSuccess(event.target.checked)}
+                  style={{ width: "18px", height: "18px" }}
+                />
+                <span style={{ color: "#0891B2" }}>✓ 要求所有用户都成功 - 所有指定用户都预订成功才算任务完成（否则一人成功即完成）</span>
+              </label>
+            </div>
+          )}
+
           <div className="form-actions">
             <button className="button button-primary" type="submit" disabled={loading}>
               {loading ? "提交中..." : "创建定时任务"}
@@ -450,20 +457,6 @@ const SchedulePage = () => {
         </div>
       </section>
 
-      <DebugPanel
-        title="创建定时任务调试信息"
-        request={debugRequest}
-        response={debugResponse}
-        error={debugError}
-      />
-      {deleteDebug ? (
-        <DebugPanel
-          title="删除定时任务调试信息"
-          request={{ job_id: deleteDebug.id }}
-          response={deleteDebug.response}
-          error={deleteDebug.error}
-        />
-      ) : null}
     </>
   );
 };

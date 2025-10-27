@@ -173,7 +173,7 @@ AUTH = AuthConfig(users=_load_users())
 # =============================================================================
 _default_notification_targets = {
     "groups": ["YOUR_GROUP_ID"],
-    "users": ["YOUR_QQ_ID"],
+    "users": [],
 }
 _module_targets: Optional[Dict[str, List[str]]] = None
 _module_enable: Optional[bool] = None

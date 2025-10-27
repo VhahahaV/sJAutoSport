@@ -167,6 +167,7 @@ class MonitorRequest(BaseModel):
     start_hour: Optional[int] = None
     interval_seconds: int = Field(240, ge=30)
     auto_book: bool = False
+    require_all_users_success: bool = Field(False, description="是否要求所有用户都成功")
     target: Optional[TargetOverride] = None
     preferred_hours: Optional[List[int]] = None
     preferred_days: Optional[List[int]] = None
@@ -197,6 +198,7 @@ class ScheduleRequest(BaseModel):
     date: Optional[str] = None
     start_hour: Optional[int] = None
     start_hours: Optional[List[int]] = None
+    require_all_users_success: bool = Field(False, description="是否要求所有用户都成功")
     target: Optional[TargetOverride] = None
     target_users: Optional[List[str]] = None
     exclude_users: Optional[List[str]] = None
@@ -319,6 +321,7 @@ async def create_monitor(request: MonitorCreateRequest) -> Dict[str, Any]:
         start_hour=request.start_hour,
         interval_seconds=request.interval_seconds,
         auto_book=request.auto_book,
+        require_all_users_success=request.require_all_users_success,
         base_target=base_target,
         target_users=request.target_users,
         exclude_users=request.exclude_users,
@@ -384,6 +387,7 @@ async def create_schedule(request: ScheduleRequest) -> Dict[str, Any]:
         field_type_id=request.field_type_id,
         date=request.date,
         start_hours=clean_start_hours or None,
+        require_all_users_success=request.require_all_users_success,
         base_target=base_target,
         target_users=dedup_targets or None,
         exclude_users=dedup_excludes or None,
