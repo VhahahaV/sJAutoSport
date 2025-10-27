@@ -24,6 +24,15 @@ def create_app() -> FastAPI:
         allow_headers=["*"],
     )
 
+    @app.on_event("startup")
+    async def startup_event():
+        """服务启动时自动恢复KeepAlive任务"""
+        from sja_booking.job_manager import get_job_manager
+        job_manager = get_job_manager()
+        job_manager.cleanup_dead_jobs()
+        # 自动恢复功能已在构造函数中调用
+        # get_job_manager()会自动触发_auto_recover_jobs()
+
     register_routes(app)
     return app
 

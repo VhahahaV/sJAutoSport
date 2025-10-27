@@ -1,7 +1,47 @@
 import { useEffect, useMemo, useState } from "react";
 
 import StatusCard from "../components/StatusCard";
-import { api, type HealthResponse, type JobSummary } from "../lib/api";
+import SlotTable from "../components/SlotTable";
+import { api, type HealthResponse, type JobSummary, type Preset } from "../lib/api";
+
+const JobDeleteButton = ({ job, onDeleted }: { job: JobSummary; onDeleted: () => void }) => {
+  const [loading, setLoading] = useState(false);
+  
+  const handleDelete = async () => {
+    if (!confirm(`确定要删除任务"${job.name}"吗？`)) {
+      return;
+    }
+    
+    try {
+      setLoading(true);
+      if (job.job_type === "monitor") {
+        const monitorId = job.job_id.replace("monitor:", "");
+        await api.deleteMonitor(monitorId);
+      } else if (job.job_type === "schedule") {
+        const scheduleId = job.job_id.replace("schedule:", "");
+        await api.deleteSchedule(scheduleId);
+      } else if (job.job_type === "keep_alive") {
+        await api.deleteKeepAliveJob(job.job_id);
+      }
+      onDeleted();
+    } catch (err) {
+      alert((err as Error).message);
+    } finally {
+      setLoading(false);
+    }
+  };
+  
+  return (
+    <button
+      className="button button-danger"
+      onClick={handleDelete}
+      disabled={loading}
+      style={{ padding: "4px 12px", fontSize: "12px" }}
+    >
+      {loading ? "..." : "删除"}
+    </button>
+  );
+};
 
 const jobTypeLabels: Record<string, string> = {
   monitor: "监控",
@@ -16,14 +56,25 @@ const DashboardPage = () => {
   const [jobsLoading, setJobsLoading] = useState(true);
   const [jobTypeFilter, setJobTypeFilter] = useState<string>("");
   const [error, setError] = useState<string | null>(null);
+  const [presets, setPresets] = useState<Preset[]>([]);
+  const [loginStatus, setLoginStatus] = useState<any>(null);
+
+  // 默认查询的预设 (气模体育中心羽毛球、学生中心健身房、子衿街健身房)
+  const defaultPresets = [5, 3, 8];
 
   useEffect(() => {
     let mounted = true;
     const loadHealth = async () => {
       try {
-        const healthResp = await api.getHealth();
+        const [healthResp, presetsResp, loginResp] = await Promise.all([
+          api.getHealth(),
+          api.getPresets(),
+          api.getLoginStatus(),
+        ]);
         if (!mounted) return;
         setHealth(healthResp);
+        setPresets(presetsResp.presets || []);
+        setLoginStatus(loginResp);
       } catch (err) {
         if (mounted) {
           setError((err as Error).message);
@@ -78,6 +129,9 @@ const DashboardPage = () => {
     [jobs],
   );
 
+  // 获取默认查询的预设信息
+  const defaultPresetInfos = presets.filter((p) => defaultPresets.includes(p.index));
+
   return (
     <>
       <div className="content-header">
@@ -86,6 +140,30 @@ const DashboardPage = () => {
           <p className="content-subtitle">快速了解系统运行状态与后台任务。</p>
         </div>
       </div>
+
+      {/* 默认查询显示 */}
+      {loginStatus && loginStatus.users && loginStatus.users.length > 0 && (
+        <section className="section">
+          <h3>📊 今日场次查询</h3>
+          <div className="grid">
+            {defaultPresetInfos.map((preset) => (
+              <SlotTable
+                key={preset.index}
+                preset={preset.index}
+                venueName={preset.venue_name}
+                fieldTypeName={preset.field_type_name}
+              />
+            ))}
+          </div>
+        </section>
+      )}
+      
+      {(!loginStatus || !loginStatus.users || loginStatus.users.length === 0) && (
+        <div className="panel notice">
+          <strong>⚠️ 未登录</strong>
+          <span>请先登录后再查看场次信息。</span>
+        </div>
+      )}
 
       {error ? (
         <div className="panel notice notice-error">
@@ -145,44 +223,52 @@ const DashboardPage = () => {
           ) : jobs.length === 0 ? (
             <span className="muted-text">目前暂无任务。</span>
           ) : (
-            <table className="table">
-              <thead>
-                <tr>
-                  <th>ID</th>
-                  <th>名称</th>
-                  <th>类型</th>
-                  <th>状态</th>
-                  <th>创建时间</th>
-                  <th>最近启动</th>
-                  <th>PID</th>
-                </tr>
-              </thead>
-              <tbody>
-                {jobs.map((job) => (
-                  <tr key={job.job_id}>
-                    <td>{job.job_id}</td>
-                    <td>{job.name}</td>
-                    <td>{jobTypeLabels[job.job_type] ?? job.job_type}</td>
-                    <td>
-                      <span
-                        className={`chip ${
-                          job.status === "running"
-                            ? "chip-success"
-                            : job.status === "pending"
-                              ? "chip-info"
-                              : "chip-warning"
-                        }`}
-                      >
-                        {job.status}
-                      </span>
-                    </td>
-                    <td>{job.created_at ? new Date(job.created_at).toLocaleString() : "-"}</td>
-                    <td>{job.started_at ? new Date(job.started_at).toLocaleString() : "未启动"}</td>
-                    <td>{job.pid ?? "-"}</td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
+            <>
+              <div className="table-container" style={{ overflowX: "auto" }}>
+                <table className="table">
+                  <thead>
+                    <tr>
+                      <th>ID</th>
+                      <th>名称</th>
+                      <th>类型</th>
+                      <th>状态</th>
+                      <th>创建时间</th>
+                      <th>最近启动</th>
+                      <th>PID</th>
+                      <th>操作</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {jobs.map((job) => (
+                      <tr key={job.job_id}>
+                        <td>{job.job_id}</td>
+                        <td>{job.name}</td>
+                        <td>{jobTypeLabels[job.job_type] ?? job.job_type}</td>
+                        <td>
+                          <span
+                            className={`chip ${
+                              job.status === "running"
+                                ? "chip-success"
+                                : job.status === "pending"
+                                  ? "chip-info"
+                                  : "chip-warning"
+                            }`}
+                          >
+                            {job.status}
+                          </span>
+                        </td>
+                        <td>{job.created_at ? new Date(job.created_at).toLocaleString() : "-"}</td>
+                        <td>{job.started_at ? new Date(job.started_at).toLocaleString() : "未启动"}</td>
+                        <td>{job.pid ?? "-"}</td>
+                        <td>
+                          <JobDeleteButton job={job} onDeleted={() => window.location.reload()} />
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </>
           )}
         </div>
       </section>

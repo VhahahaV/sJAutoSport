@@ -52,7 +52,6 @@ echo
 mkdir -p "$CONFIG_DIR" "$DATA_DIR"
 
 default_env="${SJA_ENV:-development}"
-default_api_base="http://localhost:8000/api"
 default_frontend_domain="http://localhost:5173"
 default_base_url="${SJA_BASE_URL:-https://sports.sjtu.edu.cn}"
 default_bot_http="${BOT_HTTP_URL:-http://127.0.0.1:6099}"
@@ -65,6 +64,12 @@ default_credentials="${SJABOT_CREDENTIAL_STORE:-$DATA_DIR/credentials.json}"
 
 prompt environment "运行环境 (development/production)" "$default_env"
 environment=$(echo "$environment" | tr '[:upper:]' '[:lower:]')
+
+if [[ "$environment" == "production" ]]; then
+  default_api_base="${SJA_API_BASE_URL:-/api}"
+else
+  default_api_base="${SJA_API_BASE_URL:-http://localhost:8000/api}"
+fi
 
 prompt base_url "体育系统地址" "$default_base_url"
 prompt api_base "前端访问的后端 API 地址" "$default_api_base"

@@ -7,7 +7,6 @@ import {
   type SlotQueryResponse,
 } from "../lib/api";
 import { buildDayOffsetOptions, buildHourOptions, DEFAULT_HOURS } from "../lib/options";
-import DebugPanel from "../components/DebugPanel";
 
 const SlotsPage = () => {
   const [presets, setPresets] = useState<Preset[]>([]);
@@ -18,9 +17,6 @@ const SlotsPage = () => {
   const [result, setResult] = useState<SlotQueryResponse | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [debugRequest, setDebugRequest] = useState<unknown>();
-  const [debugResponse, setDebugResponse] = useState<unknown>();
-  const [debugError, setDebugError] = useState<string | null>(null);
 
   const dateOptions = useMemo(() => buildDayOffsetOptions(), []);
   const hourOptions = useMemo(() => buildHourOptions(DEFAULT_HOURS), []);
@@ -49,7 +45,6 @@ const SlotsPage = () => {
     try {
       setLoading(true);
       setError(null);
-       setDebugError(null);
       const payload: Record<string, unknown> = {
         show_full: showFull,
       };
@@ -62,15 +57,11 @@ const SlotsPage = () => {
       if (selectedHour !== "") {
         payload.start_hour = Number(selectedHour);
       }
-      setDebugRequest(payload);
-      setDebugResponse(undefined);
       const data = await api.querySlots(payload);
       setResult(data);
-      setDebugResponse(data);
     } catch (err) {
       setResult(null);
       setError((err as Error).message);
-      setDebugError((err as Error).message);
     } finally {
       setLoading(false);
     }
@@ -239,12 +230,6 @@ const SlotsPage = () => {
         </section>
       ) : null}
 
-      <DebugPanel
-        title="调试信息"
-        request={debugRequest}
-        response={debugResponse}
-        error={debugError}
-      />
     </>
   );
 };

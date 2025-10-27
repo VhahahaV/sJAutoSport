@@ -96,6 +96,9 @@ async def _ping_cookie(
         refreshed_header = _cookie_header(client.cookies, domain=domain)
         if refreshed_header:
             cookie_header = refreshed_header
+        # 如果没有刷新后的header，使用原始的cookie_header
+        elif not cookie_header and client.cookies:
+            cookie_header = _cookie_header(client.cookies, domain=domain)
 
         return True, cookie_header, f"ping {response.status_code}"
 
@@ -123,15 +126,25 @@ async def run_keep_alive_once(
         nickname = record.get("nickname")
         cookie_header = record.get("cookie") or ""
 
+        if not cookie_header:
+            logger.warning("KeepAlive skipping %s: no cookie header", username or key)
+            continue
+
         success, updated_cookie, message = await _ping_cookie(username, nickname, cookie_header)
         if success:
-            expires_at = now + refresh_interval
-            manager.save_cookie(
-                updated_cookie,
-                expires_at,
-                username=username,
-                nickname=nickname,
-            )
+            # 确保有有效的cookie
+            if updated_cookie and updated_cookie.strip():
+                expires_at = now + refresh_interval
+                manager.save_cookie(
+                    updated_cookie,
+                    expires_at,
+                    username=username,
+                    nickname=nickname,
+                )
+                logger.info("KeepAlive saved cookie for %s", username or nickname or key)
+            else:
+                logger.warning("KeepAlive: no valid cookie to save for %s", username or key)
+            
             results.append(
                 KeepAliveResult(
                     username=username,

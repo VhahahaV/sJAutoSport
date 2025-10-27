@@ -2,11 +2,14 @@ from __future__ import annotations
 
 import asyncio
 import dataclasses
+import logging
 import os
 import uuid
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, Iterable, List, Optional, Tuple
+
+logger = logging.getLogger(__name__)
 
 from .api import SportsAPI
 from urllib.parse import urlparse
@@ -824,6 +827,7 @@ async def start_monitor(
     start_hour: Optional[int] = None,
     interval_seconds: int = 240,
     auto_book: bool = False,
+    require_all_users_success: bool = False,
     base_target: Optional[BookingTarget] = None,
     target_users: Optional[List[str]] = None,
     exclude_users: Optional[List[str]] = None,
@@ -873,6 +877,7 @@ async def start_monitor(
         "start_hour": start_hour,
         "interval_seconds": interval_seconds,
         "auto_book": auto_book,
+        "require_all_users_success": require_all_users_success,
         "base_target": working_target,
         "preferred_hours": preferred_hours,
         "preferred_days": preferred_days,
@@ -955,6 +960,7 @@ async def schedule_daily_job(
     field_type_id: Optional[str] = None,
     date: Optional[str] = None,
     start_hours: Optional[List[int]] = None,
+    require_all_users_success: bool = False,
     base_target: Optional[BookingTarget] = None,
     target_users: Optional[List[str]] = None,
     exclude_users: Optional[List[str]] = None,
@@ -1021,6 +1027,7 @@ async def schedule_daily_job(
         "base_target": base_target,
         "target_users": list(getattr(base_target, "target_users", []) or []),
         "exclude_users": list(getattr(base_target, "exclude_users", []) or []),
+        "require_all_users_success": require_all_users_success,
         "status": "scheduled",
         "created_time": datetime.now().isoformat(),
         "last_run": None,
@@ -1293,7 +1300,11 @@ async def _auto_book_from_monitor(monitor_id: str, slots: List[Dict]) -> None:
     if not user_sequence:
         user_sequence = available_users[:1]
 
+    # 检查是否需要所有用户都成功
+    require_all_success = monitor_info.get("require_all_users_success", False)
+    
     # 逐个用户尝试预订
+    successful_users = []
     for user_index, user in enumerate(user_sequence, 1):
         last_message = "未尝试"
         success_for_user = False
@@ -1332,8 +1343,20 @@ async def _auto_book_from_monitor(monitor_id: str, slots: List[Dict]) -> None:
 
                 if result.success:
                     monitor_info["successful_bookings"] += 1
-                    monitor_info["status"] = "completed"
                     success_for_user = True
+                    successful_users.append(user.nickname)
+                    
+                    # 如果不需要所有用户成功，第一个成功就完成
+                    if not require_all_success:
+                        monitor_info["status"] = "completed"
+                        break
+                    
+                    # 如果需要所有用户成功，检查是否所有用户都成功了
+                    if require_all_success and len(successful_users) == len(user_sequence):
+                        monitor_info["status"] = "completed"
+                        break
+                        
+                    # 继续下一个用户
                     break
 
             except Exception as exc:  # pylint: disable=broad-except
@@ -1351,9 +1374,17 @@ async def _auto_book_from_monitor(monitor_id: str, slots: List[Dict]) -> None:
                     "message": last_message,
                 }
             )
+            
+            # 如果需要所有用户成功但当前用户失败了，停止尝试
+            if require_all_success and not success_for_user:
+                break
 
-        if user_index < len(user_sequence):
+        if user_index < len(user_sequence) and monitor_info.get("status") != "completed":
             await asyncio.sleep(2.5)
+    
+    # 如果要求所有用户成功但未全部成功，任务状态保持为running
+    if require_all_success and len(successful_users) < len(user_sequence):
+        monitor_info["status"] = "running"
 
 
 async def _schedule_worker(job_id: str) -> None:
@@ -1378,9 +1409,20 @@ async def _schedule_worker(job_id: str) -> None:
             
             job_info["next_run"] = target_time.isoformat()
             
-            # 等待到目标时间
+            # 计算等待时间，提前执行以应对系统高并发
             wait_seconds = (target_time - now).total_seconds()
-            await asyncio.sleep(wait_seconds)
+            
+            # 如果是12点抢票任务，提前2秒开始预热
+            if job_info["hour"] == 12 and job_info["minute"] == 0 and job_info["second"] == 0:
+                # 提前2秒执行，但最后一次尝试在准点前0.5秒开始
+                print(f"[schedule:{job_id}] 🔥 12点抢票任务预热模式")
+                warmup_time = max(0, wait_seconds - 2)
+                if warmup_time > 0:
+                    await asyncio.sleep(warmup_time)
+                # 在准点前0.5秒开始最后一次尝试
+                await asyncio.sleep(0.5)
+            else:
+                await asyncio.sleep(wait_seconds)
             
             # 执行任务
             if job_id in _scheduled_jobs:
@@ -1468,44 +1510,101 @@ async def _execute_scheduled_job(job_id: str) -> None:
 
         db_manager = get_db_manager()
 
+        require_all_success = job_info.get("require_all_users_success", False)
+        successful_users = []
+        
         for user in user_sequence:
             user_id = user.username or user.nickname
             user_success = False
 
-            for hour in start_hours:
-                start_label = f"{int(hour):02d}:00"
-                for attempt in range(5):
-                    result = await order_once(
-                        preset=job_info["preset"],
-                        date=job_info["date"] or "0",
-                        start_time=start_label,
-                        base_target=base_target,
-                        user=user_id,
-                        notification_context=f"来自定时任务 {job_id}",
-                    )
+            # 12点抢票任务优化：并发多时间段抢票，减少延迟
+            is_12pm_rush = job_info.get("hour") == 12 and job_info.get("minute") == 0
+            
+            if is_12pm_rush and len(start_hours) > 1:
+                # 并发抢多个时间段
+                import concurrent.futures
+                print(f"[schedule:{job_id}] 🔥 12点并发抢票模式，时间段: {start_hours}")
+                
+                async def attempt_order_for_hour(hour: int) -> Optional[bool]:
+                    start_label = f"{int(hour):02d}:00"
+                    for attempt in range(3):  # 12点抢票减少重试次数以加快速度
+                        result = await order_once(
+                            preset=job_info["preset"],
+                            date=job_info["date"] or "0",
+                            start_time=start_label,
+                            base_target=base_target,
+                            user=user_id,
+                            notification_context=f"来自定时任务 {job_id}",
+                        )
+                        
+                        if result.success:
+                            job_info["success_count"] += 1
+                            job_info.pop("last_error", None)
+                            print(f"[schedule:{job_id}] ✅ 用户 {user_id} 在 {start_label} 下单成功: {result.message}")
+                            return True
+                        
+                        job_info.setdefault("last_error", result.message)
+                        if attempt < 2:
+                            await asyncio.sleep(0.3)  # 减少延迟
+                    return False
+                
+                # 并发抢票
+                results = await asyncio.gather(*[attempt_order_for_hour(hour) for hour in start_hours])
+                if any(results):
+                    user_success = True
+            else:
+                # 普通任务串行执行
+                for hour in start_hours:
+                    start_label = f"{int(hour):02d}:00"
+                    for attempt in range(5):
+                        result = await order_once(
+                            preset=job_info["preset"],
+                            date=job_info["date"] or "0",
+                            start_time=start_label,
+                            base_target=base_target,
+                            user=user_id,
+                            notification_context=f"来自定时任务 {job_id}",
+                        )
 
-                    if result.success:
-                        job_info["success_count"] += 1
-                        user_success = True
-                        job_info.pop("last_error", None)
-                        print(f"[schedule:{job_id}] 用户 {user_id} 在 {start_label} 下单成功: {result.message}")
-                        break
+                        if result.success:
+                            job_info["success_count"] += 1
+                            user_success = True
+                            job_info.pop("last_error", None)
+                            print(f"[schedule:{job_id}] 用户 {user_id} 在 {start_label} 下单成功: {result.message}")
+                            break
 
-                    job_info.setdefault("last_error", result.message)
-                    print(
-                        f"[schedule:{job_id}] 用户 {user_id} 在 {start_label} 下单失败 ({attempt + 1}/5): {result.message}"
-                    )
-                    await asyncio.sleep(1.0)
+                        job_info.setdefault("last_error", result.message)
+                        print(
+                            f"[schedule:{job_id}] 用户 {user_id} 在 {start_label} 下单失败 ({attempt + 1}/5): {result.message}"
+                        )
+                        await asyncio.sleep(1.0)
 
                 if user_success:
                     break
 
-            if not user_success:
-                print(
-                    f"[schedule:{job_id}] 用户 {user_id} 在 {', '.join(f'{h:02d}:00' for h in start_hours)} 全部尝试失败: {job_info.get('last_error', '未知原因')}"
-                )
-
-            await asyncio.sleep(2.5)
+            if user_success:
+                successful_users.append(user.nickname)
+                
+                # 如果需要所有用户成功，检查是否全部成功
+                if require_all_success and len(successful_users) < len(user_sequence):
+                    # 继续尝试下一个用户
+                    await asyncio.sleep(2.5)
+                    continue
+                else:
+                    # 不需要所有用户成功，或者所有用户都已成功
+                    break
+            else:
+                if not user_success:
+                    print(
+                        f"[schedule:{job_id}] 用户 {user_id} 在 {', '.join(f'{h:02d}:00' for h in start_hours)} 全部尝试失败: {job_info.get('last_error', '未知原因')}"
+                    )
+                    
+                    # 如果需要所有用户成功但当前用户失败，停止尝试
+                    if require_all_success:
+                        print(f"[schedule:{job_id}] ⚠️ 需要所有用户成功，但用户 {user_id} 失败，任务未完成")
+                        break
+                    
+                    await asyncio.sleep(2.5)
 
         await db_manager.save_scheduled_job(job_info)
             
@@ -1795,19 +1894,42 @@ async def cancel_login_session(session_id: str) -> Dict[str, Any]:
 
 
 def login_status() -> Dict[str, Any]:
-    """获取当前登录状态信息。"""
+    """获取当前登录状态信息，并验证用户实际是否在线。"""
     cookies_map, active_username = _auth_manager.load_all_cookies()
     if not cookies_map:
         return {"success": False, "message": "尚未保存任何登录凭据"}
 
     entries: List[Dict[str, Any]] = []
+    
+    # 创建 API 实例用于验证
+    api = _create_api()
+    
     for key, record in cookies_map.items():
         expires_at = record.get("expires_at")
         if isinstance(expires_at, datetime):
             expires_str = expires_at.isoformat()
         else:
             expires_str = str(expires_at)
-
+        
+        # 检查 cookie 是否过期
+        is_expired = False
+        if isinstance(expires_at, datetime):
+            now = datetime.now(expires_at.tzinfo) if expires_at.tzinfo else datetime.now()
+            is_expired = expires_at < now
+        
+        # 尝试检查用户是否真正在线
+        is_online = False
+        if not is_expired and record.get("cookie"):
+            try:
+                # 临时切换用户来检查状态
+                old_active = active_username
+                _auth_manager.set_active_user(key)
+                test_api = _create_api(active_user=key)
+                is_online = test_api.check_auth_status()
+                _auth_manager.set_active_user(old_active)
+            except Exception:
+                is_online = False
+        
         entries.append(
             {
                 "key": key,
@@ -1816,6 +1938,8 @@ def login_status() -> Dict[str, Any]:
                 "cookie": record.get("cookie"),
                 "expires_at": expires_str,
                 "is_active": key == active_username,
+                "is_expired": is_expired,
+                "is_online": is_online,
             }
         )
 
@@ -1824,6 +1948,44 @@ def login_status() -> Dict[str, Any]:
         "active_user": active_username,
         "users": entries,
     }
+
+
+def get_user_orders(page_no: int = 1, page_size: int = 10) -> Dict[str, Any]:
+    """获取所有用户的订单列表"""
+    cookies_map, _ = _auth_manager.load_all_cookies()
+    all_orders: List[Dict[str, Any]] = []
+    total = 0
+    
+    for key, record in cookies_map.items():
+        try:
+            username = record.get("username")
+            nickname = record.get("nickname")
+            api = _create_api(active_user=key)
+            response = api.list_orders(page_no=1, page_size=100)  # 获取更多订单
+            
+            orders = response.get("records", [])
+            # 为每个订单添加用户信息
+            for order in orders:
+                order["userId"] = username or key
+                order["name"] = nickname or username or key
+            
+            all_orders.extend(orders)
+            api.close()
+        except Exception as e:
+            logger.warning("Failed to get orders for user %s: %s", key, str(e))
+            continue
+    
+    # 按创建时间倒序排序
+    all_orders.sort(key=lambda x: x.get("ordercreatement", ""), reverse=True)
+    
+    total = len(all_orders)
+    
+    # 分页
+    start = (page_no - 1) * page_size
+    end = start + page_size
+    paginated_orders = all_orders[start:end]
+    
+    return {"success": True, "orders": paginated_orders, "total": total}
 
 
 # =============================================================================

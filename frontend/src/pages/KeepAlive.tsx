@@ -5,7 +5,6 @@ import {
   type KeepAliveJob,
   type KeepAliveSummary,
 } from "../lib/api";
-import DebugPanel from "../components/DebugPanel";
 
 const KeepAlivePage = () => {
   const [jobs, setJobs] = useState<KeepAliveJob[]>([]);
@@ -16,9 +15,6 @@ const KeepAlivePage = () => {
   const [formName, setFormName] = useState("KeepAlive");
   const [formInterval, setFormInterval] = useState(15);
   const [targetUser, setTargetUser] = useState("");
-  const [runDebug, setRunDebug] = useState<{ request?: unknown; response?: unknown; error?: string | null }>({});
-  const [createDebug, setCreateDebug] = useState<{ request?: unknown; response?: unknown; error?: string | null }>({});
-  const [deleteDebug, setDeleteDebug] = useState<{ request?: unknown; response?: unknown; error?: string | null }>();
 
   const loadJobs = async () => {
     try {
@@ -40,15 +36,12 @@ const KeepAlivePage = () => {
     try {
       setRunning(true);
       const requestPayload = { user: user || undefined };
-      setRunDebug({ request: requestPayload, response: undefined, error: null });
       const data = await api.runKeepAlive(user);
       setResults(data);
       setError(null);
-      setRunDebug({ request: requestPayload, response: data, error: null });
     } catch (err) {
       const message = (err as Error).message;
       setError(message);
-      setRunDebug({ request: { user: user || undefined }, error: message });
     } finally {
       setRunning(false);
       void loadJobs();
@@ -63,20 +56,14 @@ const KeepAlivePage = () => {
         name: formName || "KeepAlive",
         interval_minutes: Math.max(1, formInterval),
       };
-      setCreateDebug({ request: payload, response: undefined, error: null });
       const response = await api.createKeepAliveJob(payload);
       setFormName("KeepAlive");
       setFormInterval(15);
       setError(null);
-      setCreateDebug({ request: payload, response, error: null });
       await loadJobs();
     } catch (err) {
       const message = (err as Error).message;
       setError(message);
-      setCreateDebug({
-        request: { name: formName || "KeepAlive", interval_minutes: Math.max(1, formInterval) },
-        error: message,
-      });
     } finally {
       setRunning(false);
     }
@@ -85,14 +72,11 @@ const KeepAlivePage = () => {
   const handleDeleteJob = async (jobId: string) => {
     try {
       setRunning(true);
-      setDeleteDebug({ request: { job_id: jobId }, response: undefined, error: null });
-      const response = await api.deleteKeepAliveJob(jobId);
-      setDeleteDebug({ request: { job_id: jobId }, response, error: null });
+      await api.deleteKeepAliveJob(jobId);
       await loadJobs();
     } catch (err) {
       const message = (err as Error).message;
       setError(message);
-      setDeleteDebug({ request: { job_id: jobId }, error: message });
     } finally {
       setRunning(false);
     }
@@ -307,27 +291,6 @@ const KeepAlivePage = () => {
           </form>
         </div>
       </section>
-
-      <DebugPanel
-        title="运行保活调试信息"
-        request={runDebug.request}
-        response={runDebug.response}
-        error={runDebug.error}
-      />
-      <DebugPanel
-        title="创建保活任务调试信息"
-        request={createDebug.request}
-        response={createDebug.response}
-        error={createDebug.error}
-      />
-      {deleteDebug ? (
-        <DebugPanel
-          title="删除保活任务调试信息"
-          request={deleteDebug.request}
-          response={deleteDebug.response}
-          error={deleteDebug.error}
-        />
-      ) : null}
     </>
   );
 };

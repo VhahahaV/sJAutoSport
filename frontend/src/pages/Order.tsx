@@ -7,7 +7,7 @@ import {
   type UserSummary,
 } from "../lib/api";
 import { buildDayOffsetOptions, buildHourOptions, DEFAULT_HOURS } from "../lib/options";
-import DebugPanel from "../components/DebugPanel";
+// Debug panel removed per requirements
 
 const OrderPage = () => {
   const [presets, setPresets] = useState<Preset[]>([]);
@@ -19,9 +19,7 @@ const OrderPage = () => {
   const [loading, setLoading] = useState(false);
   const [result, setResult] = useState<OrderResponse | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const [debugRequest, setDebugRequest] = useState<unknown>();
-  const [debugResponse, setDebugResponse] = useState<unknown>();
-  const [debugError, setDebugError] = useState<string | null>(null);
+  // Debug states removed per requirements
 
   const dateOptions = useMemo(() => buildDayOffsetOptions(), []);
   const hourOptions = useMemo(() => buildHourOptions(DEFAULT_HOURS), []);
@@ -54,7 +52,6 @@ const OrderPage = () => {
     try {
       setLoading(true);
       setError(null);
-      setDebugError(null);
       setResult(null);
       const payload = {
         preset: Number(selectedPreset),
@@ -62,16 +59,12 @@ const OrderPage = () => {
         start_time: `${selectedHour.toString().padStart(2, "0")}:00`,
         user: selectedUser || undefined,
       };
-      setDebugRequest(payload);
-      setDebugResponse(undefined);
       const response = await api.createOrder(payload);
       setResult(response);
-      setDebugResponse(response);
     } catch (err) {
       setResult(null);
       const message = (err as Error).message;
       setError(message);
-      setDebugError(message);
     } finally {
       setLoading(false);
     }
@@ -181,12 +174,6 @@ const OrderPage = () => {
         </div>
       ) : null}
 
-      <DebugPanel
-        title="调试信息"
-        request={debugRequest}
-        response={debugResponse}
-        error={debugError}
-      />
     </>
   );
 };

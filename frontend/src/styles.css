@@ -121,6 +121,12 @@ a {
   color: rgba(255, 245, 250, 0.9);
   transition: background 0.25s ease, transform 0.2s ease, box-shadow 0.2s ease;
   font-weight: 600;
+  /* 移除移动端点击延迟 */
+  -webkit-tap-highlight-color: rgba(255, 255, 255, 0.2);
+  touch-action: manipulation;
+  user-select: none;
+  /* 确保点击响应迅速 */
+  cursor: pointer;
 }
 
 .nav-link.active {
@@ -132,6 +138,12 @@ a {
 .nav-link:hover {
   background: rgba(255, 255, 255, 0.2);
   transform: translateY(-2px);
+}
+
+.nav-link:active {
+  background: rgba(255, 255, 255, 0.3);
+  transform: translateY(0);
+  /* 确保移动端点击有反馈 */
 }
 
 .content {
@@ -323,6 +335,11 @@ a {
 .button:hover {
   transform: translateY(-2px);
   box-shadow: 0 12px 20px rgba(255, 127, 191, 0.2);
+}
+
+.button:active {
+  transform: translateY(0);
+  box-shadow: 0 4px 12px rgba(255, 127, 191, 0.3);
 }
 
 .button:disabled {
@@ -654,5 +671,110 @@ textarea:focus {
 
   .user-chip-group {
     flex-direction: column;
+  }
+
+  /* 表格在手机端优化 */
+  .table {
+    font-size: 13px;
+  }
+
+  .table th,
+  .table td {
+    padding: 8px 6px;
+  }
+
+  /* 表单在手机端优化 */
+  .form-grid {
+    grid-template-columns: 1fr;
+    gap: 16px;
+  }
+
+  /* 状态卡片在手机端优化 */
+  .status-card {
+    padding: 16px;
+  }
+
+  /* 按钮在手机端优化 */
+  .button {
+    padding: 10px 16px;
+    font-size: 14px;
+  }
+}
+
+/* 新增：table-container 优化 */
+.table-container {
+  overflow-x: auto;
+  -webkit-overflow-scrolling: touch;
+}
+
+/* 成功动画效果 */
+@keyframes successPop {
+  0% {
+    transform: scale(0.8);
+    opacity: 0;
+  }
+  50% {
+    transform: scale(1.05);
+  }
+  100% {
+    transform: scale(1);
+    opacity: 1;
+  }
+}
+
+@keyframes successShake {
+  0%, 100% {
+    transform: rotate(0deg);
+  }
+  10%, 30%, 50%, 70%, 90% {
+    transform: rotate(-3deg);
+  }
+  20%, 40%, 60%, 80% {
+    transform: rotate(3deg);
+  }
+}
+
+.success-animation {
+  animation: successPop 0.3s ease-out, successShake 0.4s ease-in-out 0.3s;
+}
+
+/* 添加复选框动画 */
+input[type="checkbox"] {
+  cursor: pointer;
+  transition: transform 0.15s ease;
+}
+
+input[type="checkbox"]:checked {
+  transform: scale(1.1);
+}
+
+input[type="checkbox"]:active {
+  transform: scale(0.95);
+}
+
+/* 添加卡片动画 */
+.panel {
+  transition: transform 0.2s ease, box-shadow 0.2s ease;
+}
+
+.panel:hover {
+  transform: translateY(-2px);
+  box-shadow: 0 8px 24px rgba(255, 159, 209, 0.15);
+}
+
+/* 添加状态卡片动画 */
+.status-card {
+  transition: transform 0.2s ease, box-shadow 0.2s ease;
+}
+
+.status-card:hover {
+  transform: translateY(-4px);
+  box-shadow: 0 12px 24px rgba(255, 159, 209, 0.2);
+}
+
+@media (max-width: 640px) {
+  .table-container {
+    margin: 0 -18px;
+    padding: 0 18px;
   }
 }
