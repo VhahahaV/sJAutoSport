@@ -84,6 +84,8 @@ class MonitorPlan:
     notify_stdout: bool = True
     preferred_hours: Optional[List[int]] = None  # 优先时间段，如 [15, 16, 17]
     preferred_days: Optional[List[int]] = None  # 优先天数，0-8，0表示今天，1表示明天，以此类推
+    require_all_users_success: bool = False  # 是否要求所有用户都成功
+    max_time_gap_hours: int = 1  # 当需要所有用户成功时，允许的最大时间差
 
 
 @dataclass

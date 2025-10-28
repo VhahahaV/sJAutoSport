@@ -1,9 +1,12 @@
 from __future__ import annotations
 
 import dataclasses
+import json
+from collections import defaultdict
 from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, HTTPException, Query
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
 import config as CFG
@@ -53,6 +56,63 @@ def _serialize_slot_availability(entry: SlotAvailability) -> Dict[str, Any]:
     }
 
 
+def _aggregate_slot_entries(entries: List[SlotAvailability]) -> List[Dict[str, Any]]:
+    buckets: Dict[tuple, Dict[str, Any]] = {}
+    for availability in entries:
+        slot = availability.slot
+        start = str(slot.start)
+        end = str(slot.end)
+        key = (availability.date, start, end)
+        bucket = buckets.setdefault(
+            key,
+            {
+                "date": availability.date,
+                "start": start,
+                "end": end,
+                "site_count": 0,
+                "available_count": 0,
+                "total_remain": 0,
+                "min_price": None,
+                "max_price": None,
+            },
+        )
+
+        bucket["site_count"] += 1
+        if slot.available:
+            bucket["available_count"] += 1
+
+        remain_val = slot.remain
+        if remain_val is None:
+            bucket["total_remain"] = None
+        elif bucket["total_remain"] is not None:
+            try:
+                bucket["total_remain"] += int(remain_val)
+            except (TypeError, ValueError):
+                bucket["total_remain"] = None
+
+        price_val = slot.price
+        if isinstance(price_val, (int, float)):
+            if bucket["min_price"] is None or price_val < bucket["min_price"]:
+                bucket["min_price"] = float(price_val)
+            if bucket["max_price"] is None or price_val > bucket["max_price"]:
+                bucket["max_price"] = float(price_val)
+
+    aggregated = list(buckets.values())
+    aggregated.sort(key=lambda item: (item["start"], item["end"]))
+    return aggregated
+
+
+def _aggregate_by_date(entries: List[SlotAvailability]) -> List[Dict[str, Any]]:
+    grouped: Dict[str, List[SlotAvailability]] = defaultdict(list)
+    for availability in entries:
+        grouped[availability.date].append(availability)
+
+    days: List[Dict[str, Any]] = []
+    for date in sorted(grouped.keys()):
+        days.append({"date": date, "entries": _aggregate_slot_entries(grouped[date])})
+    return days
+
+
 def _serialize_slot_result(result: SlotListResult) -> Dict[str, Any]:
     resolved = result.resolved
     return {
@@ -65,7 +125,31 @@ def _serialize_slot_result(result: SlotListResult) -> Dict[str, Any]:
             "preset": _serialize_preset(resolved.preset) if resolved.preset else None,
         },
         "slots": [_serialize_slot_availability(entry) for entry in result.slots],
+        "aggregated_days": _aggregate_by_date(result.slots),
     }
+
+
+async def _stream_slot_result(body: "SlotQuery", base_target: BookingTarget) -> StreamingResponse:
+    result = await service.list_slots(
+        preset=body.preset,
+        venue_id=body.venue_id,
+        field_type_id=body.field_type_id,
+        date=body.date,
+        start_hour=body.start_hour,
+        show_full=body.show_full,
+        base_target=base_target,
+        all_dates=body.all_days,
+    )
+    serialized = _serialize_slot_result(result)
+    aggregated_days = serialized.get("aggregated_days", [])
+
+    async def iterator():
+        yield json.dumps({"type": "resolved", "resolved": serialized["resolved"]}, ensure_ascii=False) + "\n"
+        for day_payload in aggregated_days:
+            yield json.dumps({"type": "day", **day_payload}, ensure_ascii=False) + "\n"
+        yield json.dumps({"type": "complete"}, ensure_ascii=False) + "\n"
+
+    return StreamingResponse(iterator(), media_type="application/jsonl")
 
 
 def _build_target(overrides: Optional["TargetOverride"]) -> BookingTarget:
@@ -147,6 +231,8 @@ class SlotQuery(BaseModel):
     start_hour: Optional[int] = None
     show_full: bool = False
     target: Optional[TargetOverride] = None
+    all_days: bool = False
+    incremental: bool = False
 
 
 class OrderRequest(BaseModel):
@@ -168,6 +254,9 @@ class MonitorRequest(BaseModel):
     interval_seconds: int = Field(240, ge=30)
     auto_book: bool = False
     require_all_users_success: bool = Field(False, description="是否要求所有用户都成功")
+    max_time_gap_hours: Optional[int] = Field(1, ge=0, le=4, description="要求所有用户成功时允许的最大时间差（小时）")
+    max_runtime_minutes: Optional[int] = Field(None, ge=1, le=1440, description="最长运行时长（分钟）")
+    end_time: Optional[str] = Field(None, description="任务结束时间，ISO8601 格式，如 2025-11-03T18:30")
     target: Optional[TargetOverride] = None
     preferred_hours: Optional[List[int]] = None
     preferred_days: Optional[List[int]] = None
@@ -199,6 +288,7 @@ class ScheduleRequest(BaseModel):
     start_hour: Optional[int] = None
     start_hours: Optional[List[int]] = None
     require_all_users_success: bool = Field(False, description="是否要求所有用户都成功")
+    max_time_gap_hours: Optional[int] = Field(1, ge=0, le=4, description="要求所有用户成功时允许的最大时间差（小时）")
     target: Optional[TargetOverride] = None
     target_users: Optional[List[str]] = None
     exclude_users: Optional[List[str]] = None
@@ -263,6 +353,9 @@ async def list_field_types(venue_id: str) -> Dict[str, Any]:
 @router.post("/slots")
 async def query_slots(body: SlotQuery) -> Dict[str, Any]:
     base_target = _build_target(body.target)
+    if body.incremental:
+        return await _stream_slot_result(body, base_target)
+
     result = await service.list_slots(
         preset=body.preset,
         venue_id=body.venue_id,
@@ -271,6 +364,7 @@ async def query_slots(body: SlotQuery) -> Dict[str, Any]:
         start_hour=body.start_hour,
         show_full=body.show_full,
         base_target=base_target,
+        all_dates=body.all_days,
     )
     return _serialize_slot_result(result)
 
@@ -322,6 +416,9 @@ async def create_monitor(request: MonitorCreateRequest) -> Dict[str, Any]:
         interval_seconds=request.interval_seconds,
         auto_book=request.auto_book,
         require_all_users_success=request.require_all_users_success,
+        max_time_gap_hours=request.max_time_gap_hours,
+        max_runtime_minutes=request.max_runtime_minutes,
+        end_time=request.end_time,
         base_target=base_target,
         target_users=request.target_users,
         exclude_users=request.exclude_users,
@@ -339,6 +436,22 @@ async def delete_monitor(monitor_id: str) -> MonitorDeleteResponse:
     if not response.get("success"):
         raise HTTPException(status_code=404, detail=response.get("message", "监控任务不存在"))
     return MonitorDeleteResponse(success=True, message=response["message"])
+
+
+@router.post("/monitors/{monitor_id}/pause")
+async def pause_monitor(monitor_id: str) -> Dict[str, Any]:
+    response = await service.pause_monitor(monitor_id)
+    if not response.get("success"):
+        raise HTTPException(status_code=400, detail=response.get("message", "暂停监控任务失败"))
+    return response
+
+
+@router.post("/monitors/{monitor_id}/resume")
+async def resume_monitor(monitor_id: str) -> Dict[str, Any]:
+    response = await service.resume_monitor(monitor_id)
+    if not response.get("success"):
+        raise HTTPException(status_code=400, detail=response.get("message", "恢复监控任务失败"))
+    return response
 
 
 
@@ -388,6 +501,7 @@ async def create_schedule(request: ScheduleRequest) -> Dict[str, Any]:
         date=request.date,
         start_hours=clean_start_hours or None,
         require_all_users_success=request.require_all_users_success,
+        max_time_gap_hours=request.max_time_gap_hours,
         base_target=base_target,
         target_users=dedup_targets or None,
         exclude_users=dedup_excludes or None,

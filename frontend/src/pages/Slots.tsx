@@ -1,12 +1,40 @@
-import { FormEvent, useEffect, useMemo, useState } from "react";
+import { FormEvent, useEffect, useMemo, useRef, useState } from "react";
 
 import {
   api,
+  type AggregatedSlotEntry,
+  type AggregatedSlotsByDay,
   type Preset,
-  type SlotAvailability,
   type SlotQueryResponse,
 } from "../lib/api";
 import { buildDayOffsetOptions, buildHourOptions, DEFAULT_HOURS } from "../lib/options";
+import PresetSelector from "../components/PresetSelector";
+
+type StreamChunk =
+  | { type: "resolved"; resolved: SlotQueryResponse["resolved"] }
+  | { type: "day"; date: string; entries: AggregatedSlotEntry[] }
+  | { type: "complete" };
+
+const formatPriceRange = (entry: AggregatedSlotEntry): string => {
+  if (entry.min_price == null && entry.max_price == null) {
+    return "-";
+  }
+  if (entry.min_price != null && entry.max_price != null) {
+    if (Math.abs(entry.min_price - entry.max_price) < 1e-6) {
+      return `¥${entry.min_price.toFixed(0)}`;
+    }
+    return `¥${entry.min_price.toFixed(0)} - ¥${entry.max_price.toFixed(0)}`;
+  }
+  const price = entry.min_price ?? entry.max_price ?? 0;
+  return `¥${price.toFixed(0)}`;
+};
+
+const formatAvailability = (entry: AggregatedSlotEntry): string => {
+  if (entry.available_count === entry.site_count) {
+    return `${entry.available_count}`;
+  }
+  return `${entry.available_count}/${entry.site_count}`;
+};
 
 const SlotsPage = () => {
   const [presets, setPresets] = useState<Preset[]>([]);
@@ -14,9 +42,17 @@ const SlotsPage = () => {
   const [selectedDate, setSelectedDate] = useState<string>("0");
   const [selectedHour, setSelectedHour] = useState<number | "">("");
   const [showFull, setShowFull] = useState(false);
-  const [result, setResult] = useState<SlotQueryResponse | null>(null);
+  const [allDays, setAllDays] = useState(false);
+
+  const [resolved, setResolved] = useState<SlotQueryResponse["resolved"] | null>(null);
+  const [aggregatedDays, setAggregatedDays] = useState<AggregatedSlotsByDay[]>([]);
   const [loading, setLoading] = useState(false);
+  const [isStreaming, setIsStreaming] = useState(false);
+  const [message, setMessage] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+
+  const streamingController = useRef<AbortController | null>(null);
+  const hasResultsRef = useRef(false);
 
   const dateOptions = useMemo(() => buildDayOffsetOptions(), []);
   const hourOptions = useMemo(() => buildHourOptions(DEFAULT_HOURS), []);
@@ -36,42 +72,161 @@ const SlotsPage = () => {
     void loadPresets();
   }, []);
 
-  const handleSubmit = async (event: FormEvent<HTMLFormElement>) => {
-    event.preventDefault();
-    if (!selectedPreset && !selectedDate) {
-      setError("请选择预设或提供查询条件");
-      return;
-    }
-    try {
-      setLoading(true);
-      setError(null);
-      const payload: Record<string, unknown> = {
-        show_full: showFull,
-      };
-      if (selectedPreset) {
-        payload.preset = Number(selectedPreset);
-      }
-      if (selectedDate) {
-        payload.date = selectedDate;
-      }
-      if (selectedHour !== "") {
-        payload.start_hour = Number(selectedHour);
-      }
-      const data = await api.querySlots(payload);
-      setResult(data);
-    } catch (err) {
-      setResult(null);
-      setError((err as Error).message);
-    } finally {
-      setLoading(false);
+  useEffect(() => () => {
+    streamingController.current?.abort();
+  }, []);
+
+  const resetQueryState = () => {
+    setResolved(null);
+    setAggregatedDays([]);
+    setMessage(null);
+    hasResultsRef.current = false;
+  };
+
+  const upsertAggregatedDay = (payload: AggregatedSlotsByDay) => {
+    setAggregatedDays((prev) => {
+      const next = prev.filter((day) => day.date !== payload.date);
+      next.push(payload);
+      next.sort((a, b) => a.date.localeCompare(b.date));
+      return next;
+    });
+  };
+
+  const handleStandardResponse = (response: SlotQueryResponse) => {
+    setResolved(response.resolved);
+    const days = response.aggregated_days ?? [];
+    setAggregatedDays(days);
+    hasResultsRef.current = days.some((day) => day.entries.length > 0);
+    if (!hasResultsRef.current) {
+      setMessage("本次查询未找到可预订的场次。");
     }
   };
 
-  const slots: SlotAvailability[] = result?.slots ?? [];
-  const noSlotsMessage =
-    result && slots.length === 0
-      ? "没有找到符合条件的时间段，请尝试调整日期或时间。"
-      : null;
+  const streamSlots = async (
+    payload: Record<string, unknown>,
+    controller: AbortController,
+  ): Promise<void> => {
+    setIsStreaming(true);
+    const response = await fetch("/api/booking/slots", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ ...payload, incremental: true }),
+      signal: controller.signal,
+    });
+
+    if (!response.ok) {
+      const text = await response.text();
+      throw new Error(text || `查询失败，状态码 ${response.status}`);
+    }
+
+    const reader = response.body?.getReader();
+    if (!reader) {
+      throw new Error("无法读取服务器返回的数据流");
+    }
+
+    const decoder = new TextDecoder();
+    let buffer = "";
+    let completed = false;
+
+    const processLine = (line: string) => {
+      if (!line) return;
+      const parsed = JSON.parse(line) as StreamChunk;
+      if (parsed.type === "resolved") {
+        setResolved(parsed.resolved);
+        return;
+      }
+      if (parsed.type === "day") {
+        hasResultsRef.current = hasResultsRef.current || parsed.entries.length > 0;
+        upsertAggregatedDay({ date: parsed.date, entries: parsed.entries });
+        return;
+      }
+      if (parsed.type === "complete") {
+        completed = true;
+      }
+    };
+
+    try {
+      while (true) {
+        const { value, done } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+        let newlineIndex = buffer.indexOf("\n");
+        while (newlineIndex >= 0) {
+          const line = buffer.slice(0, newlineIndex).trim();
+          buffer = buffer.slice(newlineIndex + 1);
+          processLine(line);
+          newlineIndex = buffer.indexOf("\n");
+        }
+      }
+      buffer += decoder.decode();
+      const finalLine = buffer.trim();
+      if (finalLine) {
+        processLine(finalLine);
+      }
+    } finally {
+      reader.releaseLock();
+    }
+
+    if (!controller.signal.aborted) {
+      if (!completed) {
+        processLine(JSON.stringify({ type: "complete" }));
+      }
+      setIsStreaming(false);
+      setLoading(false);
+      if (!hasResultsRef.current) {
+        setMessage("本次查询未找到可预订的场次。");
+      }
+    }
+  };
+
+  const handleSubmit = async (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    streamingController.current?.abort();
+
+    const controller = new AbortController();
+    streamingController.current = controller;
+
+    resetQueryState();
+    setError(null);
+    setLoading(true);
+    setIsStreaming(false);
+
+    const payload = {
+      preset: selectedPreset ? Number(selectedPreset) : undefined,
+      venue_id: undefined,
+      field_type_id: undefined,
+      date: allDays ? undefined : selectedDate || undefined,
+      start_hour: selectedHour === "" ? undefined : Number(selectedHour),
+      show_full: showFull,
+      all_days: allDays,
+    };
+
+    try {
+      if (allDays) {
+        await streamSlots(payload, controller);
+        return;
+      }
+
+      const response = await api.querySlots(payload);
+      if (!controller.signal.aborted) {
+        handleStandardResponse(response);
+      }
+    } catch (err) {
+      if (controller.signal.aborted) {
+        return;
+      }
+      setLoading(false);
+      setIsStreaming(false);
+      setError((err as Error).message || "查询失败");
+    } finally {
+      if (!controller.signal.aborted && !allDays) {
+        setLoading(false);
+        if (!hasResultsRef.current && !error) {
+          setMessage("本次查询未找到可预订的场次。");
+        }
+      }
+    }
+  };
 
   return (
     <>
@@ -84,30 +239,22 @@ const SlotsPage = () => {
 
       <div className="panel">
         <form onSubmit={handleSubmit} className="form-grid">
-          <label className="form-label">
+          <div className="form-label form-label--full">
             <span>选择预设</span>
-            <select
+            <PresetSelector
+              presets={presets}
               value={selectedPreset}
-              onChange={(event) => {
-                const value = event.target.value;
-                setSelectedPreset(value ? Number(value) : "");
-              }}
-              className="input"
-            >
-              {presets.map((preset) => (
-                <option key={preset.index} value={preset.index}>
-                  {preset.index}. {preset.venue_name} / {preset.field_type_name}
-                </option>
-              ))}
-            </select>
-          </label>
+              onChange={(nextPreset) => setSelectedPreset(nextPreset)}
+            />
+          </div>
 
           <label className="form-label">
             <span>日期</span>
             <select
-              value={selectedDate}
+              value={allDays ? "" : selectedDate}
               onChange={(event) => setSelectedDate(event.target.value)}
               className="input"
+              disabled={allDays}
             >
               {dateOptions.map((option) => (
                 <option key={option.value} value={option.value}>
@@ -115,6 +262,23 @@ const SlotsPage = () => {
                 </option>
               ))}
             </select>
+          </label>
+
+          <label style={{ display: "flex", alignItems: "center", gap: "8px" }}>
+            <input
+              type="checkbox"
+              checked={allDays}
+              onChange={(event) => {
+                const checked = event.target.checked;
+                setAllDays(checked);
+                if (checked) {
+                  setSelectedDate("");
+                } else {
+                  setSelectedDate("0");
+                }
+              }}
+            />
+            查询所有日期
           </label>
 
           <label className="form-label">
@@ -147,7 +311,7 @@ const SlotsPage = () => {
 
           <div className="form-actions">
             <button className="button button-primary" type="submit" disabled={loading}>
-              {loading ? "查询中..." : "查询时段"}
+              {loading ? (isStreaming ? "持续加载..." : "查询中...") : "查询时段"}
             </button>
           </div>
         </form>
@@ -160,18 +324,17 @@ const SlotsPage = () => {
         </div>
       ) : null}
 
-      {result ? (
+      {resolved ? (
         <section className="section">
           <h3>结果摘要</h3>
           <div className="panel">
             <div style={{ display: "flex", flexDirection: "column", gap: "6px" }}>
               <div>
-                <strong>目标</strong>：{result.resolved.label}
+                <strong>目标</strong>：{resolved.label}
               </div>
-              {result.resolved.preset ? (
+              {resolved.preset ? (
                 <div>
-                  <strong>预设</strong>：{result.resolved.preset.index} -{" "}
-                  {result.resolved.preset.venue_name} / {result.resolved.preset.field_type_name}
+                  <strong>预设</strong>：{resolved.preset.index} - {resolved.preset.venue_name} / {resolved.preset.field_type_name}
                 </div>
               ) : null}
             </div>
@@ -179,57 +342,48 @@ const SlotsPage = () => {
         </section>
       ) : null}
 
-      {noSlotsMessage ? (
+      {message ? (
         <section className="section">
           <h3>查询结果</h3>
           <div className="panel">
-            <span style={{ color: "#667085" }}>{noSlotsMessage}</span>
+            <span style={{ color: "#667085" }}>{message}</span>
           </div>
         </section>
       ) : null}
 
-      {slots.length > 0 ? (
-        <section className="section">
-          <h3>可用时段</h3>
+      {aggregatedDays.map((day) => (
+        <section key={day.date} className="section">
+          <h3>{day.date}</h3>
           <div className="panel">
-            <table className="table">
-              <thead>
-                <tr>
-                  <th>日期</th>
-                  <th>时间</th>
-                  <th>场地</th>
-                  <th>剩余</th>
-                  <th>价格</th>
-                  <th>状态</th>
-                </tr>
-              </thead>
-              <tbody>
-                {slots.map((entry, index) => (
-                  <tr key={`${entry.slot.slot_id}-${index}`}>
-                    <td>{entry.date}</td>
-                    <td>
-                      {entry.slot.start} - {entry.slot.end}
-                    </td>
-                    <td>{entry.slot.field_name || "—"}</td>
-                    <td>{entry.slot.remain ?? "未知"}</td>
-                    <td>{entry.slot.price ?? "未知"}</td>
-                    <td>
-                      <span
-                        className={`chip ${
-                          entry.slot.available ? "chip-success" : "chip-warning"
-                        }`}
-                      >
-                        {entry.slot.available ? "可预订" : "占用"}
-                      </span>
-                    </td>
+            {day.entries.length === 0 ? (
+              <span style={{ color: "#667085" }}>该日期暂无可预订的时间段。</span>
+            ) : (
+              <table className="table">
+                <thead>
+                  <tr>
+                    <th>时间</th>
+                    <th>可订场地</th>
+                    <th>总余量</th>
+                    <th>价格</th>
                   </tr>
-                ))}
-              </tbody>
-            </table>
+                </thead>
+                <tbody>
+                  {day.entries.map((entry, index) => (
+                    <tr key={`${entry.start}-${entry.end}-${index}`}>
+                      <td>
+                        {entry.start} - {entry.end}
+                      </td>
+                      <td>{formatAvailability(entry)}</td>
+                      <td>{entry.total_remain ?? "-"}</td>
+                      <td>{formatPriceRange(entry)}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            )}
           </div>
         </section>
-      ) : null}
-
+      ))}
     </>
   );
 };

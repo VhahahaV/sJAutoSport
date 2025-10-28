@@ -271,6 +271,8 @@ MONITOR_PLAN = MonitorPlan(
     notify_stdout=_env_bool("SJA_MONITOR_NOTIFY_STDOUT", True),
     preferred_hours=monitor_preferred_hours,
     preferred_days=monitor_preferred_days,
+    require_all_users_success=_env_bool("SJA_MONITOR_REQUIRE_ALL_SUCCESS", False),
+    max_time_gap_hours=int(os.getenv("SJA_MONITOR_MAX_TIME_GAP_HOURS", "1")),
 )
 
 schedule_start_hours = _parse_int_list("SJA_SCHEDULE_START_HOURS") or [18]
@@ -284,6 +286,29 @@ SCHEDULE_PLAN = SchedulePlan(
     duration_hours=int(os.getenv("SJA_SCHEDULE_DURATION", "1")),
     auto_start=_env_bool("SJA_SCHEDULE_AUTO_START", True),
 )
+
+AUTO_BOOKING_SETTINGS = {
+    # 抢票前的预热提前量，确保在放票前完成登录、token、sign等准备
+    "warmup_seconds": int(os.getenv("SJA_AUTOBOOK_WARMUP_SECONDS", "35")),
+    # 默认抢票的日期偏移量（单位：天），默认为抢第7天
+    "target_offset_days": int(os.getenv("SJA_AUTOBOOK_TARGET_OFFSET_DAYS", "7")),
+    # 抢票失败后的刷新间隔和最大刷新次数，用于短时间内快速轮询库存
+    "slot_refresh_interval_seconds": float(os.getenv("SJA_AUTOBOOK_REFRESH_INTERVAL", "0.35")),
+    "slot_refresh_rounds": int(os.getenv("SJA_AUTOBOOK_REFRESH_ROUNDS", "6")),
+    "slot_cache_ttl_seconds": float(os.getenv("SJA_AUTOBOOK_SLOT_CACHE_TTL", "25")),
+    # 并发下单的最大数量（每轮尝试的slot数量）
+    "max_parallel_orders": max(1, int(os.getenv("SJA_AUTOBOOK_PARALLEL_ORDERS", "6"))),
+    # order manager 的超时时间，确保快速失败快速重试
+    "order_request_timeout": float(os.getenv("SJA_AUTOBOOK_ORDER_TIMEOUT", "3.0")),
+    # HTTP POST 节流配置（秒），0 表示取消节流
+    "post_throttle_seconds": float(os.getenv("SJA_AUTOBOOK_POST_THROTTLE", "0.0")),
+    # 单个时间段下单的最大重试次数
+    "order_retry_attempts": max(1, int(os.getenv("SJA_AUTOBOOK_ORDER_RETRIES", "3"))),
+    # 是否在首次尝试前强制刷新最新场地信息
+    "order_refresh_before_attempt": _env_bool("SJA_AUTOBOOK_ORDER_REFRESH_FIRST", True),
+    # 并发失败后的退避时间
+    "retry_delay_seconds": float(os.getenv("SJA_AUTOBOOK_RETRY_DELAY", "0.8")),
+}
 
 
 # Default API endpoints discovered from the current platform version.
@@ -610,6 +635,7 @@ __all__ = [
     "TARGET",
     "MONITOR_PLAN",
     "SCHEDULE_PLAN",
+    "AUTO_BOOKING_SETTINGS",
     "PRESET_TARGETS",
     "ENCRYPTION_CONFIG",
     "BOT_HTTP_URL",

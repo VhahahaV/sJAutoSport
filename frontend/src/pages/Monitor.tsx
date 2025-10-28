@@ -3,10 +3,12 @@ import { FormEvent, useEffect, useMemo, useState } from "react";
 import {
   api,
   type MonitorInfo,
+  type MonitorRequestBody,
   type Preset,
   type UserSummary,
 } from "../lib/api";
 import { buildDayOffsetOptions, buildHourOptions } from "../lib/options";
+import PresetSelector from "../components/PresetSelector";
 
 // 只显示 12:00 到 21:00
 const PREFERRED_HOURS = [12, 13, 14, 15, 16, 17, 18, 19, 20, 21];
@@ -62,6 +64,8 @@ const MonitorPage = () => {
   const [selectedExcludeUsers, setSelectedExcludeUsers] = useState<string[]>([]);
   const [selectedPreferredHours, setSelectedPreferredHours] = useState<number[]>([]);
   const [selectedPreferredDays, setSelectedPreferredDays] = useState<number[]>([]);
+  const [maxRuntimeMinutes, setMaxRuntimeMinutes] = useState<number | "">("");
+  const [runUntil, setRunUntil] = useState<string>("");
   const [deleteAllLoading, setDeleteAllLoading] = useState(false);
 
   const monitorHourOptions = useMemo(() => buildHourOptions(PREFERRED_HOURS), []);
@@ -121,6 +125,8 @@ const MonitorPage = () => {
     setSelectedExcludeUsers([]);
     setSelectedPreferredHours([]);
     setSelectedPreferredDays([]);
+    setMaxRuntimeMinutes("");
+    setRunUntil("");
   };
 
   const togglePreferredHour = (hour: number) => {
@@ -168,7 +174,7 @@ const MonitorPage = () => {
       const preferredHoursPayload = selectedPreferredHours.length > 0 ? selectedPreferredHours : undefined;
       const preferredDaysPayload = selectedPreferredDays.length > 0 ? selectedPreferredDays : undefined;
 
-      const payload = {
+      const payload: MonitorRequestBody = {
         monitor_id: monitorId.trim(),
         preset: presetIndex ? Number(presetIndex) : undefined,
         interval_seconds: intervalMinutes * 60,
@@ -179,6 +185,17 @@ const MonitorPage = () => {
         preferred_hours: preferredHoursPayload,
         preferred_days: preferredDaysPayload,
       };
+
+      if (maxRuntimeMinutes !== "") {
+        const minutes = Number(maxRuntimeMinutes);
+        if (!Number.isNaN(minutes) && minutes > 0) {
+          payload.max_runtime_minutes = minutes;
+        }
+      }
+
+      if (runUntil.trim()) {
+        payload.end_time = runUntil.trim();
+      }
 
       await api.createMonitor(payload);
       setMessage("监控任务已创建");
@@ -199,6 +216,38 @@ const MonitorPage = () => {
       setMessage(null);
       await api.deleteMonitor(id);
       setMessage(`已停止监控任务 ${id}`);
+      await loadMonitors();
+    } catch (err) {
+      const messageText = (err as Error).message;
+      setError(messageText);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const handlePause = async (id: string) => {
+    try {
+      setLoading(true);
+      setError(null);
+      setMessage(null);
+      await api.pauseMonitor(id);
+      setMessage(`已暂停监控任务 ${id}`);
+      await loadMonitors();
+    } catch (err) {
+      const messageText = (err as Error).message;
+      setError(messageText);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const handleResume = async (id: string) => {
+    try {
+      setLoading(true);
+      setError(null);
+      setMessage(null);
+      await api.resumeMonitor(id);
+      setMessage(`已恢复监控任务 ${id}`);
       await loadMonitors();
     } catch (err) {
       const messageText = (err as Error).message;
@@ -300,6 +349,18 @@ const MonitorPage = () => {
       });
   };
 
+  const formatDateTime = (value: unknown): string => {
+    if (!value) {
+      return "-";
+    }
+    const text = String(value);
+    const parsed = new Date(text);
+    if (Number.isNaN(parsed.getTime())) {
+      return text;
+    }
+    return parsed.toLocaleString();
+  };
+
   return (
     <>
       <div className="content-header">
@@ -323,24 +384,15 @@ const MonitorPage = () => {
             />
           </label>
 
-          <label className="form-label">
+          <div className="form-label form-label--full">
             <span>预设</span>
-            <select
+            <PresetSelector
+              presets={presets}
               value={presetIndex}
-              onChange={(event) => {
-                const value = event.target.value;
-                setPresetIndex(value ? Number(value) : "");
-              }}
-              className="input"
-            >
-              <option value="">自定义目标</option>
-              {presets.map((preset) => (
-                <option key={preset.index} value={preset.index}>
-                  {preset.index}. {preset.venue_name} / {preset.field_type_name}
-                </option>
-              ))}
-            </select>
-          </label>
+              onChange={(nextPreset) => setPresetIndex(nextPreset)}
+              onClear={() => setPresetIndex("")}
+            />
+          </div>
 
           <label className="form-label">
             <span>监控间隔（分钟）</span>
@@ -357,6 +409,33 @@ const MonitorPage = () => {
               <option value={30}>30分钟</option>
               <option value={60}>60分钟</option>
             </select>
+          </label>
+
+          <label className="form-label">
+            <span>最长运行时长（分钟，可选）</span>
+            <input
+              type="number"
+              min={1}
+              max={1440}
+              className="input"
+              value={maxRuntimeMinutes === "" ? "" : String(maxRuntimeMinutes)}
+              onChange={(event) => {
+                const value = event.target.value;
+                setMaxRuntimeMinutes(value === "" ? "" : Number(value));
+              }}
+              placeholder="例如 120"
+            />
+          </label>
+
+          <label className="form-label">
+            <span>结束时间（可选）</span>
+            <input
+              type="datetime-local"
+              className="input"
+              value={runUntil}
+              onChange={(event) => setRunUntil(event.target.value)}
+            />
+            <span className="muted-text">留空时，系统会在目标时段结束后自动停止</span>
           </label>
 
           <div className="panel" style={{ gridColumn: "1 / -1", border: "2px solid #F97316", background: "#FFF7ED", padding: "16px" }}>
@@ -377,7 +456,9 @@ const MonitorPage = () => {
                   onChange={(event) => setRequireAllUsersSuccess(event.target.checked)}
                   style={{ width: "18px", height: "18px" }}
                 />
-                <span style={{ color: "#0891B2" }}>✓ 要求所有用户都成功 - 所有指定用户都预订成功才算任务完成（否则一人成功即完成）</span>
+                <span style={{ color: "#0891B2" }}>
+                  ✓ 要求所有用户都成功 - 所有指定账号都抢到场次才算任务完成，并自动限制开始时间相差不超过 1 小时
+                </span>
               </label>
             )}
           </div>
@@ -503,103 +584,179 @@ const MonitorPage = () => {
             </button>
           )}
         </div>
-        <div className="panel" style={{ display: "flex", flexDirection: "column", gap: "16px" }}>
+        <div className="panel">
           {monitors.length === 0 ? (
             <span style={{ color: "#667085" }}>暂无监控任务。</span>
           ) : (
-            monitors.map((monitor, index) => {
-              const info = monitor as Record<string, unknown>;
-              const monitorKey = String(info.id ?? info.monitor_id ?? index);
-              const presetLabel =
-                info.preset != null
-                  ? String(info.preset)
-                  : info.preset_index != null
-                    ? String(info.preset_index)
-                    : "自定义";
-              const status = String(info.status ?? "unknown");
-              const rawInterval = Number(info.interval_seconds ?? info.interval ?? 0) || 0;
-              const intervalMinutesDisplay = rawInterval ? (rawInterval / 60).toFixed(rawInterval % 60 === 0 ? 0 : 1) : "-";
-              const autoBookFlag = Boolean(info.auto_book);
-              const lastCheck = info.last_check ? String(info.last_check) : "未执行";
-              const resolved = (info.resolved as Record<string, unknown>) || {};
-              const resolvedLabel = resolved.label || resolved.venue_name || "目标";
-              const preferredHours = info.preferred_hours;
-              const preferredDays = info.preferred_days;
-              const targetUserList = Array.isArray(info.target_users) ? (info.target_users as string[]) : [];
-              const excludeUserList = Array.isArray(info.exclude_users) ? (info.exclude_users as string[]) : [];
-              const parsedSlots = toSlotPreviewList(info.found_slots);
-              const slotPreview = formatSlotPreview(parsedSlots);
+            <div className="card-scroll">
+              {monitors.map((monitor, index) => {
+                const info = monitor as Record<string, unknown>;
+                const monitorKey = String(info.id ?? info.monitor_id ?? index);
+                const presetLabel =
+                  info.preset != null
+                    ? String(info.preset)
+                    : info.preset_index != null
+                      ? String(info.preset_index)
+                      : "自定义";
+                const status = String(info.status ?? "unknown");
+                const statusLower = status.toLowerCase();
+                const statusClass =
+                  statusLower === "running"
+                    ? "chip-success"
+                    : statusLower === "paused"
+                      ? "chip-info"
+                      : statusLower === "completed"
+                        ? "chip-success"
+                        : "chip-warning";
+                const rawInterval = Number(info.interval_seconds ?? info.interval ?? 0) || 0;
+                const intervalMinutesDisplay = rawInterval
+                  ? (rawInterval / 60).toFixed(rawInterval % 60 === 0 ? 0 : 1)
+                  : "-";
+                const autoBookFlag = Boolean(info.auto_book);
+                const lastCheck = info.last_check ? String(info.last_check) : "未执行";
+                const resolved = (info.resolved as Record<string, unknown>) || {};
+                const resolvedLabel = resolved.label || resolved.venue_name || "目标";
+                const preferredHours = info.preferred_hours;
+                const preferredDays = info.preferred_days;
+                const targetUserList = Array.isArray(info.target_users) ? (info.target_users as string[]) : [];
+                const excludeUserList = Array.isArray(info.exclude_users) ? (info.exclude_users as string[]) : [];
+                const parsedSlots = toSlotPreviewList(info.found_slots);
+                const slotPreview = formatSlotPreview(parsedSlots);
+                const runtimeLimit = info.max_runtime_minutes ?? info.maxRuntimeMinutes;
+                const runUntilValue = (info.run_until as string) || (info.auto_stop_at as string) || "";
 
-              return (
-                <div
-                  key={monitorKey}
-                  style={{
-                    border: "1px solid rgba(148, 163, 184, 0.2)",
-                    borderRadius: "12px",
-                    padding: "16px",
-                    display: "grid",
-                    gap: "12px",
-                    gridTemplateColumns: "repeat(auto-fit, minmax(180px, 1fr))",
-                  }}
-                >
-                  <div>
-                    <strong>ID：</strong>
-                    {monitorKey}
-                  </div>
-                  <div>
-                    <strong>目标：</strong>
-                    {String(resolvedLabel || "-")}
-                  </div>
-                  <div>
-                    <strong>预设：</strong>
-                    {presetLabel}
-                  </div>
-                  <div>
-                    <strong>状态：</strong>
-                    <span className={`chip ${status === "running" ? "chip-success" : "chip-warning"}`}>{status}</span>
-                  </div>
-                  <div>
-                  <strong>间隔：</strong>
-                  {intervalMinutesDisplay} 分钟
-                  </div>
-                  <div>
-                    <strong>自动预订：</strong>
-                    {autoBookFlag ? "是" : "否"}
-                  </div>
-                  <div>
-                    <strong>最后检查：</strong>
-                    {lastCheck}
-                  </div>
-                  <div>
-                    <strong>优先时段：</strong>
-                    {formatHourList(preferredHours)}
-                  </div>
-                  <div>
-                    <strong>优先天数：</strong>
-                    {formatDayList(preferredDays)}
-                  </div>
-                  <div>
-                    <strong>指定账号：</strong>
-                    {targetUserList.length ? targetUserList.join(", ") : "全部"}
-                  </div>
-                  <div>
-                    <strong>排除账号：</strong>
-                    {excludeUserList.length ? excludeUserList.join(", ") : "-"}
-                  </div>
-                  {/* 场地信息已移除 */}
-                  <div style={{ gridColumn: "1 / -1" }}>
+                const actionButtons = () => {
+                  if (statusLower === "running") {
+                    return (
+                      <>
+                        <button
+                          className="button button-secondary"
+                          type="button"
+                          onClick={() => handlePause(monitorKey)}
+                          disabled={loading}
+                        >
+                          暂停任务
+                        </button>
+                        <button
+                          className="button button-danger"
+                          type="button"
+                          onClick={() => handleDelete(monitorKey)}
+                          disabled={loading}
+                        >
+                          停止任务
+                        </button>
+                      </>
+                    );
+                  }
+                  if (statusLower === "paused") {
+                    return (
+                      <>
+                        <button
+                          className="button button-primary"
+                          type="button"
+                          onClick={() => handleResume(monitorKey)}
+                          disabled={loading}
+                        >
+                          恢复任务
+                        </button>
+                        <button
+                          className="button button-danger"
+                          type="button"
+                          onClick={() => handleDelete(monitorKey)}
+                          disabled={loading}
+                        >
+                          删除任务
+                        </button>
+                      </>
+                    );
+                  }
+                  return (
                     <button
-                      className="button button-secondary"
+                      className="button button-danger"
                       type="button"
                       onClick={() => handleDelete(monitorKey)}
                       disabled={loading}
                     >
-                      停止任务
+                      删除任务
                     </button>
+                  );
+                };
+
+                return (
+                  <div key={monitorKey} className="monitor-card">
+                    <div className="monitor-card-grid">
+                      <div>
+                        <strong>ID：</strong>
+                        {monitorKey}
+                      </div>
+                      <div>
+                        <strong>目标：</strong>
+                        {String(resolvedLabel || "-")}
+                      </div>
+                      <div>
+                        <strong>预设：</strong>
+                        {presetLabel}
+                      </div>
+                      <div>
+                        <strong>状态：</strong>
+                        <span className={`chip ${statusClass}`}>{status}</span>
+                      </div>
+                      <div>
+                        <strong>间隔：</strong>
+                        {intervalMinutesDisplay} 分钟
+                      </div>
+                      <div>
+                        <strong>自动预订：</strong>
+                        {autoBookFlag ? "是" : "否"}
+                      </div>
+                      <div>
+                        <strong>最后检查：</strong>
+                        {lastCheck}
+                      </div>
+                      <div>
+                        <strong>最长运行：</strong>
+                        {runtimeLimit ? `${runtimeLimit} 分钟` : "未设置"}
+                      </div>
+                      <div>
+                        <strong>结束时间：</strong>
+                        {runUntilValue ? formatDateTime(runUntilValue) : "目标时间结束后"}
+                      </div>
+                      <div>
+                        <strong>优先时段：</strong>
+                        {formatHourList(preferredHours)}
+                      </div>
+                      <div>
+                        <strong>优先天数：</strong>
+                        {formatDayList(preferredDays)}
+                      </div>
+                      <div>
+                        <strong>指定账号：</strong>
+                        {targetUserList.length ? targetUserList.join(", ") : "全部"}
+                      </div>
+                      <div>
+                        <strong>排除账号：</strong>
+                        {excludeUserList.length ? excludeUserList.join(", ") : "-"}
+                      </div>
+                      {slotPreview.length > 0 ? (
+                        <div style={{ gridColumn: "1 / -1" }}>
+                          <strong>最新可用：</strong>
+                          <div className="monitor-card-slots">
+                            {slotPreview.map((line, idx) => (
+                              <span key={`${monitorKey}-slot-${idx}`} style={{ color: "#475467" }}>
+                                {line}
+                              </span>
+                            ))}
+                          </div>
+                        </div>
+                      ) : null}
+                      <div className="monitor-card-actions">
+                        {actionButtons()}
+                      </div>
+                    </div>
                   </div>
-                </div>
-              );
-            })
+                );
+              })}
+            </div>
           )}
         </div>
       </section>

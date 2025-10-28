@@ -12,10 +12,15 @@ import {
   buildHourOptions,
   buildMinuteOptions,
   buildSecondOptions,
+  HOURS_24,
 } from "../lib/options";
+import PresetSelector from "../components/PresetSelector";
 
-// 只显示 12:00 到 21:00
-const SCHEDULE_HOURS = [12, 13, 14, 15, 16, 17, 18, 19, 20, 21];
+// 执行小时：支持24小时全覆盖（脚本执行时间）
+const EXECUTION_HOURS = HOURS_24;
+
+// 开始小时：预订场地的时间范围（12:00-21:00）
+const BOOKING_HOURS = [12, 13, 14, 15, 16, 17, 18, 19, 20, 21];
 
 type UserOption = {
   id: string;
@@ -60,8 +65,8 @@ const SchedulePage = () => {
     [availableUsers],
   );
 
-  const bookingHourOptions = useMemo(() => buildHourOptions(SCHEDULE_HOURS), []);
-  const executionHourOptions = useMemo(() => buildHourOptions(SCHEDULE_HOURS), []);
+  const bookingHourOptions = useMemo(() => buildHourOptions(BOOKING_HOURS), []);
+  const executionHourOptions = useMemo(() => buildHourOptions(EXECUTION_HOURS), []);
   const minuteOptions = useMemo(() => buildMinuteOptions(), []);
   const secondOptions = useMemo(() => buildSecondOptions(), []);
   const dayOptions = useMemo(() => buildDayOffsetOptions(), []);
@@ -245,24 +250,15 @@ const SchedulePage = () => {
             </select>
           </label>
 
-          <label className="form-label">
+          <div className="form-label form-label--full">
             <span>预设（可选）</span>
-            <select
+            <PresetSelector
+              presets={presets}
               value={presetIndex}
-              onChange={(event) => {
-                const value = event.target.value;
-                setPresetIndex(value ? Number(value) : "");
-              }}
-              className="input"
-            >
-              <option value="">自定义</option>
-              {presets.map((preset) => (
-                <option key={preset.index} value={preset.index}>
-                  {preset.index}. {preset.venue_name} / {preset.field_type_name}
-                </option>
-              ))}
-            </select>
-          </label>
+              onChange={(nextPreset) => setPresetIndex(nextPreset)}
+              onClear={() => setPresetIndex("")}
+            />
+          </div>
 
           <label className="form-label">
             <span>日期</span>
@@ -350,7 +346,9 @@ const SchedulePage = () => {
                   onChange={(event) => setRequireAllUsersSuccess(event.target.checked)}
                   style={{ width: "18px", height: "18px" }}
                 />
-                <span style={{ color: "#0891B2" }}>✓ 要求所有用户都成功 - 所有指定用户都预订成功才算任务完成（否则一人成功即完成）</span>
+                <span style={{ color: "#0891B2" }}>
+                  ✓ 要求所有用户都成功 - 全部指定账号抢到场次才算任务完成，并会限制预约的开始时间相差不超过 1 小时
+                </span>
               </label>
             </div>
           )}
@@ -382,77 +380,79 @@ const SchedulePage = () => {
           {schedules.length === 0 ? (
             <span className="muted-text">暂无定时任务。</span>
           ) : (
-            <table className="table">
-              <thead>
-                <tr>
-                  <th>ID</th>
-                  <th>执行时间</th>
-                  <th>时段</th>
-                  <th>预设</th>
-                  <th>用户</th>
-                  <th>状态</th>
-                  <th>最近运行</th>
-                  <th>操作</th>
-                </tr>
-              </thead>
-              <tbody>
-                {schedules.map((job, index) => {
-                  const info = job as Record<string, unknown>;
-                  const id = String(info.id ?? `job-${index}`);
-                  const hourStr = String(info.hour ?? "00").padStart(2, "0");
-                  const minuteStr = String(info.minute ?? "00").padStart(2, "0");
-                  const secondStr = String(info.second ?? "00").padStart(2, "0");
-                  const presetLabel =
-                    info.preset != null && info.preset !== ""
-                      ? String(info.preset)
-                      : "自定义";
-                  const status = String(info.status ?? "unknown");
-                  const lastRun =
-                    info.last_run != null ? String(info.last_run) : "未运行";
-                  const startHoursRaw = Array.isArray(info.start_hours)
-                    ? info.start_hours
-                    : info.start_hour != null
-                      ? [info.start_hour]
-                      : [];
-                  const startHourLabel = startHoursRaw.length
-                    ? startHoursRaw
-                        .map((item) => `${Number(item).toString().padStart(2, "0")}:00`)
-                        .join(", ")
-                    : "-";
-                  const targetUserLabel = Array.isArray(info.target_users) && info.target_users.length
-                    ? info.target_users.join(", ")
-                    : "-";
+            <div className="table-container">
+              <table className="table">
+                <thead>
+                  <tr>
+                    <th>ID</th>
+                    <th>执行时间</th>
+                    <th>时段</th>
+                    <th>预设</th>
+                    <th>用户</th>
+                    <th>状态</th>
+                    <th>最近运行</th>
+                    <th>操作</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {schedules.map((job, index) => {
+                    const info = job as Record<string, unknown>;
+                    const id = String(info.id ?? `job-${index}`);
+                    const hourStr = String(info.hour ?? "00").padStart(2, "0");
+                    const minuteStr = String(info.minute ?? "00").padStart(2, "0");
+                    const secondStr = String(info.second ?? "00").padStart(2, "0");
+                    const presetLabel =
+                      info.preset != null && info.preset !== ""
+                        ? String(info.preset)
+                        : "自定义";
+                    const status = String(info.status ?? "unknown");
+                    const lastRun =
+                      info.last_run != null ? String(info.last_run) : "未运行";
+                    const startHoursRaw = Array.isArray(info.start_hours)
+                      ? info.start_hours
+                      : info.start_hour != null
+                        ? [info.start_hour]
+                        : [];
+                    const startHourLabel = startHoursRaw.length
+                      ? startHoursRaw
+                          .map((item) => `${Number(item).toString().padStart(2, "0")}:00`)
+                          .join(", ")
+                      : "-";
+                    const targetUserLabel = Array.isArray(info.target_users) && info.target_users.length
+                      ? info.target_users.join(", ")
+                      : "-";
 
-                  return (
-                    <tr key={id}>
-                      <td>{id}</td>
-                      <td>
-                        {hourStr}:{minuteStr}:{secondStr}
-                      </td>
-                      <td>{startHourLabel}</td>
-                      <td>{presetLabel}</td>
-                      <td>{targetUserLabel}</td>
-                      <td>
-                        <span className={`chip ${status === "scheduled" ? "chip-info" : "chip-warning"}`}>
-                          {status}
-                        </span>
-                      </td>
-                      <td>{lastRun}</td>
-                      <td>
-                        <button
-                          className="button button-secondary"
-                          type="button"
-                          onClick={() => handleDelete(id)}
-                          disabled={loading}
-                        >
-                          删除
-                        </button>
-                      </td>
-                    </tr>
-                  );
-                })}
-              </tbody>
-            </table>
+                    return (
+                      <tr key={id}>
+                        <td>{id}</td>
+                        <td>
+                          {hourStr}:{minuteStr}:{secondStr}
+                        </td>
+                        <td>{startHourLabel}</td>
+                        <td>{presetLabel}</td>
+                        <td>{targetUserLabel}</td>
+                        <td>
+                          <span className={`chip ${status === "scheduled" ? "chip-info" : "chip-warning"}`}>
+                            {status}
+                          </span>
+                        </td>
+                        <td>{lastRun}</td>
+                        <td>
+                          <button
+                            className="button button-secondary"
+                            type="button"
+                            onClick={() => handleDelete(id)}
+                            disabled={loading}
+                          >
+                            删除
+                          </button>
+                        </td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
           )}
         </div>
       </section>

@@ -7,6 +7,7 @@ import {
   type UserSummary,
 } from "../lib/api";
 import { buildDayOffsetOptions, buildHourOptions, DEFAULT_HOURS } from "../lib/options";
+import PresetSelector from "../components/PresetSelector";
 // Debug panel removed per requirements
 
 const OrderPage = () => {
@@ -81,23 +82,14 @@ const OrderPage = () => {
 
       <div className="panel">
         <form onSubmit={handleSubmit} className="form-grid">
-          <label className="form-label">
+          <div className="form-label form-label--full">
             <span>选择预设</span>
-            <select
+            <PresetSelector
+              presets={presets}
               value={selectedPreset}
-              onChange={(event) => {
-                const value = event.target.value;
-                setSelectedPreset(value ? Number(value) : "");
-              }}
-              className="input"
-            >
-              {presets.map((preset) => (
-                <option key={preset.index} value={preset.index}>
-                  {preset.index}. {preset.venue_name} / {preset.field_type_name}
-                </option>
-              ))}
-            </select>
-          </label>
+              onChange={(nextPreset) => setSelectedPreset(nextPreset)}
+            />
+          </div>
 
           <label className="form-label">
             <span>日期</span>

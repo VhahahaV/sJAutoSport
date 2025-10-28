@@ -1,22 +1,8 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 
-import { api, type UserSummary } from "../lib/api";
+import { api, type OrderRecord } from "../lib/api";
 
 type OrderStatus = "1" | "2" | "7" | "8" | "all";
-
-type OrderRecord = {
-  pOrderid: string;
-  orderstateid: string;
-  venuename: string;
-  venname: string;
-  spaceInfo: string;
-  ordercreatement: string;
-  orderpaytime?: string;
-  countprice: number;
-  cancelOrder: boolean;
-  name: string;
-  userId: string;
-};
 
 const statusLabels: Record<string, string> = {
   "1": "预定成功",
@@ -26,22 +12,29 @@ const statusLabels: Record<string, string> = {
 };
 
 const OrdersPage = () => {
-  const [users, setUsers] = useState<UserSummary[]>([]);
   const [orders, setOrders] = useState<OrderRecord[]>([]);
+  const [summaries, setSummaries] = useState<
+    Array<{
+      userId: string;
+      name: string;
+      count: number;
+      error?: string;
+    }>
+  >([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [selectedStatus, setSelectedStatus] = useState<OrderStatus>("1");
-  const [currentPage, setCurrentPage] = useState(1);
-  const [total, setTotal] = useState(0);
+  const total = orders.length;
 
   const loadOrders = useCallback(async () => {
     try {
       setLoading(true);
       setError(null);
-      const data = await api.getOrders(currentPage);
+      const data = await api.getOrders(1, 100);
       if (data.success) {
-        setOrders(data.orders || []);
-        setTotal(data.total || 0);
+        const records = data.orders || [];
+        setOrders(records);
+        setSummaries(data.summary || []);
       } else {
         setError(data.message || "获取订单失败");
       }
@@ -50,7 +43,7 @@ const OrdersPage = () => {
     } finally {
       setLoading(false);
     }
-  }, [currentPage]);
+  }, []);
 
   useEffect(() => {
     void loadOrders();
@@ -115,6 +108,20 @@ const OrdersPage = () => {
           <span className="muted-text">共 {total} 条订单</span>
         </div>
 
+        {summaries.length > 0 && (
+          <div className="muted-text" style={{ display: "flex", gap: "12px", flexWrap: "wrap" }}>
+            {summaries.map((item) => {
+              const displayError =
+                item.error && item.error.length > 80 ? `${item.error.slice(0, 77)}...` : item.error;
+              return (
+                <span key={item.userId}>
+                  {item.name}: {item.count} 条{displayError ? `（同步失败：${displayError}）` : ""}
+                </span>
+              );
+            })}
+          </div>
+        )}
+
         {error && (
           <div className="panel notice notice-error">
             <strong>加载失败</strong>
@@ -173,32 +180,8 @@ const OrdersPage = () => {
         </div>
       )}
 
-      {total > 10 && (
-        <div className="panel">
-          <div style={{ display: "flex", gap: "12px", alignItems: "center" }}>
-            <button
-              className="button"
-              onClick={() => setCurrentPage((p) => Math.max(1, p - 1))}
-              disabled={currentPage === 1}
-            >
-              上一页
-            </button>
-            <span>
-              第 {currentPage} 页 / 共 {Math.ceil(total / 10)} 页
-            </span>
-            <button
-              className="button"
-              onClick={() => setCurrentPage((p) => p + 1)}
-              disabled={currentPage >= Math.ceil(total / 10)}
-            >
-              下一页
-            </button>
-          </div>
-        </div>
-      )}
     </>
   );
 };
 
 export default OrdersPage;
-
