@@ -179,6 +179,7 @@ class SportsAPI:
         *,
         timeout: float = 10.0,
         preset_targets: Optional[List] = None,
+        post_throttle_seconds: float = 1.0,
     ) -> None:
         self.base_url = base_url.rstrip("/")
         self.endpoints = endpoints
@@ -186,6 +187,8 @@ class SportsAPI:
         self.preset_targets = preset_targets or []
         self._current_user = None
         self._clients: Dict[str, httpx.Client] = {}
+        self._min_post_interval = max(0.0, post_throttle_seconds)
+        self._last_post_time = 0.0
         
         # 初始化多用户客户端
         self._init_multi_user_clients(timeout)
@@ -313,14 +316,11 @@ class SportsAPI:
         else:
             url = path if path.startswith("/") else f"/{path}"
         # POST 节流控制，避免相邻 POST 过快
-        if not hasattr(self, "_last_post_time"):
-            self._last_post_time = 0.0  # type: ignore[attr-defined]
-            self._min_post_interval = 1.0  # type: ignore[attr-defined]
-        if method.upper() == "POST":
+        if method.upper() == "POST" and self._min_post_interval > 0:
             now = time.time()
-            elapsed = now - float(getattr(self, "_last_post_time", 0.0))
-            if elapsed < float(getattr(self, "_min_post_interval", 1.0)):
-                wait = float(getattr(self, "_min_post_interval", 1.0)) - elapsed + random.uniform(0.1, 0.3)
+            elapsed = now - self._last_post_time
+            if elapsed < self._min_post_interval:
+                wait = self._min_post_interval - elapsed + random.uniform(0.05, 0.12)
                 if wait > 0:
                     time.sleep(wait)
         resp = self.client.request(
@@ -332,7 +332,7 @@ class SportsAPI:
             headers=headers,
         )
         if method.upper() == "POST":
-            self._last_post_time = time.time()  # type: ignore[attr-defined]
+            self._last_post_time = time.time()
         if resp.status_code not in expected:
             detail = resp.text[:400]
             raise RuntimeError(f"{method} {url} -> {resp.status_code}: {detail}")
@@ -783,7 +783,5 @@ class SportsAPI:
         path = "/venue/personal/personalOrderlist"
         resp = self._req("GET", path, params={"pageNo": page_no, "pageSize": page_size})
         return resp.json()
-
-
 
 

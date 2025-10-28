@@ -4,10 +4,11 @@ import asyncio
 import dataclasses
 import logging
 import os
+import re
 import uuid
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
-from typing import Any, Dict, Iterable, List, Optional, Tuple
+from datetime import datetime, timedelta, timezone, time
+from typing import Any, Dict, Iterable, List, Optional, Set, Tuple
 
 logger = logging.getLogger(__name__)
 
@@ -110,6 +111,27 @@ def _normalise_slot_times(slot: Slot) -> Optional[int]:
     return hour
 
 
+def _resolve_slot_labels(slot: Slot, fallback_hour: Optional[int]) -> Tuple[str, str]:
+    """Return normalized start/end labels for a slot, falling back to hour when missing."""
+    start_label = slot.start or (f"{int(fallback_hour):02d}:00" if fallback_hour is not None else "00:00")
+    if ":" not in start_label:
+        try:
+            start_value = int(float(start_label)) % 24
+            start_label = f"{start_value:02d}:00"
+        except (TypeError, ValueError):
+            start_label = "00:00"
+
+    end_label = slot.end or _next_hour(start_label, 1)
+    if ":" not in end_label:
+        try:
+            end_value = int(float(end_label)) % 24
+            end_label = f"{end_value:02d}:00"
+        except (TypeError, ValueError):
+            end_label = _next_hour(start_label, 1)
+
+    return start_label, end_label
+
+
 def _availability_to_dict(entry: SlotAvailability) -> Dict[str, Any]:
     slot = entry.slot
     return {
@@ -149,6 +171,30 @@ def _slot_dict_day_offset(slot: Dict[str, Any]) -> Optional[int]:
         except Exception:  # pylint: disable=broad-except
             return None
     return None
+
+
+_SPACE_INFO_TIME_PATTERN = re.compile(r"(\d{1,2})[:：](\d{2})")
+
+
+def _extract_hour_from_space_info(space_info: Optional[str]) -> Optional[int]:
+    if not space_info:
+        return None
+    match = _SPACE_INFO_TIME_PATTERN.search(space_info)
+    if not match:
+        return None
+    try:
+        hour = int(match.group(1))
+    except ValueError:
+        return None
+    if 0 <= hour <= 23:
+        return hour
+    return None
+
+
+def _hour_within_gap(reference: int, candidate: Optional[int], max_gap: int) -> bool:
+    if candidate is None:
+        return False
+    return abs(candidate - reference) <= max_gap
 
 
 def _filter_slots_by_preferences_dict(slots: List[Dict[str, Any]], monitor_info: Dict[str, Any]) -> List[Dict[str, Any]]:
@@ -543,6 +589,7 @@ def _list_slots_sync(
     start_hour: Optional[int],
     show_full: bool,
     base_target: Optional[BookingTarget],
+    all_dates: bool,
 ) -> SlotListResult:
     api = _create_api()
     try:
@@ -561,6 +608,11 @@ def _list_slots_sync(
             target.venue_id = venue_id
         if field_type_id:
             target.field_type_id = field_type_id
+
+        if all_dates:
+            target.fixed_dates = []
+            target.use_all_dates = True
+            target.date_offset = None
 
         if date is not None:
             parsed_date = _parse_date_input(str(date))
@@ -601,6 +653,7 @@ async def list_slots(
     start_hour: Optional[int] = None,
     show_full: bool = False,
     base_target: Optional[BookingTarget] = None,
+    all_dates: bool = False,
 ) -> SlotListResult:
     return await asyncio.to_thread(
         _list_slots_sync,
@@ -611,6 +664,7 @@ async def list_slots(
         start_hour=start_hour,
         show_full=show_full,
         base_target=base_target,
+        all_dates=all_dates,
     )
 
 
@@ -797,6 +851,8 @@ async def order_once(
 # 全局任务存储（初期使用内存字典）
 _active_monitors: Dict[str, Dict] = {}
 _scheduled_jobs: Dict[str, Dict] = {}
+_pending_payment_tasks: Dict[str, asyncio.Task] = {}
+_paused_monitors: Dict[str, Dict[str, Any]] = {}
 _auth_manager = AuthManager()
 
 
@@ -817,6 +873,798 @@ _login_sessions: Dict[str, LoginSession] = {}
 _LOGIN_SESSION_TIMEOUT = timedelta(minutes=5)
 
 
+def _pending_task_key(user_identifier: Optional[str], order_id: Optional[str]) -> Optional[str]:
+    if not order_id:
+        return None
+    owner = (user_identifier or "").strip() or "__default__"
+    return f"{owner}:{order_id}"
+
+
+async def _fetch_order_record(user_identifier: Optional[str], order_id: str) -> Optional[Dict[str, Any]]:
+    api = _create_api(active_user=user_identifier)
+    try:
+        response = api.list_orders(page_no=1, page_size=100)
+        records: List[Dict[str, Any]] = []
+        if isinstance(response, dict):
+            payload = response.get("records") or response.get("orders") or []
+            if isinstance(payload, list):
+                records = [entry for entry in payload if isinstance(entry, dict)]
+
+        order_id_text = str(order_id)
+        for record in records:
+            candidates = [
+                record.get("orderId"),
+                record.get("order_id"),
+                record.get("pOrderid"),
+                record.get("porderid"),
+                record.get("orderid"),
+                record.get("id"),
+            ]
+            if any(str(candidate) == order_id_text for candidate in candidates if candidate is not None):
+                return record
+        return None
+    except Exception:  # pylint: disable=broad-except
+        return None
+    finally:
+        try:
+            api.close()
+        except Exception:  # pylint: disable=broad-except
+            pass
+
+
+async def _send_pending_payment_reminder(
+    *,
+    monitor_id: str,
+    user_nickname: str,
+    order: Dict[str, Any],
+) -> bool:
+    if not getattr(CFG, "ENABLE_NOTIFICATION", True):
+        return False
+
+    try:
+        from .notification import get_notification_service
+    except Exception as exc:  # pylint: disable=broad-except
+        logger.warning("无法加载通知模块，跳过待支付提醒: %s", exc)
+        return False
+
+    service = get_notification_service()
+    payment_link = getattr(CFG, "NOTIFICATION_TEMPLATE", {}).get(
+        "payment_link",
+        "https://sports.sjtu.edu.cn/pc/order/list",
+    )
+
+    order_id_value = (
+        order.get("pOrderid")
+        or order.get("orderId")
+        or order.get("order_id")
+        or order.get("id")
+        or "未知"
+    )
+    venue_name = order.get("venuename") or order.get("venname") or "未知场馆"
+    activity = order.get("venname") or order.get("fieldTypeName") or order.get("field_name") or "未知项目"
+    date_text = order.get("scDate") or order.get("ordercreatement", "")[:10]
+    time_text = order.get("spaceInfo") or order.get("spaceInfoEn") or "-"
+
+    lines = [
+        f"⏰ 监控任务 {monitor_id} 仍有待支付订单",
+        f"🆔 订单ID: {order_id_value}",
+        f"👤 用户: {user_nickname}",
+        f"🏟️ 场馆: {venue_name}",
+        f"🏃 项目: {activity}",
+    ]
+    if date_text:
+        lines.append(f"📅 日期: {date_text}")
+    if time_text and time_text != "-":
+        lines.append(f"⏰ 时间: {time_text}")
+    lines.extend(
+        [
+            "",
+            "💗 请尽快完成支付，逾期系统将自动取消订单。",
+            f"🔗 支付链接: {payment_link}",
+        ]
+    )
+
+    message = "\n".join(lines)
+    targets = getattr(CFG, "NOTIFICATION_TARGETS", {}) or {}
+    return await service.broadcast(
+        message,
+        target_groups=targets.get("groups"),
+        target_users=targets.get("users"),
+    )
+
+
+async def _pending_payment_reminder_loop(
+    *,
+    monitor_id: str,
+    user_identifier: Optional[str],
+    user_nickname: str,
+    order_id: str,
+    preferred_hours: Optional[Iterable[int]],
+    max_time_gap_hours: int,
+    slot_hour: Optional[int],
+    interval_seconds: int = 180,
+    max_attempts: int = 5,
+) -> None:
+    preferred_set: Set[int] = set()
+    for entry in preferred_hours or []:
+        try:
+            hour_value = int(entry)
+        except (TypeError, ValueError):
+            continue
+        if 0 <= hour_value <= 23:
+            preferred_set.add(hour_value)
+
+    attempt = 0
+    try:
+        while attempt < max_attempts:
+            attempt += 1
+            if attempt > 1:
+                await asyncio.sleep(interval_seconds)
+
+            order = await _fetch_order_record(user_identifier, order_id)
+            if not order:
+                return
+
+            state = str(order.get("orderstateid") or order.get("orderStateId") or "")
+            if state != "0":
+                return
+
+            order_hour = _extract_hour_from_space_info(order.get("spaceInfo") or order.get("spaceInfoEn"))
+
+            if slot_hour is not None and not _hour_within_gap(slot_hour, order_hour, max_time_gap_hours):
+                return
+
+            if preferred_set and (order_hour is None or order_hour not in preferred_set):
+                return
+
+            await _send_pending_payment_reminder(
+                monitor_id=monitor_id,
+                user_nickname=user_nickname,
+                order=order,
+            )
+    finally:
+        key = _pending_task_key(user_identifier, order_id)
+        if key:
+            _pending_payment_tasks.pop(key, None)
+
+
+async def _schedule_pending_payment_reminder(
+    *,
+    monitor_id: str,
+    user: UserAuth,
+    order_id: Optional[str],
+    slot: Dict[str, Any],
+    monitor_info: Dict[str, Any],
+) -> None:
+    key = _pending_task_key(user.username or user.nickname, order_id)
+    if not key or key in _pending_payment_tasks or not order_id:
+        return
+
+    preferred_hours = monitor_info.get("preferred_hours")
+    if not preferred_hours:
+        base_target = monitor_info.get("base_target")
+        default_hour = getattr(base_target, "start_hour", None) if base_target else None
+        if default_hour is not None:
+            preferred_hours = [default_hour]
+
+    slot_hour = _slot_dict_hour(slot)
+    max_gap = max(0, int(monitor_info.get("max_time_gap_hours", 1) or 0))
+
+    task = asyncio.create_task(
+        _pending_payment_reminder_loop(
+            monitor_id=monitor_id,
+            user_identifier=user.username or user.nickname,
+            user_nickname=user.nickname or user.username or "未知用户",
+            order_id=str(order_id),
+            preferred_hours=preferred_hours,
+            max_time_gap_hours=max_gap,
+            slot_hour=slot_hour,
+        )
+    )
+    _pending_payment_tasks[key] = task
+
+
+def _compute_auto_stop_time(monitor_info: Dict[str, Any]) -> Optional[datetime]:
+    explicit_end = monitor_info.get("end_time")
+    if isinstance(explicit_end, str) and explicit_end.strip():
+        try:
+            return datetime.fromisoformat(explicit_end.strip())
+        except ValueError:
+            pass
+
+    max_runtime = monitor_info.get("max_runtime_minutes")
+    if isinstance(max_runtime, (int, float)) and max_runtime > 0:
+        return datetime.now() + timedelta(minutes=float(max_runtime))
+
+    def _get_value(source: Any, key: str, default: Any = None) -> Any:
+        if source is None:
+            return default
+        if isinstance(source, dict):
+            return source.get(key, default)
+        return getattr(source, key, default)
+
+    target_date: Optional[datetime] = None
+    raw_date = monitor_info.get("date")
+    if isinstance(raw_date, str) and raw_date.strip():
+        try:
+            target_date = datetime.strptime(raw_date.strip(), "%Y-%m-%d")
+        except ValueError:
+            target_date = None
+
+    if target_date is None:
+        day_offsets: List[int] = []
+        preferred_days = monitor_info.get("preferred_days") or []
+        if isinstance(preferred_days, list) and preferred_days:
+            for entry in preferred_days:
+                try:
+                    day_offsets.append(int(entry))
+                except (TypeError, ValueError):
+                    continue
+        else:
+            base_target = monitor_info.get("base_target")
+            offset_value = _get_value(base_target, "date_offset")
+            if isinstance(offset_value, list):
+                for entry in offset_value:
+                    try:
+                        day_offsets.append(int(entry))
+                    except (TypeError, ValueError):
+                        continue
+            elif isinstance(offset_value, int):
+                day_offsets.append(offset_value)
+
+        if day_offsets:
+            max_offset = max(day_offsets)
+            base_date = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
+            target_date = base_date + timedelta(days=max_offset)
+
+    hours: List[int] = []
+    raw_hours = monitor_info.get("preferred_hours")
+    if isinstance(raw_hours, list) and raw_hours:
+        for entry in raw_hours:
+            try:
+                hours.append(int(entry))
+            except (TypeError, ValueError):
+                continue
+
+    if not hours:
+        start_hour_value = monitor_info.get("start_hour")
+        if isinstance(start_hour_value, int):
+            hours.append(start_hour_value)
+        else:
+            base_target = monitor_info.get("base_target")
+            fallback_hour = _get_value(base_target, "start_hour")
+            if isinstance(fallback_hour, int):
+                hours.append(fallback_hour)
+
+    if target_date is None or not hours:
+        return None
+
+    max_hour = max(hours)
+    base_target = monitor_info.get("base_target")
+    duration = _get_value(base_target, "duration_hours", 1) or 1
+
+    if isinstance(target_date, datetime):
+        target_day = target_date.date()
+    else:
+        target_day = target_date
+
+    try:
+        start_dt = datetime.combine(target_day, time(max_hour % 24, 0))
+    except ValueError:
+        return None
+
+    return start_dt + timedelta(hours=float(duration))
+
+
+async def _attempt_order_with_backoff(
+    *,
+    job_id: str,
+    preset: int,
+    date: str,
+    start_label: str,
+    base_target: Optional[BookingTarget],
+    user_id: Optional[str],
+) -> OrderResult:
+    """Place an order with adaptive retries to tolerate rate limits and empty slot windows."""
+    max_attempts = 3
+    rate_limit_keywords = ["请求过于频繁", "非法请求", "频率", "The read operation timed out", "超时"]
+    existing_order_keywords = ["已有个人预约", "已存在订单", "冲突预定"]
+    last_result: Optional[OrderResult] = None
+
+    for attempt in range(1, max_attempts + 1):
+        result = await order_once(
+            preset=preset,
+            date=date,
+            start_time=start_label,
+            base_target=base_target,
+            user=user_id,
+            notification_context=f"来自定时任务 {job_id}",
+        )
+
+        message = result.message or ""
+        normalized_message = message.replace(" ", "")
+
+        if result.success:
+            return result
+
+        if any(keyword in normalized_message for keyword in existing_order_keywords):
+            print(f"[schedule:{job_id}] 用户 {user_id or '-'} 已有该时段订单，视为成功: {message}")
+            return OrderResult(
+                success=True,
+                message=message,
+                order_id=result.order_id,
+                raw_response=result.raw_response,
+            )
+
+        last_result = result
+
+        if any(keyword in normalized_message for keyword in rate_limit_keywords):
+            wait_seconds = min(6.0, 2.0 + (attempt - 1) * 1.6)
+            print(
+                f"[schedule:{job_id}] 频率限制或网络波动，第 {attempt}/{max_attempts} 次失败，等待 {wait_seconds:.1f} 秒后重试: {message}"
+            )
+            await asyncio.sleep(wait_seconds)
+            continue
+
+        if "查询时间段失败" in message:
+            wait_seconds = min(5.0, 1.5 + attempt * 1.2)
+            print(
+                f"[schedule:{job_id}] 查询时间段失败，第 {attempt}/{max_attempts} 次尝试后等待 {wait_seconds:.1f} 秒: {message}"
+            )
+            await asyncio.sleep(wait_seconds)
+            continue
+
+        return result
+
+    return last_result or OrderResult(success=False, message="下单失败（查询或频率限制）", raw_response=None)
+
+
+def _user_api_identifier(user: UserAuth) -> Optional[str]:
+    if user.nickname:
+        return user.nickname
+    if user.username:
+        return user.username
+    return None
+
+
+def _user_display_name(user: UserAuth) -> str:
+    return user.nickname or user.username or "未命名用户"
+
+
+async def _preload_slots_early(
+    *,
+    preset_option: Optional[PresetOption],
+    date: str,
+    start_hours: List[int],
+    base_target: Optional[BookingTarget],
+) -> Dict[int, List[Slot]]:
+    """提前预加载场次信息（带超时机制）"""
+    if not preset_option:
+        return {}
+
+    # 🔥 优化2: 设置更短的超时时间，避免长时间等待
+    try:
+        result = await asyncio.wait_for(
+            list_slots(
+                preset=preset_option.index,
+                date=date,
+                start_hour=None,
+                show_full=True,
+                base_target=base_target,
+            ),
+            timeout=10.0  # 10秒超时
+        )
+    except asyncio.TimeoutError:
+        logger.warning("预加载场次超时，跳过预加载")
+        return {}
+    except Exception as exc:  # pylint: disable=broad-except
+        logger.warning("预加载定时任务场次失败: %s", exc)
+        return {}
+
+    hours_set = {int(hour) for hour in start_hours}
+    slot_map: Dict[int, List[Slot]] = {}
+
+    for entry in result.slots:
+        slot_hour = _normalise_slot_times(entry.slot)
+        if slot_hour is None or slot_hour not in hours_set:
+            continue
+        if not entry.slot.sign:
+            continue
+        slot_copy = dataclasses.replace(entry.slot)
+        slot_map.setdefault(slot_hour, []).append(slot_copy)
+
+    for hour, slots in slot_map.items():
+        slots.sort(
+            key=lambda s: (
+                -(s.remain or 0),
+                s.field_name or "",
+                s.sign or "",
+            )
+        )
+    return slot_map
+
+
+async def _preload_slots_for_job(job_id: str) -> None:
+    """为指定任务提前预加载场次信息"""
+    job_info = _scheduled_jobs.get(job_id)
+    if not job_info:
+        return
+
+    try:
+        # 解析任务配置
+        preset_option = _get_preset(job_info.get("preset"))
+        if not preset_option:
+            return
+
+        target_date = _parse_date_input(str(job_info.get("date") or "0"))
+        start_hours = job_info.get("start_hours", [])
+        base_target = job_info.get("base_target") or BookingTarget()
+
+        if not start_hours:
+            return
+
+        # 🔥 优化4: 使用更短的超时时间进行预加载
+        logger.info("[schedule:%s] 开始预加载场次信息: %s %s", job_id, target_date, start_hours)
+
+        preloaded_slots = await _preload_slots_early(
+            preset_option=preset_option,
+            date=target_date,
+            start_hours=start_hours,
+            base_target=base_target,
+        )
+
+        # 保存预加载结果到任务信息中
+        job_info["preloaded_slots"] = preloaded_slots
+        job_info["preload_time"] = datetime.now().isoformat()
+        job_info["preload_success"] = bool(preloaded_slots)
+
+        logger.info(
+            "[schedule:%s] 预加载完成，获取到 %d 个时间段的场次",
+            job_id,
+            len(preloaded_slots)
+        )
+
+        # 保存到数据库
+        await get_db_manager().save_scheduled_job(job_info)
+
+    except Exception as e:
+        logger.error("[schedule:%s] 预加载场次信息失败: %s", job_id, e)
+        job_info["preload_success"] = False
+        job_info["preload_error"] = str(e)
+
+
+async def _get_slots_with_fallback(
+    *,
+    preset_option: Optional[PresetOption],
+    date: str,
+    start_hours: List[int],
+    base_target: Optional[BookingTarget],
+    job_id: str,
+) -> Dict[int, List[Slot]]:
+    """快速获取场次信息，如果失败则返回空字典让系统继续下单"""
+    try:
+        # 🔥 优化6: 使用更短的超时时间（5秒），如果超时立即继续
+        slot_pool = await asyncio.wait_for(
+            _preload_slots_early(
+                preset_option=preset_option,
+                date=date,
+                start_hours=start_hours,
+                base_target=base_target,
+            ),
+            timeout=5.0  # 5秒超时
+        )
+        logger.info("[schedule:%s] 快速获取场次完成", job_id)
+        return slot_pool
+    except asyncio.TimeoutError:
+        logger.warning("[schedule:%s] 获取场次超时，继续下单流程", job_id)
+        return {}
+    except Exception as e:
+        logger.warning("[schedule:%s] 获取场次失败: %s，继续下单流程", job_id, e)
+        return {}
+
+
+async def _prepare_schedule_slots(
+    *,
+    preset_option: Optional[PresetOption],
+    date: str,
+    start_hours: List[int],
+    base_target: Optional[BookingTarget],
+) -> Dict[int, List[Slot]]:
+    """原有的_prepare_schedule_slots函数（作为备用）"""
+    return await _get_slots_with_fallback(
+        preset_option=preset_option,
+        date=date,
+        start_hours=start_hours,
+        base_target=base_target,
+        job_id="manual",  # 手动调用时的任务ID
+    )
+
+
+def _place_order_with_slot_sync(
+    user_identifier: str,
+    slot: Slot,
+    preset_option: PresetOption,
+    date: str,
+    start_label: str,
+    end_label: str,
+    request_timeout: float,
+) -> OrderResult:
+    api = _create_api(active_user=user_identifier)
+    manager = OrderManager(
+        api,
+        CFG.ENCRYPTION_CONFIG,
+        request_timeout=request_timeout,
+    )
+    try:
+        slot_copy = dataclasses.replace(slot)
+        return manager.place_order(
+            slot_copy,
+            preset_option,
+            date,
+            start_label,
+            end_label,
+            max_retries=1,
+        )
+    finally:
+        api.close()
+
+
+async def _place_order_with_slot_async(
+    user_identifier: str,
+    slot: Slot,
+    preset_option: PresetOption,
+    date: str,
+    start_label: str,
+    end_label: str,
+    request_timeout: float,
+) -> OrderResult:
+    return await asyncio.to_thread(
+        _place_order_with_slot_sync,
+        user_identifier,
+        slot,
+        preset_option,
+        date,
+        start_label,
+        end_label,
+        request_timeout,
+    )
+
+
+async def _parallel_attempt_for_slot(
+    *,
+    job_id: str,
+    hour: int,
+    slot: Slot,
+    users: List[UserAuth],
+    preset_option: PresetOption,
+    date: str,
+    request_timeout: float,
+    ) -> Dict[str, Dict[str, Any]]:
+    if not users:
+        return {}
+
+    start_label, end_label = _resolve_slot_labels(slot, hour)
+    print(
+        f"[schedule:{job_id}] ⚡ 并行尝试 {start_label}-{end_label}，用户: "
+        + ", ".join(_user_display_name(u) for u in users)
+    )
+
+    tasks: Dict[str, asyncio.Task[OrderResult]] = {}
+    for user in users:
+        identifier = _user_api_identifier(user)
+        if not identifier:
+            logger.warning("[schedule:%s] 用户 %s 缺少可用于下单的标识，已跳过", job_id, user)
+            continue
+        slot_copy = dataclasses.replace(slot)
+        tasks[identifier] = asyncio.create_task(
+            _place_order_with_slot_async(
+                identifier,
+                slot_copy,
+                preset_option,
+                date,
+                start_label,
+                end_label,
+                request_timeout,
+            )
+        )
+
+    results: Dict[str, Dict[str, Any]] = {}
+    for user in users:
+        identifier = _user_api_identifier(user)
+        if not identifier or identifier not in tasks:
+            continue
+        try:
+            order_result = await tasks[identifier]
+        except Exception as exc:  # pylint: disable=broad-except
+            order_result = OrderResult(False, f"并行下单异常: {exc}")
+        if order_result.success:
+            print(f"[schedule:{job_id}] ✅ 用户 {identifier} 下单成功: {order_result.message}")
+        else:
+            print(f"[schedule:{job_id}] ❌ 用户 {identifier} 下单失败: {order_result.message}")
+        results[identifier] = {
+            "result": order_result,
+            "start": start_label,
+            "end": end_label,
+            "attempt_type": "parallel",
+            "slot_hour": hour,
+        }
+    return results
+
+
+async def _attempt_user_with_cached_slots(
+    *,
+    job_id: str,
+    identifier: str,
+    user: UserAuth,
+    candidate_hours: Iterable[int],
+    slot_pool: Dict[int, List[Slot]],
+    preset_option: PresetOption,
+    date: str,
+    request_timeout: float,
+    attempt_counts: Dict[str, int],
+) -> Dict[str, Any]:
+    """Sequentially attempt booking for a single user using cached slot information."""
+    last_payload: Optional[Dict[str, Any]] = None
+    attempted = False
+
+    for hour in candidate_hours:
+        slots_for_hour = slot_pool.get(hour, [])
+        if not slots_for_hour:
+            continue
+
+        for candidate in slots_for_hour:
+            attempted = True
+            attempt_counts[identifier] = attempt_counts.get(identifier, 0) + 1
+            start_label, end_label = _resolve_slot_labels(candidate, hour)
+            slot_copy = dataclasses.replace(candidate)
+
+            try:
+                order_result = await _place_order_with_slot_async(
+                    identifier,
+                    slot_copy,
+                    preset_option,
+                    date,
+                    start_label,
+                    end_label,
+                    request_timeout,
+                )
+            except Exception as exc:  # pylint: disable=broad-except
+                order_result = OrderResult(False, f"缓存下单异常: {exc}")
+
+            payload = {
+                "result": order_result,
+                "start": start_label,
+                "end": end_label,
+                "attempt_type": "cached",
+                "slot_hour": hour,
+                "attempts": attempt_counts[identifier],
+            }
+            last_payload = payload
+
+            if order_result.success:
+                print(
+                    f"[schedule:{job_id}] ✅ 用户 {identifier} 在 {start_label}-{end_label} 成功（缓存场次）: {order_result.message}"
+                )
+                return payload
+
+            print(
+                f"[schedule:{job_id}] ❌ 用户 {identifier} 在 {start_label}-{end_label} 失败（缓存场次）: {order_result.message}"
+            )
+
+        await asyncio.sleep(0.18)
+
+    if last_payload:
+        return last_payload
+
+    return {
+        "result": OrderResult(False, "缓存的场次中未找到匹配时间段"),
+        "start": "-",
+        "end": "-",
+        "attempt_type": "cached",
+        "slot_hour": None,
+        "attempts": attempt_counts.get(identifier, 0),
+    }
+
+
+async def _notify_schedule_failures(
+    *,
+    job_id: str,
+    preset_option: Optional[PresetOption],
+    date: str,
+    failures: Dict[str, Dict[str, Any]],
+    user_display_map: Dict[str, str],
+) -> None:
+    if not failures:
+        return
+    if not getattr(CFG, "ENABLE_ORDER_NOTIFICATION", True):
+        return
+    try:
+        from .notification import send_order_notification
+    except Exception as exc:  # pylint: disable=broad-except
+        logger.warning("加载通知模块失败，无法发送定时任务失败通知: %s", exc)
+        return
+
+    venue_name = preset_option.venue_name if preset_option else "未知场馆"
+    field_type_name = preset_option.field_type_name if preset_option else "未知项目"
+
+    for identifier, payload in failures.items():
+        display_name = user_display_map.get(identifier, identifier)
+        result: OrderResult = payload["result"]
+        start_label = payload.get("start") or "-"
+        end_label = payload.get("end") or "-"
+        attempts = payload.get("attempts", 1)
+        message = (
+            f"[定时任务 {job_id}] 用户 {display_name} 在 {start_label}-{end_label} "
+            f"尝试 {attempts} 次仍未成功：{result.message}"
+        )
+        order_identifier = result.order_id or (result.raw_response or {}).get("orderId") or "unknown"
+        try:
+            await send_order_notification(
+                order_id=str(order_identifier),
+                user_nickname=display_name,
+                venue_name=venue_name,
+                field_type_name=field_type_name,
+                date=date,
+                start_time=start_label,
+                end_time=end_label,
+                success=False,
+                message=message,
+                target_groups=getattr(CFG, "NOTIFICATION_TARGETS", {}).get("groups"),
+                target_users=getattr(CFG, "NOTIFICATION_TARGETS", {}).get("users"),
+            )
+        except Exception as exc:  # pylint: disable=broad-except
+            logger.warning("发送定时任务失败通知异常: %s", exc)
+
+
+async def _notify_schedule_successes(
+    *,
+    job_id: str,
+    preset_option: Optional[PresetOption],
+    date: str,
+    successes: Dict[str, Dict[str, Any]],
+    user_display_map: Dict[str, str],
+) -> None:
+    if not successes:
+        return
+    if not getattr(CFG, "ENABLE_ORDER_NOTIFICATION", True):
+        return
+    try:
+        from .notification import send_order_notification
+    except Exception as exc:  # pylint: disable=broad-except
+        logger.warning("加载通知模块失败，无法发送定时任务成功通知: %s", exc)
+        return
+
+    venue_name = preset_option.venue_name if preset_option else "未知场馆"
+    field_type_name = preset_option.field_type_name if preset_option else "未知项目"
+
+    for identifier, payload in successes.items():
+        display_name = user_display_map.get(identifier, identifier)
+        result: OrderResult = payload["result"]
+        start_label = payload.get("start") or "-"
+        end_label = payload.get("end") or "-"
+        attempts = payload.get("attempts", 1)
+        message = (
+            f"[定时任务 {job_id}] 用户 {display_name} 在 {start_label}-{end_label} "
+            f"第 {attempts} 次尝试成功：{result.message}"
+        )
+        order_identifier = result.order_id or (result.raw_response or {}).get("orderId") or "unknown"
+        try:
+            await send_order_notification(
+                order_id=str(order_identifier),
+                user_nickname=display_name,
+                venue_name=venue_name,
+                field_type_name=field_type_name,
+                date=date,
+                start_time=start_label,
+                end_time=end_label,
+                success=True,
+                message=message,
+                target_groups=getattr(CFG, "NOTIFICATION_TARGETS", {}).get("groups"),
+                target_users=getattr(CFG, "NOTIFICATION_TARGETS", {}).get("users"),
+            )
+        except Exception as exc:  # pylint: disable=broad-except
+            logger.warning("发送定时任务成功通知异常: %s", exc)
+
 async def start_monitor(
     monitor_id: str,
     *,
@@ -828,6 +1676,9 @@ async def start_monitor(
     interval_seconds: int = 240,
     auto_book: bool = False,
     require_all_users_success: bool = False,
+    max_time_gap_hours: Optional[int] = None,
+    max_runtime_minutes: Optional[int] = None,
+    end_time: Optional[str] = None,
     base_target: Optional[BookingTarget] = None,
     target_users: Optional[List[str]] = None,
     exclude_users: Optional[List[str]] = None,
@@ -851,8 +1702,8 @@ async def start_monitor(
     Returns:
         监控任务信息
     """
-    if monitor_id in _active_monitors:
-        return {"success": False, "message": f"监控任务 {monitor_id} 已存在"}
+    if monitor_id in _active_monitors or monitor_id in _paused_monitors:
+        return {"success": False, "message": f"监控任务 {monitor_id} 已存在，请先停止或恢复"}
     
     # 创建监控任务信息
     working_target = dataclasses.replace(base_target or getattr(CFG, "TARGET", BookingTarget()))
@@ -868,6 +1719,15 @@ async def start_monitor(
     if preferred_hours is not None:
         working_target.start_hour = preferred_hours[0] if preferred_hours else 18
 
+    default_plan = getattr(CFG, "MONITOR_PLAN", MonitorPlan())
+    if max_time_gap_hours is None:
+        max_gap_hours = getattr(default_plan, "max_time_gap_hours", 1)
+    else:
+        try:
+            max_gap_hours = int(max_time_gap_hours)
+        except (TypeError, ValueError):
+            max_gap_hours = getattr(default_plan, "max_time_gap_hours", 1)
+    max_gap_hours = max(0, min(max_gap_hours, 4))
     monitor_info = {
         "id": monitor_id,
         "preset": preset,
@@ -878,6 +1738,9 @@ async def start_monitor(
         "interval_seconds": interval_seconds,
         "auto_book": auto_book,
         "require_all_users_success": require_all_users_success,
+        "max_time_gap_hours": max_gap_hours,
+        "max_runtime_minutes": max_runtime_minutes,
+        "end_time": end_time,
         "base_target": working_target,
         "preferred_hours": preferred_hours,
         "preferred_days": preferred_days,
@@ -892,6 +1755,11 @@ async def start_monitor(
         "last_notified_signature": None,
         "resolved": None,
     }
+
+    auto_stop_at = _compute_auto_stop_time(monitor_info)
+    monitor_info["auto_stop_at"] = auto_stop_at.isoformat() if auto_stop_at else None
+    if monitor_info["auto_stop_at"]:
+        monitor_info["run_until"] = monitor_info["auto_stop_at"]
     
     # 保存到数据库
     db_manager = get_db_manager()
@@ -915,9 +1783,17 @@ async def stop_monitor(monitor_id: str) -> Dict[str, Any]:
     Returns:
         操作结果
     """
+    if monitor_id in _paused_monitors:
+        monitor_info = _paused_monitors.pop(monitor_id)
+        monitor_info["status"] = "stopped"
+        monitor_info["stop_time"] = datetime.now().isoformat()
+        db_manager = get_db_manager()
+        await db_manager.save_monitor(monitor_info)
+        return {"success": True, "message": f"监控任务 {monitor_id} 已停止"}
+
     if monitor_id not in _active_monitors:
         return {"success": False, "message": f"监控任务 {monitor_id} 不存在"}
-    
+
     monitor_info = _active_monitors[monitor_id]
     monitor_info["status"] = "stopped"
     monitor_info["stop_time"] = datetime.now().isoformat()
@@ -931,6 +1807,52 @@ async def stop_monitor(monitor_id: str) -> Dict[str, Any]:
     return {"success": True, "message": f"监控任务 {monitor_id} 已停止"}
 
 
+async def pause_monitor(monitor_id: str) -> Dict[str, Any]:
+    if monitor_id not in _active_monitors:
+        if monitor_id in _paused_monitors:
+            return {"success": False, "message": f"监控任务 {monitor_id} 已暂停"}
+        return {"success": False, "message": f"监控任务 {monitor_id} 不存在或未运行"}
+
+    monitor_info = _active_monitors.pop(monitor_id)
+    monitor_info["status"] = "paused"
+    monitor_info["paused_time"] = datetime.now().isoformat()
+
+    _paused_monitors[monitor_id] = monitor_info
+
+    db_manager = get_db_manager()
+    await db_manager.save_monitor(monitor_info)
+
+    return {"success": True, "message": f"监控任务 {monitor_id} 已暂停"}
+
+
+async def resume_monitor(monitor_id: str) -> Dict[str, Any]:
+    if monitor_id in _active_monitors:
+        return {"success": False, "message": f"监控任务 {monitor_id} 已在运行"}
+
+    monitor_info = _paused_monitors.get(monitor_id)
+    if not monitor_info:
+        return {"success": False, "message": f"监控任务 {monitor_id} 不存在或未暂停"}
+
+    monitor_info["status"] = "running"
+    monitor_info.pop("paused_time", None)
+    monitor_info["resume_time"] = datetime.now().isoformat()
+
+    _active_monitors[monitor_id] = monitor_info
+    del _paused_monitors[monitor_id]
+
+    auto_stop_at = _compute_auto_stop_time(monitor_info)
+    monitor_info["auto_stop_at"] = auto_stop_at.isoformat() if auto_stop_at else None
+    if monitor_info["auto_stop_at"]:
+        monitor_info["run_until"] = monitor_info["auto_stop_at"]
+
+    db_manager = get_db_manager()
+    await db_manager.save_monitor(monitor_info)
+
+    asyncio.create_task(_monitor_worker(monitor_id))
+
+    return {"success": True, "message": f"监控任务 {monitor_id} 已恢复", "monitor_info": monitor_info}
+
+
 async def monitor_status(monitor_id: Optional[str] = None) -> Dict[str, Any]:
     """
     获取监控任务状态
@@ -942,11 +1864,16 @@ async def monitor_status(monitor_id: Optional[str] = None) -> Dict[str, Any]:
         监控状态信息
     """
     if monitor_id:
-        if monitor_id not in _active_monitors:
-            return {"success": False, "message": f"监控任务 {monitor_id} 不存在"}
-        return {"success": True, "monitor_info": _active_monitors[monitor_id]}
-    else:
-        return {"success": True, "monitors": list(_active_monitors.values())}
+        if monitor_id in _active_monitors:
+            return {"success": True, "monitor_info": _active_monitors[monitor_id]}
+        if monitor_id in _paused_monitors:
+            return {"success": True, "monitor_info": _paused_monitors[monitor_id]}
+        return {"success": False, "message": f"监控任务 {monitor_id} 不存在"}
+
+    combined: List[Dict[str, Any]] = []
+    combined.extend(_active_monitors.values())
+    combined.extend(_paused_monitors.values())
+    return {"success": True, "monitors": combined}
 
 
 async def schedule_daily_job(
@@ -961,6 +1888,7 @@ async def schedule_daily_job(
     date: Optional[str] = None,
     start_hours: Optional[List[int]] = None,
     require_all_users_success: bool = False,
+    max_time_gap_hours: Optional[int] = None,
     base_target: Optional[BookingTarget] = None,
     target_users: Optional[List[str]] = None,
     exclude_users: Optional[List[str]] = None,
@@ -970,9 +1898,9 @@ async def schedule_daily_job(
     
     Args:
         job_id: 任务唯一标识
-        hour: 执行小时
-        minute: 执行分钟
-        second: 执行秒
+        hour: 执行小时 (0-23)
+        minute: 执行分钟 (0-59)
+        second: 执行秒 (0-59)
         preset: 预设序号
         venue_id: 场馆ID
         field_type_id: 运动类型ID
@@ -985,6 +1913,14 @@ async def schedule_daily_job(
     """
     if job_id in _scheduled_jobs:
         return {"success": False, "message": f"定时任务 {job_id} 已存在"}
+    
+    # 验证执行时间范围
+    if not (0 <= hour <= 23):
+        return {"success": False, "message": f"执行小时必须在0-23之间，当前值: {hour}"}
+    if not (0 <= minute <= 59):
+        return {"success": False, "message": f"执行分钟必须在0-59之间，当前值: {minute}"}
+    if not (0 <= second <= 59):
+        return {"success": False, "message": f"执行秒数必须在0-59之间，当前值: {second}"}
     
     if base_target is None:
         base_target = BookingTarget()
@@ -1013,6 +1949,15 @@ async def schedule_daily_job(
     base_target.start_hour = normalized_hours[0]
 
     # 创建定时任务信息
+    default_plan = getattr(CFG, "MONITOR_PLAN", MonitorPlan())
+    if max_time_gap_hours is None:
+        max_gap_hours = getattr(default_plan, "max_time_gap_hours", 1)
+    else:
+        try:
+            max_gap_hours = int(max_time_gap_hours)
+        except (TypeError, ValueError):
+            max_gap_hours = getattr(default_plan, "max_time_gap_hours", 1)
+    max_gap_hours = max(0, min(max_gap_hours, 4))
     job_info = {
         "id": job_id,
         "hour": hour,
@@ -1028,6 +1973,7 @@ async def schedule_daily_job(
         "target_users": list(getattr(base_target, "target_users", []) or []),
         "exclude_users": list(getattr(base_target, "exclude_users", []) or []),
         "require_all_users_success": require_all_users_success,
+        "max_time_gap_hours": max_gap_hours,
         "status": "scheduled",
         "created_time": datetime.now().isoformat(),
         "last_run": None,
@@ -1105,6 +2051,18 @@ async def _monitor_worker(monitor_id: str) -> None:
     
     try:
         while monitor_id in _active_monitors and monitor_info["status"] == "running":
+            auto_stop_raw = monitor_info.get("auto_stop_at")
+            if auto_stop_raw:
+                try:
+                    deadline = datetime.fromisoformat(auto_stop_raw)
+                except (TypeError, ValueError):
+                    deadline = None
+                if deadline and datetime.now() >= deadline:
+                    monitor_info["status"] = "completed"
+                    monitor_info["stop_time"] = datetime.now().isoformat()
+                    monitor_info.setdefault("message", "已超过监控时间窗口，自动结束")
+                    await db_manager.save_monitor(monitor_info)
+                    break
             try:
                 # 执行监控检查
                 await _monitor_check(monitor_id)
@@ -1136,7 +2094,9 @@ async def _monitor_worker(monitor_id: str) -> None:
         await db_manager.save_monitor(monitor_info)
     finally:
         if monitor_id in _active_monitors:
-            monitor_info["status"] = "stopped"
+            current_status = monitor_info.get("status")
+            if current_status not in {"stopped", "completed", "paused"}:
+                monitor_info["status"] = "stopped"
             await db_manager.save_monitor(monitor_info)
 
 
@@ -1302,16 +2262,40 @@ async def _auto_book_from_monitor(monitor_id: str, slots: List[Dict]) -> None:
 
     # 检查是否需要所有用户都成功
     require_all_success = monitor_info.get("require_all_users_success", False)
+    max_gap_hours = max(0, int(monitor_info.get("max_time_gap_hours", 1) or 0))
     
     # 逐个用户尝试预订
-    successful_users = []
+    successful_users: List[str] = []
+    used_slot_keys: Set[str] = set()
+    reference_hour: Optional[int] = None
+
+    def _slot_key(slot_item: Dict[str, Any]) -> str:
+        return str(
+            slot_item.get("slot_id")
+            or slot_item.get("sign")
+            or f"{slot_item.get('date')}|{slot_item.get('start')}|{slot_item.get('field_name')}"
+        )
+
     for user_index, user in enumerate(user_sequence, 1):
         last_message = "未尝试"
         success_for_user = False
         user_id = user.username or user.nickname
 
-        for slot_index, slot in enumerate(slots, 1):
+        filtered_slots: List[Dict[str, Any]] = []
+        for slot in slots:
             if not slot.get("available", False):
+                continue
+            key = _slot_key(slot)
+            if key in used_slot_keys:
+                continue
+            slot_hour = _slot_dict_hour(slot)
+            if require_all_success and reference_hour is not None and not _hour_within_gap(reference_hour, slot_hour, max_gap_hours):
+                continue
+            filtered_slots.append(slot)
+
+        for slot_index, slot in enumerate(filtered_slots, 1):
+            slot_hour = _slot_dict_hour(slot)
+            if require_all_success and reference_hour is not None and not _hour_within_gap(reference_hour, slot_hour, max_gap_hours):
                 continue
 
             try:
@@ -1345,18 +2329,26 @@ async def _auto_book_from_monitor(monitor_id: str, slots: List[Dict]) -> None:
                     monitor_info["successful_bookings"] += 1
                     success_for_user = True
                     successful_users.append(user.nickname)
+                    used_slot_keys.add(_slot_key(slot))
+
+                    if reference_hour is None and slot_hour is not None:
+                        reference_hour = slot_hour
                     
                     # 如果不需要所有用户成功，第一个成功就完成
                     if not require_all_success:
                         monitor_info["status"] = "completed"
-                        break
                     
                     # 如果需要所有用户成功，检查是否所有用户都成功了
                     if require_all_success and len(successful_users) == len(user_sequence):
                         monitor_info["status"] = "completed"
-                        break
-                        
-                    # 继续下一个用户
+
+                    await _schedule_pending_payment_reminder(
+                        monitor_id=monitor_id,
+                        user=user,
+                        order_id=result.order_id,
+                        slot=slot,
+                        monitor_info=monitor_info,
+                    )
                     break
 
             except Exception as exc:  # pylint: disable=broad-except
@@ -1378,6 +2370,8 @@ async def _auto_book_from_monitor(monitor_id: str, slots: List[Dict]) -> None:
             # 如果需要所有用户成功但当前用户失败了，停止尝试
             if require_all_success and not success_for_user:
                 break
+        elif success_for_user and not require_all_success:
+            break
 
         if user_index < len(user_sequence) and monitor_info.get("status") != "completed":
             await asyncio.sleep(2.5)
@@ -1406,22 +2400,32 @@ async def _schedule_worker(job_id: str) -> None:
             # 如果目标时间已过，设置为明天
             if target_time <= now:
                 target_time += timedelta(days=1)
-            
+
             job_info["next_run"] = target_time.isoformat()
-            
+
             # 计算等待时间，提前执行以应对系统高并发
             wait_seconds = (target_time - now).total_seconds()
-            
-            # 如果是12点抢票任务，提前2秒开始预热
-            if job_info["hour"] == 12 and job_info["minute"] == 0 and job_info["second"] == 0:
-                # 提前2秒执行，但最后一次尝试在准点前0.5秒开始
-                print(f"[schedule:{job_id}] 🔥 12点抢票任务预热模式")
-                warmup_time = max(0, wait_seconds - 2)
-                if warmup_time > 0:
-                    await asyncio.sleep(warmup_time)
-                # 在准点前0.5秒开始最后一次尝试
-                await asyncio.sleep(0.5)
+
+            # 🔥 优化3: 提前预加载场次信息（在执行前5分钟开始）
+            preload_minutes = 5
+            if wait_seconds > (preload_minutes * 60):
+                preload_time = wait_seconds - (preload_minutes * 60)
+                logger.info("[schedule:%s] 等待执行，还有%.1f秒，开始预加载场次信息", job_id, wait_seconds)
+                await asyncio.sleep(preload_time)
+
+                # 开始预加载
+                try:
+                    await _preload_slots_for_job(job_id)
+                    logger.info("[schedule:%s] 场次信息预加载完成", job_id)
+                except Exception as e:
+                    logger.warning("[schedule:%s] 预加载失败: %s", job_id, e)
+
+                # 等待剩余时间
+                remaining_wait = preload_minutes * 60
+                if remaining_wait > 0:
+                    await asyncio.sleep(remaining_wait)
             else:
+                # 如果剩余时间不足5分钟，直接等待到执行时间
                 await asyncio.sleep(wait_seconds)
             
             # 执行任务
@@ -1438,10 +2442,10 @@ async def _execute_scheduled_job(job_id: str) -> None:
     job_info = _scheduled_jobs.get(job_id)
     if not job_info:
         return
-    
+
     job_info["last_run"] = datetime.now().isoformat()
     job_info["run_count"] += 1
-    
+
     try:
         base_target = job_info.get("base_target") or BookingTarget()
         target_users = list(
@@ -1477,7 +2481,6 @@ async def _execute_scheduled_job(job_id: str) -> None:
         if not start_hours:
             start_hours = [18]
 
-        # 去重并排序
         start_hours = [h for h in start_hours if 0 <= h <= 23]
         if not start_hours:
             start_hours = [18]
@@ -1508,106 +2511,268 @@ async def _execute_scheduled_job(job_id: str) -> None:
         if not user_sequence:
             user_sequence = available_users[:1]
 
+        identifier_map: Dict[str, UserAuth] = {}
+        user_display_map: Dict[str, str] = {}
+        filtered_sequence: List[UserAuth] = []
+        for user in user_sequence:
+            identifier = _user_api_identifier(user)
+            if not identifier:
+                logger.warning("[schedule:%s] 用户缺少标识信息，跳过该用户。", job_id)
+                continue
+            if identifier in identifier_map:
+                continue
+            identifier_map[identifier] = user
+            user_display_map[identifier] = _user_display_name(user)
+            filtered_sequence.append(user)
+        user_sequence = filtered_sequence
+
+        if not user_sequence:
+            job_info["last_error"] = "没有可用的用户凭据"
+            job_info["last_results"] = []
+            await get_db_manager().save_scheduled_job(job_info)
+            return
+
         db_manager = get_db_manager()
 
+        try:
+            target_date = _parse_date_input(str(job_info.get("date") or "0"))
+        except Exception as exc:  # pylint: disable=broad-except
+            job_info["last_error"] = f"解析目标日期失败: {exc}"
+            job_info["last_results"] = []
+            await db_manager.save_scheduled_job(job_info)
+            return
+
+        try:
+            preset_option = _get_preset(job_info.get("preset"))
+        except Exception as exc:  # pylint: disable=broad-except
+            job_info["last_error"] = f"预设配置无效: {exc}"
+            job_info["last_results"] = []
+            await db_manager.save_scheduled_job(job_info)
+            return
+
+        if not preset_option:
+            job_info["last_error"] = "定时任务缺少预设配置"
+            job_info["last_results"] = []
+            await db_manager.save_scheduled_job(job_info)
+            return
+
+        auto_settings = getattr(CFG, "AUTO_BOOKING_SETTINGS", {})
+        request_timeout = float(auto_settings.get("order_request_timeout", 3.0))
+
+        # 🔥 优化1: 优先使用预加载的场次信息
+        preloaded_slots = job_info.get("preloaded_slots")
+        if preloaded_slots:
+            logger.info("[schedule:%s] 使用预加载的场次信息，开始抢票", job_id)
+            slot_pool = preloaded_slots
+        else:
+            logger.info("[schedule:%s] 没有预加载数据，实时获取场次信息...", job_id)
+            # 🔥 优化5: 异步获取场次信息，不阻塞下单流程
+            slot_pool = await _get_slots_with_fallback(
+                preset_option=preset_option,
+                date=target_date,
+                start_hours=start_hours,
+                base_target=base_target,
+                job_id=job_id,
+            )
+
+        attempt_counts: Dict[str, int] = {identifier: 0 for identifier in identifier_map}
+        results_map: Dict[str, Dict[str, Any]] = {}
+        remaining_identifiers: List[str] = list(identifier_map.keys())
+
         require_all_success = job_info.get("require_all_users_success", False)
-        successful_users = []
-        
-        for user in user_sequence:
-            user_id = user.username or user.nickname
-            user_success = False
+        max_gap_hours = max(0, int(job_info.get("max_time_gap_hours", 1) or 0))
+        reference_hour: Optional[int] = None
 
-            # 12点抢票任务优化：并发多时间段抢票，减少延迟
-            is_12pm_rush = job_info.get("hour") == 12 and job_info.get("minute") == 0
-            
-            if is_12pm_rush and len(start_hours) > 1:
-                # 并发抢多个时间段
-                import concurrent.futures
-                print(f"[schedule:{job_id}] 🔥 12点并发抢票模式，时间段: {start_hours}")
-                
-                async def attempt_order_for_hour(hour: int) -> Optional[bool]:
-                    start_label = f"{int(hour):02d}:00"
-                    for attempt in range(3):  # 12点抢票减少重试次数以加快速度
-                        result = await order_once(
-                            preset=job_info["preset"],
-                            date=job_info["date"] or "0",
-                            start_time=start_label,
-                            base_target=base_target,
-                            user=user_id,
-                            notification_context=f"来自定时任务 {job_id}",
-                        )
-                        
-                        if result.success:
-                            job_info["success_count"] += 1
-                            job_info.pop("last_error", None)
-                            print(f"[schedule:{job_id}] ✅ 用户 {user_id} 在 {start_label} 下单成功: {result.message}")
-                            return True
-                        
-                        job_info.setdefault("last_error", result.message)
-                        if attempt < 2:
-                            await asyncio.sleep(0.3)  # 减少延迟
-                    return False
-                
-                # 并发抢票
-                results = await asyncio.gather(*[attempt_order_for_hour(hour) for hour in start_hours])
-                if any(results):
-                    user_success = True
-            else:
-                # 普通任务串行执行
-                for hour in start_hours:
-                    start_label = f"{int(hour):02d}:00"
-                    for attempt in range(5):
-                        result = await order_once(
-                            preset=job_info["preset"],
-                            date=job_info["date"] or "0",
-                            start_time=start_label,
-                            base_target=base_target,
-                            user=user_id,
-                            notification_context=f"来自定时任务 {job_id}",
-                        )
+        for hour in start_hours:
+            if not remaining_identifiers:
+                break
+            if require_all_success and reference_hour is not None and not _hour_within_gap(reference_hour, hour, max_gap_hours):
+                continue
+            slots_for_hour = slot_pool.get(hour, [])
 
-                        if result.success:
-                            job_info["success_count"] += 1
-                            user_success = True
-                            job_info.pop("last_error", None)
-                            print(f"[schedule:{job_id}] 用户 {user_id} 在 {start_label} 下单成功: {result.message}")
-                            break
-
-                        job_info.setdefault("last_error", result.message)
-                        print(
-                            f"[schedule:{job_id}] 用户 {user_id} 在 {start_label} 下单失败 ({attempt + 1}/5): {result.message}"
-                        )
-                        await asyncio.sleep(1.0)
-
-                if user_success:
-                    break
-
-            if user_success:
-                successful_users.append(user.nickname)
-                
-                # 如果需要所有用户成功，检查是否全部成功
-                if require_all_success and len(successful_users) < len(user_sequence):
-                    # 继续尝试下一个用户
-                    await asyncio.sleep(2.5)
-                    continue
-                else:
-                    # 不需要所有用户成功，或者所有用户都已成功
-                    break
-            else:
-                if not user_success:
-                    print(
-                        f"[schedule:{job_id}] 用户 {user_id} 在 {', '.join(f'{h:02d}:00' for h in start_hours)} 全部尝试失败: {job_info.get('last_error', '未知原因')}"
+            # 🔥 优化7: 如果没有预加载到场次信息，立即尝试直接下单
+            if not slots_for_hour and not slot_pool:
+                logger.warning("[schedule:%s] 没有场次信息，尝试直接下单 %s", job_id, hour)
+                # 直接尝试下单（可能会失败，但不应该阻塞）
+                try:
+                    direct_results = await _direct_order_attempt(
+                        job_id=job_id,
+                        hour=hour,
+                        users=list(current_users),
+                        preset_option=preset_option,
+                        date=target_date,
+                        request_timeout=request_timeout,
                     )
-                    
-                    # 如果需要所有用户成功但当前用户失败，停止尝试
-                    if require_all_success:
-                        print(f"[schedule:{job_id}] ⚠️ 需要所有用户成功，但用户 {user_id} 失败，任务未完成")
-                        break
-                    
-                    await asyncio.sleep(2.5)
+                    if direct_results:
+                        for identifier, payload in direct_results.items():
+                            attempt_counts[identifier] = attempt_counts.get(identifier, 0) + 1
+                            payload["attempts"] = attempt_counts[identifier]
+                            results_map[identifier] = payload
+                            if payload["result"].success:
+                                job_info["success_count"] += 1
+                                if reference_hour is None:
+                                    reference_hour = hour
+
+                        remaining_identifiers = [
+                            identifier
+                            for identifier in remaining_identifiers
+                            if not (
+                                identifier in direct_results
+                                and direct_results[identifier]["result"].success
+                            )
+                        ]
+                except Exception as e:
+                    logger.warning("[schedule:%s] 直接下单尝试失败: %s", job_id, e)
+                continue
+
+            current_users = [
+                identifier_map[identifier]
+                for identifier in remaining_identifiers
+                if identifier in identifier_map
+            ]
+            if not current_users:
+                continue
+
+            for slot in slots_for_hour:
+                parallel_results = await _parallel_attempt_for_slot(
+                    job_id=job_id,
+                    hour=hour,
+                    slot=slot,
+                    users=current_users,
+                    preset_option=preset_option,
+                    date=target_date,
+                    request_timeout=request_timeout,
+                )
+                if not parallel_results:
+                    continue
+
+                for identifier, payload in parallel_results.items():
+                    attempt_counts[identifier] = attempt_counts.get(identifier, 0) + 1
+                    payload["attempts"] = attempt_counts[identifier]
+                    results_map[identifier] = payload
+                    if payload["result"].success:
+                        job_info["success_count"] += 1
+                        if reference_hour is None:
+                            reference_hour = hour
+
+                remaining_identifiers = [
+                    identifier
+                    for identifier in remaining_identifiers
+                    if not (
+                        identifier in parallel_results
+                        and parallel_results[identifier]["result"].success
+                    )
+                ]
+                if not remaining_identifiers:
+                    break
+
+                await asyncio.sleep(0.12)
+
+            if not remaining_identifiers:
+                break
+
+        if remaining_identifiers:
+            candidate_hours = list(start_hours)
+            if require_all_success and reference_hour is not None:
+                constrained = [
+                    hour for hour in start_hours if _hour_within_gap(reference_hour, hour, max_gap_hours)
+                ]
+                if constrained:
+                    candidate_hours = constrained
+
+            for identifier in list(remaining_identifiers):
+                user = identifier_map.get(identifier)
+                if not user:
+                    remaining_identifiers.remove(identifier)
+                    continue
+
+                payload = await _attempt_user_with_cached_slots(
+                    job_id=job_id,
+                    identifier=identifier,
+                    user=user,
+                    candidate_hours=candidate_hours,
+                    slot_pool=slot_pool,
+                    preset_option=preset_option,
+                    date=target_date,
+                    request_timeout=request_timeout,
+                    attempt_counts=attempt_counts,
+                )
+
+                results_map[identifier] = payload
+                result = payload["result"]
+                if result.success:
+                    job_info["success_count"] += 1
+                    slot_hour = payload.get("slot_hour")
+                    if reference_hour is None and isinstance(slot_hour, int):
+                        reference_hour = slot_hour
+                else:
+                    if payload.get("slot_hour") is None:
+                        print(
+                            f"[schedule:{job_id}] 用户 {identifier} 未在缓存场次中找到匹配时段: {result.message}"
+                        )
+
+                remaining_identifiers.remove(identifier)
+
+        for identifier in identifier_map:
+            if identifier not in results_map:
+                results_map[identifier] = {
+                    "result": OrderResult(False, "未执行下单尝试"),
+                    "start": "-",
+                    "end": "-",
+                    "attempt_type": "skipped",
+                    "attempts": attempt_counts.get(identifier, 0),
+                }
+
+        job_info["last_results"] = [
+            {
+                "user": user_display_map.get(identifier, identifier),
+                "success": payload["result"].success,
+                "message": payload["result"].message,
+                "attempts": payload.get("attempts", 1),
+                "start": payload.get("start"),
+                "end": payload.get("end"),
+                "mode": payload.get("attempt_type"),
+            }
+            for identifier, payload in results_map.items()
+        ]
+
+        success_entries = {
+            identifier: payload
+            for identifier, payload in results_map.items()
+            if payload["result"].success
+        }
+        failure_entries = {
+            identifier: payload
+            for identifier, payload in results_map.items()
+            if not payload["result"].success
+        }
+
+        if failure_entries:
+            job_info["last_error"] = "; ".join(
+                f"{user_display_map.get(identifier, identifier)}: {payload['result'].message}"
+                for identifier, payload in failure_entries.items()
+            )
+        else:
+            job_info.pop("last_error", None)
+
+        if success_entries:
+            await _notify_schedule_successes(
+                job_id=job_id,
+                preset_option=preset_option,
+                date=target_date,
+                successes=success_entries,
+                user_display_map=user_display_map,
+            )
+        await _notify_schedule_failures(
+            job_id=job_id,
+            preset_option=preset_option,
+            date=target_date,
+            failures=failure_entries,
+            user_display_map=user_display_map,
+        )
 
         await db_manager.save_scheduled_job(job_info)
-            
+
     except Exception as e:
         job_info["last_error"] = str(e)
 
@@ -1954,38 +3119,65 @@ def get_user_orders(page_no: int = 1, page_size: int = 10) -> Dict[str, Any]:
     """获取所有用户的订单列表"""
     cookies_map, _ = _auth_manager.load_all_cookies()
     all_orders: List[Dict[str, Any]] = []
-    total = 0
-    
+    grouped_orders: Dict[str, Dict[str, Any]] = {}
+    summaries: List[Dict[str, Any]] = []
+
     for key, record in cookies_map.items():
+        username = record.get("username") or key
+        nickname = record.get("nickname") or username or key
+        api: Optional[SportsAPI] = None
         try:
-            username = record.get("username")
-            nickname = record.get("nickname")
             api = _create_api(active_user=key)
-            response = api.list_orders(page_no=1, page_size=100)  # 获取更多订单
-            
-            orders = response.get("records", [])
-            # 为每个订单添加用户信息
-            for order in orders:
-                order["userId"] = username or key
-                order["name"] = nickname or username or key
-            
-            all_orders.extend(orders)
-            api.close()
-        except Exception as e:
-            logger.warning("Failed to get orders for user %s: %s", key, str(e))
+            response = api.list_orders(page_no=1, page_size=100)
+            user_orders = response.get("records", []) or []
+        except Exception as exc:
+            logger.warning("Failed to get orders for user %s: %s", key, exc)
+            summaries.append(
+                {
+                    "userId": username,
+                    "name": nickname,
+                    "count": 0,
+                    "error": str(exc),
+                }
+            )
             continue
-    
-    # 按创建时间倒序排序
+        finally:
+            if api:
+                try:
+                    api.close()
+                except Exception:  # pragma: no cover - defensive close
+                    pass
+
+        cleaned_orders: List[Dict[str, Any]] = []
+        for order in user_orders:
+            order["userId"] = username
+            order["name"] = nickname
+            cleaned_orders.append(order)
+
+        cleaned_orders.sort(key=lambda x: x.get("ordercreatement", ""), reverse=True)
+        grouped_orders[username] = {
+            "userId": username,
+            "name": nickname,
+            "orders": cleaned_orders,
+        }
+        summaries.append(
+            {
+                "userId": username,
+                "name": nickname,
+                "count": len(cleaned_orders),
+            }
+        )
+        all_orders.extend(cleaned_orders)
+
     all_orders.sort(key=lambda x: x.get("ordercreatement", ""), reverse=True)
-    
-    total = len(all_orders)
-    
-    # 分页
-    start = (page_no - 1) * page_size
-    end = start + page_size
-    paginated_orders = all_orders[start:end]
-    
-    return {"success": True, "orders": paginated_orders, "total": total}
+
+    return {
+        "success": True,
+        "orders": all_orders,
+        "total": len(all_orders),
+        "grouped": grouped_orders,
+        "summary": summaries,
+    }
 
 
 # =============================================================================

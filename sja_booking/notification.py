@@ -241,8 +241,13 @@ class NotificationService:
         return False
 
     def _build_order_message(self, notification: OrderNotification) -> str:
-        title = self.template.get("success_title", "🎉 订单预订成功！")
-        reminder = self.template.get("payment_reminder")
+        if notification.success:
+            title = self.template.get("success_title", "🎉 订单预订成功！")
+            reminder = self.template.get("payment_reminder")
+        else:
+            title = self.template.get("failure_title", "❌ 订单预订失败")
+            reminder = None
+
         message = (
             f"{title}\n\n"
             f"📋 订单信息：\n"
