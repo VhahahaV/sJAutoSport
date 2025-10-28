@@ -39,7 +39,10 @@ class OrderManager:
         self.encryption_config = encryption_config
         self.rsa_public_key = encryption_config["rsa_public_key"]
         self.return_url = encryption_config["return_url"]
-        self.request_timeout = max(1.0, float(request_timeout))
+        try:
+            self.request_timeout = max(1.0, float(request_timeout))
+        except Exception:
+            self.request_timeout = 10.0
     
     def _generate_aes_key(self) -> str:
         """生成16位AES密钥"""
@@ -139,7 +142,7 @@ class OrderManager:
                 url,
                 data=encrypted_body,
                 headers=headers,
-                timeout=self.request_timeout,
+                timeout=self.request_timeout
             )
             
             # 解析响应
@@ -183,64 +186,7 @@ class OrderManager:
         except Exception as e:
             return False, f"请求异常: {e}", None
     
-    @staticmethod
-    def _normalize_time_value(*values: Optional[str]) -> str:
-        """规范化时间字符串为 HH:MM"""
-        for value in values:
-            if not value:
-                continue
-            text = str(value)
-            if ":" in text:
-                parts = text.split(":")
-                if len(parts) < 2:
-                    continue
-                try:
-                    hour = int(parts[0])
-                    minute = int(parts[1])
-                except (TypeError, ValueError):
-                    continue
-                if 0 <= hour <= 23 and 0 <= minute <= 59:
-                    return f"{hour:02d}:{minute:02d}"
-            elif text.isdigit():
-                hour = int(text)
-                if 0 <= hour <= 23:
-                    return f"{hour:02d}:00"
-        return ""
-
-    def _extract_slot_times(self, slot: Slot) -> Tuple[str, str]:
-        """从 slot 结构中提取标准化的开始/结束时间"""
-        raw = slot.raw if isinstance(slot.raw, dict) else {}
-        decoded = raw.get("decoded_sign")
-        if not isinstance(decoded, dict):
-            decoded = {}
-        price_entry = raw.get("price_entry")
-        if not isinstance(price_entry, dict):
-            price_entry = {}
-        start = self._normalize_time_value(
-            slot.start,
-            decoded.get("start"),
-            decoded.get("beginTime"),
-            price_entry.get("startTime"),
-            price_entry.get("beginTime"),
-        )
-        end = self._normalize_time_value(
-            slot.end,
-            decoded.get("end"),
-            decoded.get("finishTime"),
-            price_entry.get("endTime"),
-            price_entry.get("finishTime"),
-        )
-        return start, end
-
-    def _refresh_slot_data(
-        self,
-        preset: PresetOption,
-        date: str,
-        *,
-        reference_slot: Slot,
-        expected_start: str,
-        expected_end: str,
-    ) -> Optional[Slot]:
+    def _refresh_slot_data(self, preset: PresetOption, date: str) -> Optional[Slot]:
         """刷新时间段数据，获取最新的sign和sub_site_id"""
         try:
             # 创建一个临时的FieldType对象
@@ -269,40 +215,14 @@ class OrderManager:
             )
             
             if slots:
-                expected_start_norm = self._normalize_time_value(expected_start)
-                expected_end_norm = self._normalize_time_value(expected_end)
-                ref_sub_site = reference_slot.sub_site_id
-                matched: Optional[Slot] = None
-                fallback: Optional[Slot] = None
-                for candidate in slots:
-                    cand_start, cand_end = self._extract_slot_times(candidate)
-                    sub_site_equal = (
-                        ref_sub_site
-                        and candidate.sub_site_id
-                        and candidate.sub_site_id == ref_sub_site
-                    )
-                    time_match = (
-                        expected_start_norm
-                        and expected_end_norm
-                        and cand_start == expected_start_norm
-                        and cand_end == expected_end_norm
-                    )
-                    if sub_site_equal and time_match:
-                        matched = candidate
-                        break
-                    if time_match and not fallback:
-                        fallback = candidate
-                    elif sub_site_equal and not fallback:
-                        fallback = candidate
-                return matched or fallback or slots[0]
+                return slots[0]  # 返回第一个可用时间段
             return None
         except Exception as e:
             print(f"刷新时间段数据失败: {e}")
             return None
-
+    
     def place_order(self, slot: Slot, preset: PresetOption, date: str, 
-                   actual_start: str, actual_end: str, max_retries: int = 3,
-                   *, refresh_before_attempt: bool = True) -> OrderResult:
+                   actual_start: str, actual_end: str, max_retries: int = 3) -> OrderResult:
         """
         下单
         
@@ -316,18 +236,6 @@ class OrderManager:
             OrderResult: 下单结果
         """
         current_slot = slot
-        if refresh_before_attempt:
-            refreshed_slot = self._refresh_slot_data(
-                preset,
-                date,
-                reference_slot=current_slot,
-                expected_start=actual_start,
-                expected_end=actual_end,
-            )
-            if refreshed_slot:
-                current_slot = refreshed_slot
-                print("已刷新场地信息，使用最新sign进行下单")
-
         backoff_base = 2.0
         for attempt in range(max_retries):
             print(f"下单尝试 {attempt + 1}/{max_retries}")
@@ -347,7 +255,6 @@ class OrderManager:
                 )
             
             print(f"下单失败: {message}")
-            normalized_message = message or ""
 
             # 回退策略：尝试使用简单提交接口 order_immediately（与旧版一致）
             try:
@@ -381,30 +288,19 @@ class OrderManager:
                 # 忽略回退异常，进入刷新逻辑
                 pass
             
-            should_refresh = any(keyword in normalized_message for keyword in ["场地信息已过期", "sign", "过期"])
-            if should_refresh:
-                refreshed_slot = self._refresh_slot_data(
-                    preset,
-                    date,
-                    reference_slot=current_slot,
-                    expected_start=actual_start,
-                    expected_end=actual_end,
-                )
-                if refreshed_slot:
-                    current_slot = refreshed_slot
-                    print("检测到场地信息过期，已获取最新sign后继续重试")
-                else:
-                    print("尝试刷新场地信息失败，继续使用原始数据重试")
-
             # 如果不是最后一次尝试，刷新时间段数据
             if attempt < max_retries - 1:
-                rate_limited = "操作过于频繁" in normalized_message or "频繁" in normalized_message
-                delay_seconds = max(0.35, backoff_base * 0.5 + attempt * 0.6 + random.uniform(0.1, 0.4))
-                if rate_limited:
-                    delay_seconds = max(delay_seconds, 1.2 + attempt * 0.8 + random.uniform(0.2, 0.6))
-                print(f"等待 {delay_seconds:.1f} 秒后再次尝试同一场次...")
+                print("刷新时间段数据...")
+                refreshed_slot = self._refresh_slot_data(preset, date)
+                if refreshed_slot:
+                    current_slot = refreshed_slot
+                    print("时间段数据已刷新，准备重试...")
+                else:
+                    print("无法刷新时间段数据，使用原始数据重试...")
+                delay_seconds = backoff_base + attempt * 2.0 + random.uniform(0.3, 0.8)
+                print(f"等待 {delay_seconds:.1f} 秒后再次尝试...")
                 time.sleep(delay_seconds)
-
+        
         return OrderResult(
             success=False,
             message=f"下单失败，已重试{max_retries}次",
