@@ -8,7 +8,7 @@ import {
 } from "../lib/api";
 import { BOOKING_HOURS, buildDayOffsetOptions, buildHourOptions } from "../lib/options";
 import PresetSelector from "../components/PresetSelector";
-import { fireConfetti } from "../lib/effects";
+import { fireConfetti, fireFireworks } from "../lib/effects";
 
 const OrderPage = () => {
   const [presets, setPresets] = useState<Preset[]>([]);
@@ -93,6 +93,7 @@ const OrderPage = () => {
       setResult(response);
       if (response.success) {
         fireConfetti({ origin: { x: 0.75, y: 0.22 }, particleCount: 36 });
+        fireFireworks({ bursts: 6 });
       }
     } catch (err) {
       setResult(null);

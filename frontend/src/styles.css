@@ -1171,6 +1171,152 @@ input[type="checkbox"]:active {
   opacity: 0.75;
 }
 
+/* Sparkle bursts for interactive clicks */
+.sparkle-pop {
+  position: fixed;
+  left: 0;
+  top: 0;
+  width: 0;
+  height: 0;
+  pointer-events: none;
+  z-index: 9998;
+  opacity: 0;
+  transition: opacity 0.12s ease;
+}
+
+.sparkle-pop.is-active {
+  opacity: 1;
+}
+
+.sparkle-pop__particle {
+  position: absolute;
+  width: 8px;
+  height: 18px;
+  border-radius: 999px;
+  background: var(--spark-color, #fff);
+  transform-origin: center;
+  transform: rotate(var(--spark-angle)) translateY(var(--spark-distance));
+  filter: drop-shadow(0 0 10px rgba(255, 255, 255, 0.35));
+  animation: sparkle-flight 440ms ease-out forwards;
+}
+
+@keyframes sparkle-flight {
+  0% {
+    opacity: 1;
+    transform: rotate(var(--spark-angle)) translateY(0) scale(0.35);
+  }
+  70% {
+    opacity: 1;
+  }
+  100% {
+    opacity: 0;
+    transform: rotate(var(--spark-angle)) translateY(var(--spark-distance)) scale(0.9);
+  }
+}
+
+/* Fireworks overlay for successful actions */
+.fireworks-overlay {
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+  overflow: hidden;
+  z-index: 9997;
+}
+
+.fireworks-overlay--fade {
+  opacity: 0;
+  transition: opacity 0.5s ease;
+}
+
+.firework {
+  position: absolute;
+  left: var(--firework-x, 50%);
+  top: var(--firework-y, 40%);
+  width: 10px;
+  height: 10px;
+  transform: translate(-50%, -50%);
+  animation: firework-pop 1.8s ease-out forwards;
+  animation-delay: var(--firework-delay, 0ms);
+}
+
+.firework__spark {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  width: 6px;
+  height: 24px;
+  border-radius: 999px;
+  transform-origin: center 10px;
+  background: linear-gradient(
+    to top,
+    rgba(255, 255, 255, 0),
+    var(--firework-color, #fde68a)
+  );
+  opacity: 0;
+  animation: firework-spark 1.3s ease-out forwards;
+  animation-delay: calc(var(--firework-delay, 0ms) + 90ms);
+}
+
+.firework__spark:nth-child(n) {
+  transform: rotate(var(--spark-angle)) translateY(calc(var(--spark-distance) * -1));
+}
+
+.firework__halo {
+  position: absolute;
+  inset: -6px;
+  border-radius: 999px;
+  background: radial-gradient(
+    circle,
+    rgba(255, 255, 255, 0.6),
+    rgba(255, 255, 255, 0) 60%
+  );
+  opacity: 0;
+  animation: firework-halo 1.4s ease-out forwards;
+  animation-delay: calc(var(--firework-delay, 0ms) + 150ms);
+}
+
+@keyframes firework-pop {
+  0% {
+    transform: translate(-50%, -10%);
+    opacity: 0;
+  }
+  20% {
+    opacity: 1;
+  }
+  100% {
+    transform: translate(-50%, -50%);
+    opacity: 0.15;
+  }
+}
+
+@keyframes firework-spark {
+  0% {
+    opacity: 0;
+    transform: rotate(var(--spark-angle)) translateY(0) scaleY(0.25);
+  }
+  35% {
+    opacity: 1;
+  }
+  100% {
+    opacity: 0;
+    transform: rotate(var(--spark-angle)) translateY(calc(var(--spark-distance) * -1)) scaleY(1);
+  }
+}
+
+@keyframes firework-halo {
+  0% {
+    opacity: 0;
+    transform: scale(0.1);
+  }
+  35% {
+    opacity: 0.9;
+  }
+  100% {
+    opacity: 0;
+    transform: scale(1.35);
+  }
+}
+
 @keyframes confetti-enter {
   from {
     opacity: 0;
