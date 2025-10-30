@@ -1,6 +1,8 @@
 import type { PropsWithChildren } from "react";
+import { useEffect } from "react";
 import { useNavigate } from "react-router-dom";
 import { NavLink } from "react-router-dom";
+import { enableClickSparkles } from "../lib/effects";
 
 type NavItem = {
   to: string;
@@ -20,6 +22,11 @@ const links: NavItem[] = [
 
 const Layout = ({ children }: PropsWithChildren) => {
   const navigate = useNavigate();
+
+  useEffect(() => {
+    const cleanup = enableClickSparkles();
+    return () => cleanup();
+  }, []);
 
   const handleNavClick = (to: string, e: React.MouseEvent<HTMLAnchorElement>) => {
     e.preventDefault();
