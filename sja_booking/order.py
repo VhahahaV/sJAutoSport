@@ -9,7 +9,7 @@ import time
 import base64
 import random
 import string
-from typing import Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 from dataclasses import dataclass
 
 import httpx
@@ -18,7 +18,7 @@ from Crypto.Util.Padding import pad
 from Crypto.PublicKey import RSA
 from Crypto.Cipher import PKCS1_v1_5
 
-from .models import Slot, OrderIntent, PresetOption
+from .models import FieldType, Slot, OrderIntent, PresetOption
 from .api import SportsAPI
 
 
@@ -43,7 +43,65 @@ class OrderManager:
             self.request_timeout = max(1.0, float(request_timeout))
         except Exception:
             self.request_timeout = 10.0
-    
+        self._field_type_cache: Dict[str, FieldType] = {}
+
+    def _field_type_cache_key(self, preset: PresetOption) -> str:
+        """缓存键：同一场馆+项目复用 FieldType 详情"""
+        venue_part = preset.venue_id or ""
+        field_part = preset.field_type_id or preset.field_type_name or ""
+        return f"{venue_part}:{field_part}"
+
+    def _get_field_type_info(self, preset: PresetOption) -> Optional[FieldType]:
+        """获取带原始数据的 FieldType，用于补齐查询所需参数"""
+        cache_key = self._field_type_cache_key(preset)
+        if cache_key in self._field_type_cache:
+            return self._field_type_cache[cache_key]
+
+        resolved: Optional[FieldType] = None
+        try:
+            if preset.venue_id:
+                detail = self.api.get_venue_detail(preset.venue_id)
+                field_types = self.api.list_field_types(detail)
+                for item in field_types:
+                    # 优先使用ID匹配，其次名称匹配
+                    if preset.field_type_id and item.id == preset.field_type_id:
+                        resolved = item
+                        break
+                    if (
+                        resolved is None
+                        and preset.field_type_name
+                        and item.name == preset.field_type_name
+                    ):
+                        resolved = item
+        except Exception:
+            resolved = None
+
+        if resolved is None:
+            fallback_raw: Dict[str, Any] = {}
+            category = preset.field_type_code
+            if category:
+                fallback_raw["code"] = category
+                fallback_raw["bizMotionType"] = category
+                fallback_raw["motionType"] = category
+                fallback_raw["motionId"] = category
+            if preset.field_type_id:
+                fallback_raw.setdefault("fieldTypeId", preset.field_type_id)
+            if preset.field_type_name:
+                fallback_raw.setdefault("fieldTypeName", preset.field_type_name)
+
+            fallback_id = preset.field_type_id or preset.field_type_name
+            if fallback_id:
+                resolved = FieldType(
+                    id=str(fallback_id),
+                    name=preset.field_type_name or str(fallback_id),
+                    category=category,
+                    raw=fallback_raw,
+                )
+
+        if resolved:
+            self._field_type_cache[cache_key] = resolved
+        return resolved
+
     def _generate_aes_key(self) -> str:
         """生成16位AES密钥"""
         alphabet = string.ascii_uppercase + string.digits
@@ -189,13 +247,7 @@ class OrderManager:
     def _refresh_slot_data(self, preset: PresetOption, date: str) -> Optional[Slot]:
         """刷新时间段数据，获取最新的sign和sub_site_id"""
         try:
-            # 创建一个临时的FieldType对象
-            from .models import FieldType
-            temp_field_type = FieldType(
-                id=preset.field_type_id,
-                name=preset.field_type_name,
-                category=None
-            )
+            field_type_info = self._get_field_type_info(preset)
             
             # 获取日期token
             date_tokens = self.api.list_available_dates(preset.venue_id, preset.field_type_id)
@@ -204,6 +256,12 @@ class OrderManager:
                 if date_str_value == date:
                     date_token = token
                     break
+            if not date_token and field_type_info and field_type_info.raw:
+                for key in ("dateId", "dateToken"):
+                    raw_value = field_type_info.raw.get(key)
+                    if raw_value:
+                        date_token = str(raw_value)
+                        break
             
             # 查询可用时间段
             slots = self.api.query_slots(
@@ -211,7 +269,7 @@ class OrderManager:
                 field_type_id=preset.field_type_id,
                 date_str=date,
                 date_token=date_token,
-                original_field_type=temp_field_type
+                original_field_type=field_type_info
             )
             
             if slots:
@@ -337,13 +395,7 @@ class OrderManager:
         
         # 查询可用时间段
         try:
-            # 创建一个临时的FieldType对象
-            from .models import FieldType
-            temp_field_type = FieldType(
-                id=preset.field_type_id,
-                name=preset.field_type_name,
-                category=None
-            )
+            field_type_info = self._get_field_type_info(preset)
             
             # 获取日期token
             date_tokens = self.api.list_available_dates(preset.venue_id, preset.field_type_id)
@@ -352,13 +404,19 @@ class OrderManager:
                 if date_str_value == date:
                     date_token = token
                     break
+            if not date_token and field_type_info and field_type_info.raw:
+                for key in ("dateId", "dateToken"):
+                    raw_value = field_type_info.raw.get(key)
+                    if raw_value:
+                        date_token = str(raw_value)
+                        break
             
             slots = self.api.query_slots(
                 venue_id=preset.venue_id,
                 field_type_id=preset.field_type_id,
                 date_str=date,
                 date_token=date_token,
-                original_field_type=temp_field_type
+                original_field_type=field_type_info
             )
         except Exception as e:
             return OrderResult(
