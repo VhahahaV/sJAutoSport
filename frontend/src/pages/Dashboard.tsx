@@ -60,7 +60,14 @@ const DashboardPage = () => {
   const [loginStatus, setLoginStatus] = useState<any>(null);
 
   // 默认查询的预设 (气模体育中心羽毛球、学生中心健身房、子衿街健身房)
-  const defaultPresets = [5, 3, 8];
+  const dashboardPresets = [
+    { index: 5, label: "气膜羽毛球" },
+    { index: 18, label: "霍体羽毛球" },
+    { index: 3, label: "学活健身房" },
+    { index: 8, label: "子衿街健身房" },
+    { index: 20, label: "霍体健身房" },
+    { index: 2, label: "学活台球" },
+  ];
 
   useEffect(() => {
     let mounted = true;
@@ -130,7 +137,15 @@ const DashboardPage = () => {
   );
 
   // 获取默认查询的预设信息
-  const defaultPresetInfos = presets.filter((p) => defaultPresets.includes(p.index));
+  const dashboardTiles = dashboardPresets.map((entry) => {
+    const matched = presets.find((preset) => preset.index === entry.index);
+    return {
+      index: entry.index,
+      displayName: entry.label,
+      venueName: matched?.venue_name ?? entry.label,
+      fieldTypeName: matched?.field_type_name ?? entry.label,
+    };
+  });
 
   return (
     <>
@@ -145,13 +160,14 @@ const DashboardPage = () => {
       {loginStatus && loginStatus.users && loginStatus.users.length > 0 && (
         <section className="section">
           <h3>📊 今日场次查询</h3>
-          <div className="grid">
-            {defaultPresetInfos.map((preset) => (
+          <div className="dashboard-preset-grid">
+            {dashboardTiles.map((tile) => (
               <SlotTable
-                key={preset.index}
-                preset={preset.index}
-                venueName={preset.venue_name}
-                fieldTypeName={preset.field_type_name}
+                key={tile.index}
+                preset={tile.index}
+                venueName={tile.venueName}
+                fieldTypeName={tile.fieldTypeName}
+                displayName={tile.displayName}
               />
             ))}
           </div>
@@ -172,12 +188,7 @@ const DashboardPage = () => {
         </div>
       ) : null}
 
-      <div className="grid">
-        <StatusCard
-          title="系统状态"
-          value={health ? "在线" : "检查中"}
-          meta={health ? "API 正常响应" : "等待 API 响应"}
-        />
+      <div className="status-grid">
         <StatusCard
           title="后台任务"
           value={jobsLoading ? "..." : jobs.length}

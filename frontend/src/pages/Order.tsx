@@ -6,9 +6,9 @@ import {
   type Preset,
   type UserSummary,
 } from "../lib/api";
-import { buildDayOffsetOptions, buildHourOptions, DEFAULT_HOURS } from "../lib/options";
+import { BOOKING_HOURS, buildDayOffsetOptions, buildHourOptions } from "../lib/options";
 import PresetSelector from "../components/PresetSelector";
-// Debug panel removed per requirements
+import { fireConfetti } from "../lib/effects";
 
 const OrderPage = () => {
   const [presets, setPresets] = useState<Preset[]>([]);
@@ -23,7 +23,36 @@ const OrderPage = () => {
   // Debug states removed per requirements
 
   const dateOptions = useMemo(() => buildDayOffsetOptions(), []);
-  const hourOptions = useMemo(() => buildHourOptions(DEFAULT_HOURS), []);
+  const hourOptions = useMemo(() => buildHourOptions(BOOKING_HOURS), []);
+  const userOptions = useMemo(
+    () =>
+      users
+        .map((user, index) => {
+          const username = user.username?.trim();
+          const nickname = user.nickname?.trim();
+          const compactUsername =
+            username && username.includes("@") ? username.split("@", 1)[0] : username;
+          const value = username || nickname || compactUsername || "";
+          if (!value) {
+            return null;
+          }
+          const label = nickname || compactUsername || `用户 ${index + 1}`;
+          const description =
+            username && nickname && username !== nickname
+              ? username
+              : username && compactUsername !== username
+                ? username
+                : undefined;
+          return {
+            id: value,
+            value,
+            label,
+            description,
+          };
+        })
+        .filter((entry): entry is { id: string; value: string; label: string; description?: string } => entry !== null),
+    [users],
+  );
 
   useEffect(() => {
     const load = async () => {
@@ -62,6 +91,9 @@ const OrderPage = () => {
       };
       const response = await api.createOrder(payload);
       setResult(response);
+      if (response.success) {
+        fireConfetti({ origin: { x: 0.75, y: 0.22 }, particleCount: 36 });
+      }
     } catch (err) {
       setResult(null);
       const message = (err as Error).message;
@@ -121,22 +153,32 @@ const OrderPage = () => {
             </select>
           </label>
 
-          <label className="form-label">
+          <div className="form-label form-label--full">
             <span>指定用户（可选）</span>
-            <select
-              value={selectedUser}
-              onChange={(event) => setSelectedUser(event.target.value)}
-              className="input"
-            >
-              <option value="">使用默认</option>
-              {users.map((user, idx) => (
-                <option key={`${user.username || user.nickname || idx}`} value={user.username || user.nickname || ""}>
-                  {user.nickname || user.username || "未命名"}
-                  {user.is_active ? "（当前）" : ""}
-                </option>
-              ))}
-            </select>
-          </label>
+            <div className="toggle-group toggle-group--wrap">
+              <button
+                type="button"
+                className={`toggle-button ${selectedUser ? "" : "is-active"}`}
+                onClick={() => setSelectedUser("")}
+              >
+                所有用户
+              </button>
+              {userOptions.map((user) => {
+                const isActive = selectedUser === user.value && user.value !== "";
+                return (
+                  <button
+                    key={user.id}
+                    type="button"
+                    className={`toggle-button ${isActive ? "is-active" : ""}`}
+                    onClick={() => setSelectedUser(user.value)}
+                    title={user.description || undefined}
+                  >
+                    {user.label}
+                  </button>
+                );
+              })}
+            </div>
+          </div>
 
           <div className="form-actions">
             <button className="button button-primary" type="submit" disabled={loading}>
@@ -146,7 +188,20 @@ const OrderPage = () => {
         </form>
         {users.length > 0 ? (
           <div className="muted-text" style={{ gridColumn: "1 / -1" }}>
-            已保存用户： {users.map((user) => user.nickname || user.username || "未命名").join(" / ")}
+            已保存用户：{" "}
+            {users
+              .map((user, index) => {
+                const nickname = user.nickname?.trim();
+                const username = user.username?.trim();
+                if (nickname) {
+                  return nickname;
+                }
+                if (username) {
+                  return username.includes("@") ? username.split("@", 1)[0] : username;
+                }
+                return `用户 ${index + 1}`;
+              })
+              .join(" / ")}
           </div>
         ) : null}
       </div>
