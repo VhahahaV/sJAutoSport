@@ -1,13 +1,14 @@
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { api, type SlotQueryResponse } from "../lib/api";
 
 interface SlotTableProps {
   preset: number;
   venueName: string;
   fieldTypeName: string;
+  displayName?: string;
 }
 
-const SlotTable = ({ preset, venueName, fieldTypeName }: SlotTableProps) => {
+const SlotTable = ({ preset, venueName, fieldTypeName, displayName }: SlotTableProps) => {
   const [slots, setSlots] = useState<SlotQueryResponse | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -31,6 +32,8 @@ const SlotTable = ({ preset, venueName, fieldTypeName }: SlotTableProps) => {
     void loadSlots();
   }, [preset]);
 
+  const title = useMemo(() => displayName ?? `${venueName} / ${fieldTypeName}`, [displayName, venueName, fieldTypeName]);
+
   if (loading) {
     return (
       <div className="panel" style={{ minHeight: "100px", display: "flex", alignItems: "center", justifyContent: "center" }}>
@@ -51,9 +54,7 @@ const SlotTable = ({ preset, venueName, fieldTypeName }: SlotTableProps) => {
   if (!slots || slots.slots.length === 0) {
     return (
       <div className="panel">
-        <div style={{ fontWeight: 600, marginBottom: "6px" }}>
-          {venueName} / {fieldTypeName}
-        </div>
+        <div style={{ fontWeight: 600, marginBottom: "6px" }}>{title}</div>
         <span className="muted-text">暂无可用场次</span>
       </div>
     );
@@ -65,9 +66,7 @@ const SlotTable = ({ preset, venueName, fieldTypeName }: SlotTableProps) => {
   if (availableSlots.length === 0) {
     return (
       <div className="panel">
-        <div style={{ fontWeight: 600, marginBottom: "6px" }}>
-          {venueName} / {fieldTypeName}
-        </div>
+        <div style={{ fontWeight: 600, marginBottom: "6px" }}>{title}</div>
         <span className="muted-text">暂无可用场次</span>
       </div>
     );
@@ -75,9 +74,7 @@ const SlotTable = ({ preset, venueName, fieldTypeName }: SlotTableProps) => {
 
   return (
     <div className="panel">
-      <h4 style={{ marginBottom: "12px", fontSize: "14px", fontWeight: 600 }}>
-        {venueName} / {fieldTypeName}
-      </h4>
+      <h4 style={{ marginBottom: "12px", fontSize: "14px", fontWeight: 600 }}>{title}</h4>
       <table className="table">
         <thead>
           <tr>
@@ -103,4 +100,3 @@ const SlotTable = ({ preset, venueName, fieldTypeName }: SlotTableProps) => {
 };
 
 export default SlotTable;
-

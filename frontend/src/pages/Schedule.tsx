@@ -8,6 +8,7 @@ import {
   type UserSummary,
 } from "../lib/api";
 import {
+  BOOKING_HOURS,
   buildDayOffsetOptions,
   buildHourOptions,
   buildMinuteOptions,
@@ -15,12 +16,35 @@ import {
   HOURS_24,
 } from "../lib/options";
 import PresetSelector from "../components/PresetSelector";
+import RangeSelector from "../components/RangeSelector";
 
 // 执行小时：支持24小时全覆盖（脚本执行时间）
 const EXECUTION_HOURS = HOURS_24;
 
-// 开始小时：预订场地的时间范围（12:00-21:00）
-const BOOKING_HOURS = [12, 13, 14, 15, 16, 17, 18, 19, 20, 21];
+const START_HOUR_RANGE = {
+  min: BOOKING_HOURS[0],
+  max: BOOKING_HOURS[BOOKING_HOURS.length - 1],
+} as const;
+
+const createScheduleId = () => `schedule-${Date.now().toString(36).slice(-6)}`;
+
+const buildRangeValues = (range: [number, number] | null): number[] | undefined => {
+  if (!range) {
+    return undefined;
+  }
+  const start = Math.min(range[0], range[1]);
+  const end = Math.max(range[0], range[1]);
+  if (start <= START_HOUR_RANGE.min && end >= START_HOUR_RANGE.max) {
+    return undefined;
+  }
+  const values: number[] = [];
+  for (let value = start; value <= end; value += 1) {
+    values.push(value);
+  }
+  return values;
+};
+
+const formatHourValue = (value: number) => `${value.toString().padStart(2, "0")}:00`;
 
 type UserOption = {
   id: string;
@@ -37,13 +61,13 @@ const SchedulePage = () => {
   const [message, setMessage] = useState<string | null>(null);
   // Debug states removed per requirements
 
-  const [jobId, setJobId] = useState("schedule-" + Date.now().toString().slice(-6));
+  const [jobId, setJobId] = useState(createScheduleId());
   const [executeHour, setExecuteHour] = useState(12);
   const [executeMinute, setExecuteMinute] = useState(0);
   const [executeSecond, setExecuteSecond] = useState(0);
   const [presetIndex, setPresetIndex] = useState<number | "">("");
   const [selectedDate, setSelectedDate] = useState<string>("7");
-  const [selectedStartHours, setSelectedStartHours] = useState<number[]>([]);
+  const [startHourRange, setStartHourRange] = useState<[number, number] | null>(null);
   const [availableUsers, setAvailableUsers] = useState<UserSummary[]>([]);
   const [userError, setUserError] = useState<string | null>(null);
   const [userLoading, setUserLoading] = useState(false);
@@ -56,16 +80,38 @@ const SchedulePage = () => {
         const id = (user.username || user.nickname || `user-${index}`).trim();
         const nickname = user.nickname?.trim();
         const username = user.username?.trim();
+        const compactUsername =
+          username && username.includes("@") ? username.split("@", 1)[0] : username;
         return {
           id,
-          label: nickname || username || `用户 ${index + 1}`,
-          description: nickname && username ? username : undefined,
+          label: nickname || compactUsername || `用户 ${index + 1}`,
+          description:
+            username && nickname
+              ? username
+              : username && compactUsername !== username
+                ? username
+                : undefined,
         };
       }),
     [availableUsers],
   );
 
-  const bookingHourOptions = useMemo(() => buildHourOptions(BOOKING_HOURS), []);
+  const userLabelMap = useMemo(() => {
+    const mapping = new Map<string, string>();
+    availableUsers.forEach((user, index) => {
+      const nickname = user.nickname?.trim();
+      const username = user.username?.trim();
+      const compact = username && username.includes("@") ? username.split("@", 1)[0] : username;
+      const fallback = `用户 ${index + 1}`;
+      const label = nickname || compact || username || fallback;
+      if (nickname) mapping.set(nickname, nickname);
+      if (username) mapping.set(username, label);
+      if (compact && compact !== username) mapping.set(compact, compact);
+      if (user.key) mapping.set(user.key, label);
+    });
+    return mapping;
+  }, [availableUsers]);
+
   const executionHourOptions = useMemo(() => buildHourOptions(EXECUTION_HOURS), []);
   const minuteOptions = useMemo(() => buildMinuteOptions(), []);
   const secondOptions = useMemo(() => buildSecondOptions(), []);
@@ -75,14 +121,6 @@ const SchedulePage = () => {
     setIncludeAllUsers(false);
     setSelectedUsers((prev) =>
       prev.includes(userId) ? prev.filter((item) => item !== userId) : [...prev, userId]
-    );
-  };
-
-  const toggleStartHour = (hourValue: number) => {
-    setSelectedStartHours((prev) =>
-      prev.includes(hourValue)
-        ? prev.filter((item) => item !== hourValue)
-        : [...prev, hourValue].sort((a, b) => a - b)
     );
   };
 
@@ -145,8 +183,9 @@ const SchedulePage = () => {
         require_all_users_success: requireAllUsersSuccess,
       };
 
-      if (selectedStartHours.length > 0) {
-        payload.start_hours = selectedStartHours;
+      const startHoursPayload = buildRangeValues(startHourRange);
+      if (startHoursPayload && startHoursPayload.length > 0) {
+        payload.start_hours = startHoursPayload;
       }
 
       if (!includeAllUsers && selectedUsers.length > 0) {
@@ -155,9 +194,9 @@ const SchedulePage = () => {
       
       await api.createSchedule(payload);
       setMessage("定时任务已创建");
-      setJobId("");
+      setJobId(createScheduleId());
       setSelectedUsers([]);
-      setSelectedStartHours([]);
+      setStartHourRange(null);
       setIncludeAllUsers(true);
       await loadSchedules();
     } catch (err) {
@@ -205,50 +244,53 @@ const SchedulePage = () => {
             />
           </label>
 
-          <label className="form-label">
-            <span>执行小时</span>
-            <select
-              value={executeHour}
-              onChange={(event) => setExecuteHour(Number(event.target.value))}
-              className="input"
-            >
-              {executionHourOptions.map((option) => (
-                <option key={option.value} value={option.value}>
-                  {option.label}
-                </option>
-              ))}
-            </select>
-          </label>
-
-          <label className="form-label">
-            <span>分钟</span>
-            <select
-              value={executeMinute}
-              onChange={(event) => setExecuteMinute(Number(event.target.value))}
-              className="input"
-            >
-              {minuteOptions.map((option) => (
-                <option key={option.value} value={option.value}>
-                  {option.label}
-                </option>
-              ))}
-            </select>
-          </label>
-
-          <label className="form-label">
-            <span>秒</span>
-            <select
-              value={executeSecond}
-              onChange={(event) => setExecuteSecond(Number(event.target.value))}
-              className="input"
-            >
-              {secondOptions.map((option) => (
-                <option key={option.value} value={option.value}>
-                  {option.label}
-                </option>
-              ))}
-            </select>
-          </label>
+          <div className="form-label form-label--full">
+            <span>执行时间</span>
+            <div className="inline-field-group">
+              <label className="inline-field">
+                <span>小时</span>
+                <select
+                  value={executeHour}
+                  onChange={(event) => setExecuteHour(Number(event.target.value))}
+                  className="input"
+                >
+                  {executionHourOptions.map((option) => (
+                    <option key={option.value} value={option.value}>
+                      {option.label}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <label className="inline-field">
+                <span>分钟</span>
+                <select
+                  value={executeMinute}
+                  onChange={(event) => setExecuteMinute(Number(event.target.value))}
+                  className="input"
+                >
+                  {minuteOptions.map((option) => (
+                    <option key={option.value} value={option.value}>
+                      {option.label}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <label className="inline-field">
+                <span>秒</span>
+                <select
+                  value={executeSecond}
+                  onChange={(event) => setExecuteSecond(Number(event.target.value))}
+                  className="input"
+                >
+                  {secondOptions.map((option) => (
+                    <option key={option.value} value={option.value}>
+                      {option.label}
+                    </option>
+                  ))}
+                </select>
+              </label>
+            </div>
+          </div>
 
           <div className="form-label form-label--full">
             <span>预设（可选）</span>
@@ -276,61 +318,50 @@ const SchedulePage = () => {
             </select>
           </label>
 
-          <fieldset className="fieldset" style={{ gridColumn: "1 / -1" }}>
-            <legend>开始小时（可选）</legend>
-            <div style={{ display: "flex", flexWrap: "wrap", gap: "12px" }}>
-              {bookingHourOptions.map((option) => (
-                <label key={option.value} style={{ display: "flex", alignItems: "center", gap: "6px" }}>
-                  <input
-                    type="checkbox"
-                    checked={selectedStartHours.includes(option.value)}
-                    onChange={() => toggleStartHour(option.value)}
-                  />
-                  {option.label}
-                </label>
-              ))}
-            </div>
-            {selectedStartHours.length === 0 ? (
-              <span className="muted-text">未选择时段时，将使用默认预设或目标配置的开始时间</span>
-            ) : null}
-          </fieldset>
+          <div className="form-label form-label--full">
+            <RangeSelector
+              min={START_HOUR_RANGE.min}
+              max={START_HOUR_RANGE.max}
+              value={startHourRange}
+              onChange={setStartHourRange}
+              label="开始小时（可选）"
+              formatValue={formatHourValue}
+            />
+            <span className="muted-text">未限制时，将使用预设或目标配置的默认开始时间。</span>
+          </div>
 
           <fieldset className="fieldset" style={{ gridColumn: "1 / -1" }}>
             <legend>指定用户（可选）</legend>
             {userError ? <div className="notice notice-error">{userError}</div> : null}
             {userLoading ? <span className="muted-text">加载用户中…</span> : null}
-            <div style={{ display: "flex", flexWrap: "wrap", gap: "12px", alignItems: "center" }}>
-              <label style={{ display: "flex", alignItems: "center", gap: "6px" }}>
-                <input
-                  type="checkbox"
-                  checked={includeAllUsers}
-                  onChange={(event) => {
-                    const checked = event.target.checked;
-                    setIncludeAllUsers(checked);
-                    if (checked) {
-                      setSelectedUsers([]);
-                    }
-                  }}
-                />
+            <div className="toggle-group toggle-group--wrap">
+              <button
+                type="button"
+                className={`toggle-button ${includeAllUsers ? "is-active" : ""}`}
+                onClick={() => {
+                  setIncludeAllUsers(true);
+                  setSelectedUsers([]);
+                }}
+              >
                 所有用户
-              </label>
+              </button>
               {userOptions.length === 0 && !userLoading ? (
                 <span className="muted-text">暂无可用用户，请先在会话管理页完成登录。</span>
               ) : null}
-              {userOptions.map((user) => (
-                <label key={user.id} style={{ display: "flex", alignItems: "center", gap: "6px" }}>
-                  <input
-                    type="checkbox"
-                    checked={!includeAllUsers && selectedUsers.includes(user.id)}
-                    disabled={includeAllUsers}
-                    onChange={() => toggleUser(user.id)}
-                  />
-                  <span>
+              {userOptions.map((user) => {
+                const isActive = !includeAllUsers && selectedUsers.includes(user.id);
+                return (
+                  <button
+                    key={user.id}
+                    type="button"
+                    className={`toggle-button ${isActive ? "is-active" : ""}`}
+                    onClick={() => toggleUser(user.id)}
+                    title={user.description || undefined}
+                  >
                     {user.label}
-                    {user.description ? `（${user.description}）` : ""}
-                  </span>
-                </label>
-              ))}
+                  </button>
+                );
+              })}
             </div>
             {!includeAllUsers && selectedUsers.length === 0 ? (
               <span className="muted-text">未选择账号时，将按默认顺序尝试所有可用账号</span>
@@ -418,9 +449,16 @@ const SchedulePage = () => {
                           .map((item) => `${Number(item).toString().padStart(2, "0")}:00`)
                           .join(", ")
                       : "-";
-                    const targetUserLabel = Array.isArray(info.target_users) && info.target_users.length
-                      ? info.target_users.join(", ")
-                      : "-";
+                    const displayUsers =
+                      Array.isArray(info.target_users) && info.target_users.length
+                        ? (info.target_users as unknown[])
+                            .map((value) => {
+                              const key = String(value).trim();
+                              return userLabelMap.get(key) ?? key;
+                            })
+                            .filter((value, idx, arr) => value && arr.indexOf(value) === idx)
+                        : [];
+                    const targetUserLabel = displayUsers.length ? displayUsers.join(", ") : "-";
 
                     return (
                       <tr key={id}>

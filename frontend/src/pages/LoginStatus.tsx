@@ -1,6 +1,5 @@
 import { FormEvent, useCallback, useEffect, useMemo, useState } from "react";
 
-import DebugPanel from "../components/DebugPanel";
 import {
   api,
   type KeepAliveJob,
@@ -53,11 +52,6 @@ const LoginStatusPage = () => {
   const [keepAliveTarget, setKeepAliveTarget] = useState("");
   const [jobName, setJobName] = useState("KeepAlive");
   const [jobInterval, setJobInterval] = useState(15);
-  const [keepAliveDebug, setKeepAliveDebug] = useState<{
-    run?: { request?: unknown; response?: unknown; error?: string | null };
-    create?: { request?: unknown; response?: unknown; error?: string | null };
-    delete?: { request?: unknown; response?: unknown; error?: string | null };
-  }>({});
 
   const loadStatus = useCallback(async () => {
     setLoading(true);
@@ -273,25 +267,12 @@ const LoginStatusPage = () => {
   const handleRunKeepAlive = async (user?: string) => {
     try {
       setKeepAliveLoading(true);
-      const requestPayload = { user: user || undefined };
-      setKeepAliveDebug((prev) => ({
-        ...prev,
-        run: { request: requestPayload, response: undefined, error: null },
-      }));
       const data = await api.runKeepAlive(user);
       setKeepAliveResults(data);
       setKeepAliveError(null);
-      setKeepAliveDebug((prev) => ({
-        ...prev,
-        run: { request: requestPayload, response: data, error: null },
-      }));
     } catch (err) {
       const message = (err as Error).message;
       setKeepAliveError(message);
-      setKeepAliveDebug((prev) => ({
-        ...prev,
-        run: { request: { user: user || undefined }, error: message },
-      }));
     } finally {
       setKeepAliveLoading(false);
       void loadKeepAliveJobs();
@@ -308,29 +289,14 @@ const LoginStatusPage = () => {
         name: jobName || "KeepAlive",
         interval_minutes: Math.max(1, jobInterval),
       };
-      setKeepAliveDebug((prev) => ({
-        ...prev,
-        create: { request: payload, response: undefined, error: null },
-      }));
       const response = await api.createKeepAliveJob(payload);
       setJobName("KeepAlive");
       setJobInterval(15);
       setKeepAliveError(null);
-      setKeepAliveDebug((prev) => ({
-        ...prev,
-        create: { request: payload, response, error: null },
-      }));
       await loadKeepAliveJobs();
     } catch (err) {
       const message = (err as Error).message;
       setKeepAliveError(message);
-      setKeepAliveDebug((prev) => ({
-        ...prev,
-        create: {
-          request: { name: jobName || "KeepAlive", interval_minutes: Math.max(1, jobInterval) },
-          error: message,
-        },
-      }));
     } finally {
       setKeepAliveLoading(false);
     }
@@ -339,23 +305,11 @@ const LoginStatusPage = () => {
   const handleDeleteKeepAliveJob = async (jobId: string) => {
     try {
       setKeepAliveLoading(true);
-      setKeepAliveDebug((prev) => ({
-        ...prev,
-        delete: { request: { job_id: jobId }, response: undefined, error: null },
-      }));
-      const response = await api.deleteKeepAliveJob(jobId);
-      setKeepAliveDebug((prev) => ({
-        ...prev,
-        delete: { request: { job_id: jobId }, response, error: null },
-      }));
+      await api.deleteKeepAliveJob(jobId);
       await loadKeepAliveJobs();
     } catch (err) {
       const message = (err as Error).message;
       setKeepAliveError(message);
-      setKeepAliveDebug((prev) => ({
-        ...prev,
-        delete: { request: { job_id: jobId }, error: message },
-      }));
     } finally {
       setKeepAliveLoading(false);
     }
@@ -430,7 +384,7 @@ const LoginStatusPage = () => {
                     onClick={() =>
                       setForm({
                         username,
-                        password: "",
+                        password: user.password_masked || "",
                         nickname: nickname || deriveNickname(username),
                       })
                     }
@@ -858,24 +812,6 @@ const LoginStatusPage = () => {
             </table>
           )}
 
-          <DebugPanel
-            title="保活执行调试"
-            request={keepAliveDebug.run?.request}
-            response={keepAliveDebug.run?.response}
-            error={keepAliveDebug.run?.error}
-          />
-          <DebugPanel
-            title="创建任务调试"
-            request={keepAliveDebug.create?.request}
-            response={keepAliveDebug.create?.response}
-            error={keepAliveDebug.create?.error}
-          />
-          <DebugPanel
-            title="删除任务调试"
-            request={keepAliveDebug.delete?.request}
-            response={keepAliveDebug.delete?.response}
-            error={keepAliveDebug.delete?.error}
-          />
         </div>
       </section>
     </>

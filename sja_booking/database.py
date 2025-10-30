@@ -38,6 +38,8 @@ class DatabaseManager:
                     date TEXT,
                     start_hour INTEGER,
                     interval_seconds INTEGER,
+                    operating_start_hour INTEGER,
+                    operating_end_hour INTEGER,
                     auto_book BOOLEAN,
                     status TEXT,
                     start_time TEXT,
@@ -47,10 +49,23 @@ class DatabaseManager:
                     successful_bookings INTEGER,
                     last_error TEXT,
                     last_booking_error TEXT,
+                    window_active BOOLEAN,
+                    next_window_start TEXT,
                     created_at TEXT,
                     updated_at TEXT
                 )
             """)
+
+            cursor.execute("PRAGMA table_info(monitors)")
+            monitor_columns = {row[1] for row in cursor.fetchall()}
+            if "operating_start_hour" not in monitor_columns:
+                cursor.execute("ALTER TABLE monitors ADD COLUMN operating_start_hour INTEGER")
+            if "operating_end_hour" not in monitor_columns:
+                cursor.execute("ALTER TABLE monitors ADD COLUMN operating_end_hour INTEGER")
+            if "window_active" not in monitor_columns:
+                cursor.execute("ALTER TABLE monitors ADD COLUMN window_active BOOLEAN")
+            if "next_window_start" not in monitor_columns:
+                cursor.execute("ALTER TABLE monitors ADD COLUMN next_window_start TEXT")
             
             # 创建定时任务表
             cursor.execute("""
@@ -149,10 +164,12 @@ class DatabaseManager:
                 cursor.execute("""
                     INSERT OR REPLACE INTO monitors (
                         id, preset, venue_id, venue_keyword, field_type_id, field_type_keyword,
-                        date, start_hour, interval_seconds, auto_book, status, start_time,
+                        date, start_hour, interval_seconds, operating_start_hour, operating_end_hour,
+                        auto_book, status, start_time,
                         last_check, found_slots, booking_attempts, successful_bookings,
-                        last_error, last_booking_error, created_at, updated_at
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        last_error, last_booking_error, window_active, next_window_start,
+                        created_at, updated_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """, (
                     monitor_info["id"],
                     monitor_info.get("preset"),
@@ -163,6 +180,8 @@ class DatabaseManager:
                     monitor_info.get("date"),
                     monitor_info.get("start_hour"),
                     monitor_info.get("interval_seconds"),
+                    monitor_info.get("operating_start_hour"),
+                    monitor_info.get("operating_end_hour"),
                     monitor_info.get("auto_book", False),
                     monitor_info.get("status"),
                     monitor_info.get("start_time"),
@@ -172,6 +191,8 @@ class DatabaseManager:
                     monitor_info.get("successful_bookings", 0),
                     monitor_info.get("last_error"),
                     monitor_info.get("last_booking_error"),
+                    monitor_info.get("window_active"),
+                    monitor_info.get("next_window_start"),
                     datetime.now().isoformat(),
                     datetime.now().isoformat()
                 ))

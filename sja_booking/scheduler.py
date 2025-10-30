@@ -1,11 +1,15 @@
 from __future__ import annotations
 
+import logging
 from datetime import time as dt_time
 from typing import Callable, Optional
 
 from apscheduler.schedulers.blocking import BlockingScheduler
 from apscheduler.triggers.cron import CronTrigger
 from tzlocal import get_localzone
+
+
+logger = logging.getLogger(__name__)
 
 
 def schedule_daily(
@@ -17,27 +21,21 @@ def schedule_daily(
 ) -> None:
     # 调试模式：立即执行
     import os
+
     debug_mode = os.getenv("SCHEDULE_DEBUG", "false").lower() == "true"
-    
+
     if debug_mode:
-        print(f"[DEBUG] 调试模式：立即执行任务（原计划时间：{run_time.hour}:{run_time.minute:02d}:{run_time.second:02d}）")
-        
-        # 执行 warmup
         if warmup:
-            print("[DEBUG] 执行 warmup...")
             try:
                 warmup()
-            except Exception as e:
-                print(f"[DEBUG] Warmup 失败: {e}")
-        
-        # 立即执行主任务
-        print("[DEBUG] 执行主任务...")
+            except Exception as exc:  # pylint: disable=broad-except
+                logger.exception("Warmup failed during debug execution", exc_info=exc)
+
         try:
             job()
-        except Exception as e:
-            print(f"[DEBUG] 主任务失败: {e}")
-        
-        print("[DEBUG] 调试执行完成")
+        except Exception as exc:  # pylint: disable=broad-except
+            logger.exception("Scheduled job failed during debug execution", exc_info=exc)
+
         return
     
     # 正常模式：按计划时间执行
@@ -57,5 +55,4 @@ def schedule_daily(
         scheduler.add_job(warmup, CronTrigger(hour=warmup_time.hour, minute=warmup_time.minute, second=warmup_time.second))
 
     scheduler.add_job(job, CronTrigger(hour=run_time.hour, minute=run_time.minute, second=run_time.second))
-    scheduler.print_jobs()
     scheduler.start()

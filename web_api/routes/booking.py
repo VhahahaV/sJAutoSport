@@ -197,6 +197,7 @@ def _list_available_users() -> List[Dict[str, Any]]:
             "username": username,
             "expires_at": expires_at,
             "is_active": is_active,
+            "password_masked": user.password,
         }
 
     return list(merged.values())
@@ -255,8 +256,8 @@ class MonitorRequest(BaseModel):
     auto_book: bool = False
     require_all_users_success: bool = Field(False, description="是否要求所有用户都成功")
     max_time_gap_hours: Optional[int] = Field(1, ge=0, le=4, description="要求所有用户成功时允许的最大时间差（小时）")
-    max_runtime_minutes: Optional[int] = Field(None, ge=1, le=1440, description="最长运行时长（分钟）")
-    end_time: Optional[str] = Field(None, description="任务结束时间，ISO8601 格式，如 2025-11-03T18:30")
+    operating_start_hour: Optional[int] = Field(None, ge=0, le=24, description="每日运行开始时间（小时）")
+    operating_end_hour: Optional[int] = Field(None, ge=0, le=24, description="每日运行结束时间（小时）")
     target: Optional[TargetOverride] = None
     preferred_hours: Optional[List[int]] = None
     preferred_days: Optional[List[int]] = None
@@ -417,8 +418,8 @@ async def create_monitor(request: MonitorCreateRequest) -> Dict[str, Any]:
         auto_book=request.auto_book,
         require_all_users_success=request.require_all_users_success,
         max_time_gap_hours=request.max_time_gap_hours,
-        max_runtime_minutes=request.max_runtime_minutes,
-        end_time=request.end_time,
+        operating_start_hour=request.operating_start_hour,
+        operating_end_hour=request.operating_end_hour,
         base_target=base_target,
         target_users=request.target_users,
         exclude_users=request.exclude_users,

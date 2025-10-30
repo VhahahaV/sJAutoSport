@@ -7,12 +7,46 @@ import {
   type Preset,
   type UserSummary,
 } from "../lib/api";
-import { buildDayOffsetOptions, buildHourOptions } from "../lib/options";
+import { BOOKING_HOURS } from "../lib/options";
 import PresetSelector from "../components/PresetSelector";
+import RangeSelector from "../components/RangeSelector";
 
-// 只显示 12:00 到 21:00
-const PREFERRED_HOURS = [12, 13, 14, 15, 16, 17, 18, 19, 20, 21];
 const MAX_SLOT_PREVIEW = 5;
+const DAY_RANGE = { min: 0, max: 8 } as const;
+const HOUR_RANGE = {
+  min: BOOKING_HOURS[0],
+  max: BOOKING_HOURS[BOOKING_HOURS.length - 1],
+} as const;
+const OPERATING_RANGE = { min: 0, max: 24 } as const;
+
+const createMonitorId = () => `monitor-${Date.now().toString(36).slice(-6)}`;
+
+const buildRangeValues = (
+  range: [number, number] | null,
+  { min, max }: { min: number; max: number },
+): number[] | undefined => {
+  if (!range) {
+    return undefined;
+  }
+  const start = Math.min(range[0], range[1]);
+  const end = Math.max(range[0], range[1]);
+  if (start <= min && end >= max) {
+    return undefined;
+  }
+  const values: number[] = [];
+  for (let value = start; value <= end; value += 1) {
+    values.push(value);
+  }
+  return values;
+};
+
+const formatHourValue = (value: number) => `${value.toString().padStart(2, "0")}:00`;
+
+const formatDayValue = (value: number) => {
+  if (value <= 0) return "今天";
+  if (value === 1) return "明天";
+  return `+${value}天`;
+};
 // Debug panel removed per requirements
 
 type UserOption = {
@@ -54,25 +88,17 @@ const MonitorPage = () => {
   const [message, setMessage] = useState<string | null>(null);
   // Debug states removed per requirements
 
-  const [monitorId, setMonitorId] = useState("monitor-" + Date.now().toString().slice(-6));
+  const [monitorId, setMonitorId] = useState(createMonitorId());
   const [presetIndex, setPresetIndex] = useState<number | "">("");
   const [intervalMinutes, setIntervalMinutes] = useState(15);
   const [autoBook, setAutoBook] = useState(true);  // 默认打开
   const [requireAllUsersSuccess, setRequireAllUsersSuccess] = useState(false);
   const [includeAllTargets, setIncludeAllTargets] = useState(true);
   const [selectedTargetUsers, setSelectedTargetUsers] = useState<string[]>([]);
-  const [selectedExcludeUsers, setSelectedExcludeUsers] = useState<string[]>([]);
-  const [selectedPreferredHours, setSelectedPreferredHours] = useState<number[]>([]);
-  const [selectedPreferredDays, setSelectedPreferredDays] = useState<number[]>([]);
-  const [maxRuntimeMinutes, setMaxRuntimeMinutes] = useState<number | "">("");
-  const [runUntil, setRunUntil] = useState<string>("");
+  const [preferredHourRange, setPreferredHourRange] = useState<[number, number] | null>(null);
+  const [preferredDayRange, setPreferredDayRange] = useState<[number, number] | null>(null);
+  const [operatingHourRange, setOperatingHourRange] = useState<[number, number] | null>(null);
   const [deleteAllLoading, setDeleteAllLoading] = useState(false);
-
-  const monitorHourOptions = useMemo(() => buildHourOptions(PREFERRED_HOURS), []);
-  const dayOptions = useMemo(
-    () => buildDayOffsetOptions().map((option) => ({ value: Number(option.value), label: option.label })),
-    [],
-  );
 
   const userOptions = useMemo<UserOption[]>(
     () =>
@@ -80,12 +106,43 @@ const MonitorPage = () => {
         const id = (user.nickname || user.username || `user-${index}`).trim();
         const nickname = user.nickname?.trim();
         const username = user.username?.trim();
-        const label = nickname || username || `用户 ${index + 1}`;
-        const description = nickname && username ? username : undefined;
+        const compactUsername =
+          username && username.includes("@") ? username.split("@", 1)[0] : username;
+        const label = nickname || compactUsername || `用户 ${index + 1}`;
+        const description =
+          username && nickname
+            ? username
+            : username && compactUsername !== username
+              ? username
+              : undefined;
         return { id, label, description };
       }),
     [users],
   );
+
+  const userLabelMap = useMemo(() => {
+    const mapping = new Map<string, string>();
+    users.forEach((user, index) => {
+      const nickname = user.nickname?.trim();
+      const username = user.username?.trim();
+      const compact = username && username.includes("@") ? username.split("@", 1)[0] : username;
+      const fallback = `用户 ${index + 1}`;
+      const label = nickname || compact || username || fallback;
+      if (nickname) {
+        mapping.set(nickname, nickname);
+      }
+      if (username) {
+        mapping.set(username, label);
+      }
+      if (compact && compact !== username) {
+        mapping.set(compact, compact);
+      }
+      if (user.key) {
+        mapping.set(user.key, label);
+      }
+    });
+    return mapping;
+  }, [users]);
 
   const loadMonitors = async () => {
     try {
@@ -117,41 +174,20 @@ const MonitorPage = () => {
   }, []);
 
   const resetForm = () => {
-    setMonitorId("");
-    setIntervalMinutes(4);
-    setAutoBook(false);
+    setMonitorId(createMonitorId());
+    setIntervalMinutes(15);
+    setAutoBook(true);
+    setRequireAllUsersSuccess(false);
     setIncludeAllTargets(true);
     setSelectedTargetUsers([]);
-    setSelectedExcludeUsers([]);
-    setSelectedPreferredHours([]);
-    setSelectedPreferredDays([]);
-    setMaxRuntimeMinutes("");
-    setRunUntil("");
-  };
-
-  const togglePreferredHour = (hour: number) => {
-    setSelectedPreferredHours((prev) =>
-      prev.includes(hour) ? prev.filter((item) => item !== hour) : [...prev, hour].sort((a, b) => a - b),
-    );
-  };
-
-  const togglePreferredDay = (day: number) => {
-    setSelectedPreferredDays((prev) =>
-      prev.includes(day) ? prev.filter((item) => item !== day) : [...prev, day].sort((a, b) => a - b),
-    );
+    setPreferredHourRange(null);
+    setPreferredDayRange(null);
+    setOperatingHourRange(null);
   };
 
   const toggleTargetUser = (userId: string) => {
     setIncludeAllTargets(false);
     setSelectedTargetUsers((prev) =>
-      prev.includes(userId)
-        ? prev.filter((item) => item !== userId)
-        : [...prev, userId]
-    );
-  };
-
-  const toggleExcludeUser = (userId: string) => {
-    setSelectedExcludeUsers((prev) =>
       prev.includes(userId)
         ? prev.filter((item) => item !== userId)
         : [...prev, userId]
@@ -170,9 +206,8 @@ const MonitorPage = () => {
       setMessage(null);
 
       const targetUsersPayload = includeAllTargets ? undefined : selectedTargetUsers;
-      const excludeUsersPayload = selectedExcludeUsers.length > 0 ? selectedExcludeUsers : undefined;
-      const preferredHoursPayload = selectedPreferredHours.length > 0 ? selectedPreferredHours : undefined;
-      const preferredDaysPayload = selectedPreferredDays.length > 0 ? selectedPreferredDays : undefined;
+      const preferredHoursPayload = buildRangeValues(preferredHourRange, HOUR_RANGE);
+      const preferredDaysPayload = buildRangeValues(preferredDayRange, DAY_RANGE);
 
       const payload: MonitorRequestBody = {
         monitor_id: monitorId.trim(),
@@ -181,20 +216,18 @@ const MonitorPage = () => {
         auto_book: autoBook,
         require_all_users_success: requireAllUsersSuccess,
         target_users: targetUsersPayload,
-        exclude_users: excludeUsersPayload,
         preferred_hours: preferredHoursPayload,
         preferred_days: preferredDaysPayload,
       };
 
-      if (maxRuntimeMinutes !== "") {
-        const minutes = Number(maxRuntimeMinutes);
-        if (!Number.isNaN(minutes) && minutes > 0) {
-          payload.max_runtime_minutes = minutes;
+      if (operatingHourRange) {
+        const [rawStart, rawEnd] = operatingHourRange;
+        const operatingStart = Math.min(rawStart, rawEnd);
+        const operatingEnd = Math.max(rawStart, rawEnd);
+        if (!(operatingStart === OPERATING_RANGE.min && operatingEnd === OPERATING_RANGE.max)) {
+          payload.operating_start_hour = operatingStart;
+          payload.operating_end_hour = operatingEnd;
         }
-      }
-
-      if (runUntil.trim()) {
-        payload.end_time = runUntil.trim();
       }
 
       await api.createMonitor(payload);
@@ -313,7 +346,7 @@ const MonitorPage = () => {
       return "-";
     }
     return (hours as number[])
-      .map((value) => `${value.toString().padStart(2, "0")}:00`)
+      .map((value) => formatHourValue(Number(value)))
       .join(", ");
   };
 
@@ -321,10 +354,23 @@ const MonitorPage = () => {
     if (!Array.isArray(days) || days.length === 0) {
       return "-";
     }
-    const labelMap = new Map<number, string>(dayOptions.map((option) => [option.value, option.label]));
     return (days as number[])
-      .map((day) => labelMap.get(day) || String(day))
+      .map((day) => formatDayValue(Number(day)))
       .join(", ");
+  };
+
+  const formatOperatingWindow = (startRaw: unknown, endRaw: unknown): string => {
+    const start = Number(startRaw ?? OPERATING_RANGE.min);
+    const end = Number(endRaw ?? OPERATING_RANGE.max);
+    const normalizedStart = Number.isFinite(start) ? Math.max(OPERATING_RANGE.min, Math.min(OPERATING_RANGE.max, start)) : OPERATING_RANGE.min;
+    const normalizedEnd = Number.isFinite(end) ? Math.max(OPERATING_RANGE.min, Math.min(OPERATING_RANGE.max, end)) : OPERATING_RANGE.max;
+    if (normalizedStart <= OPERATING_RANGE.min && normalizedEnd >= OPERATING_RANGE.max) {
+      return "全天";
+    }
+    if (normalizedStart === normalizedEnd) {
+      return "全天";
+    }
+    return `${formatHourValue(normalizedStart)} ~ ${formatHourValue(normalizedEnd)}`;
   };
 
   const formatSlotPreview = (slots: unknown): string[] => {
@@ -394,55 +440,100 @@ const MonitorPage = () => {
             />
           </div>
 
-          <label className="form-label">
+          <div className="form-label form-label--full">
+            <RangeSelector
+              min={HOUR_RANGE.min}
+              max={HOUR_RANGE.max}
+              value={preferredHourRange}
+              onChange={setPreferredHourRange}
+              label="优先时间段"
+              formatValue={formatHourValue}
+            />
+            <span className="muted-text">拖动滑块以限制尝试的起始时间段，不选择时尝试所有可用时段。</span>
+          </div>
+
+          <div className="form-label form-label--full">
+            <RangeSelector
+              min={DAY_RANGE.min}
+              max={DAY_RANGE.max}
+              value={preferredDayRange}
+              onChange={setPreferredDayRange}
+              label="优先天数"
+              formatValue={formatDayValue}
+            />
+            <span className="muted-text">0 = 今天，1 = 明天，以此类推；留空时监控所有可预约日期。</span>
+          </div>
+
+          <fieldset className="fieldset" style={{ gridColumn: "1 / -1" }}>
+            <legend>指定用户</legend>
+            <div className="toggle-group toggle-group--wrap">
+              <button
+                type="button"
+                className={`toggle-button ${includeAllTargets ? "is-active" : ""}`}
+                onClick={() => {
+                  setIncludeAllTargets(true);
+                  setSelectedTargetUsers([]);
+                }}
+              >
+                所有用户
+              </button>
+              {userOptions.map((user) => {
+                const isActive = !includeAllTargets && selectedTargetUsers.includes(user.id);
+                return (
+                  <button
+                    key={user.id}
+                    type="button"
+                    className={`toggle-button ${isActive ? "is-active" : ""}`}
+                    onClick={() => toggleTargetUser(user.id)}
+                    title={user.description || undefined}
+                  >
+                    {user.label}
+                  </button>
+                );
+              })}
+            </div>
+            {!includeAllTargets && selectedTargetUsers.length === 0 ? (
+              <span className="muted-text">未选择账号时，将按默认顺序尝试所有可用账号</span>
+            ) : null}
+          </fieldset>
+
+          <div className="form-label">
             <span>监控间隔（分钟）</span>
-            <select
-              value={intervalMinutes}
-              onChange={(event) => setIntervalMinutes(Number(event.target.value))}
-              className="input"
-            >
-              <option value={5}>5分钟</option>
-              <option value={10}>10分钟</option>
-              <option value={15}>15分钟</option>
-              <option value={20}>20分钟</option>
-              <option value={25}>25分钟</option>
-              <option value={30}>30分钟</option>
-              <option value={60}>60分钟</option>
-            </select>
-          </label>
+            <div className="toggle-group">
+              {[1, 3, 5, 10, 15, 25, 30, 60].map((option) => {
+                const isActive = intervalMinutes === option;
+                return (
+                  <button
+                    key={`interval-${option}`}
+                    type="button"
+                    className={`toggle-button ${isActive ? "is-active" : ""}`}
+                    onClick={() => setIntervalMinutes(option)}
+                  >
+                    {option}分钟
+                  </button>
+                );
+              })}
+            </div>
+          </div>
 
-          <label className="form-label">
-            <span>最长运行时长（分钟，可选）</span>
-            <input
-              type="number"
-              min={1}
-              max={1440}
-              className="input"
-              value={maxRuntimeMinutes === "" ? "" : String(maxRuntimeMinutes)}
-              onChange={(event) => {
-                const value = event.target.value;
-                setMaxRuntimeMinutes(value === "" ? "" : Number(value));
-              }}
-              placeholder="例如 120"
+          <div className="form-label form-label--full">
+            <RangeSelector
+              min={OPERATING_RANGE.min}
+              max={OPERATING_RANGE.max}
+              value={operatingHourRange}
+              onChange={setOperatingHourRange}
+              label="每日运行时段"
+              formatValue={formatHourValue}
+              unit=""
             />
-          </label>
-
-          <label className="form-label">
-            <span>结束时间（可选）</span>
-            <input
-              type="datetime-local"
-              className="input"
-              value={runUntil}
-              onChange={(event) => setRunUntil(event.target.value)}
-            />
-            <span className="muted-text">留空时，系统会在目标时段结束后自动停止</span>
-          </label>
+            <span className="muted-text">限定每日自动监控的时间段；保持 00:00 ~ 24:00 表示全天运行。</span>
+          </div>
 
           <div className="panel" style={{ gridColumn: "1 / -1", border: "2px solid #F97316", background: "#FFF7ED", padding: "16px" }}>
             <label style={{ display: "flex", alignItems: "center", gap: "12px", fontWeight: "600", fontSize: "16px" }}>
-              <input 
-                type="checkbox" 
-                checked={autoBook} 
+              <input
+                type="checkbox"
+                checked={autoBook}
                 onChange={(event) => setAutoBook(event.target.checked)}
                 style={{ width: "20px", height: "20px" }}
               />
@@ -450,9 +541,9 @@ const MonitorPage = () => {
             </label>
             {autoBook && (
               <label style={{ display: "flex", alignItems: "center", gap: "12px", marginTop: "12px", fontSize: "14px" }}>
-                <input 
-                  type="checkbox" 
-                  checked={requireAllUsersSuccess} 
+                <input
+                  type="checkbox"
+                  checked={requireAllUsersSuccess}
                   onChange={(event) => setRequireAllUsersSuccess(event.target.checked)}
                   style={{ width: "18px", height: "18px" }}
                 />
@@ -462,91 +553,6 @@ const MonitorPage = () => {
               </label>
             )}
           </div>
-
-          <fieldset className="fieldset" style={{ gridColumn: "1 / -1" }}>
-            <legend>指定用户</legend>
-            <div style={{ display: "flex", flexWrap: "wrap", gap: "12px", alignItems: "center" }}>
-              <label style={{ display: "flex", alignItems: "center", gap: "6px" }}>
-                <input
-                  type="checkbox"
-                  checked={includeAllTargets}
-                  onChange={(event) => {
-                    const checked = event.target.checked;
-                    setIncludeAllTargets(checked);
-                    if (checked) {
-                      setSelectedTargetUsers([]);
-                    }
-                  }}
-                />
-                所有用户
-              </label>
-              {userOptions.map((user) => (
-                <label key={user.id} style={{ display: "flex", alignItems: "center", gap: "6px" }}>
-                  <input
-                    type="checkbox"
-                    checked={!includeAllTargets && selectedTargetUsers.includes(user.id)}
-                    disabled={includeAllTargets}
-                    onChange={() => toggleTargetUser(user.id)}
-                  />
-                  <span>
-                    {user.label}
-                    {user.description ? `（${user.description}）` : ""}
-                  </span>
-                </label>
-              ))}
-            </div>
-          </fieldset>
-
-          <fieldset className="fieldset" style={{ gridColumn: "1 / -1" }}>
-            <legend>排除用户</legend>
-            <div style={{ display: "flex", flexWrap: "wrap", gap: "12px" }}>
-              {userOptions.map((user) => (
-                <label key={user.id} style={{ display: "flex", alignItems: "center", gap: "6px" }}>
-                  <input
-                    type="checkbox"
-                    checked={selectedExcludeUsers.includes(user.id)}
-                    onChange={() => toggleExcludeUser(user.id)}
-                  />
-                  <span>
-                    {user.label}
-                    {user.description ? `（${user.description}）` : ""}
-                  </span>
-                </label>
-              ))}
-            </div>
-          </fieldset>
-
-          <fieldset className="fieldset" style={{ gridColumn: "1 / -1" }}>
-            <legend>优先时间段</legend>
-            <div style={{ display: "flex", flexWrap: "wrap", gap: "12px" }}>
-              {monitorHourOptions.map((option) => (
-                <label key={option.value} style={{ display: "flex", alignItems: "center", gap: "6px" }}>
-                  <input
-                    type="checkbox"
-                    checked={selectedPreferredHours.includes(option.value)}
-                    onChange={() => togglePreferredHour(option.value)}
-                  />
-                  {option.label}
-                </label>
-              ))}
-            </div>
-          </fieldset>
-
-          <fieldset className="fieldset" style={{ gridColumn: "1 / -1" }}>
-            <legend>优先天数</legend>
-            <div style={{ display: "flex", flexWrap: "wrap", gap: "12px" }}>
-              {dayOptions.map((option) => (
-                <label key={option.value} style={{ display: "flex", alignItems: "center", gap: "6px" }}>
-                  <input
-                    type="checkbox"
-                    checked={selectedPreferredDays.includes(option.value)}
-                    onChange={() => togglePreferredDay(option.value)}
-                  />
-                  {option.label}
-                </label>
-              ))}
-            </div>
-          </fieldset>
 
           <div className="form-actions">
             <button className="button button-primary" type="submit" disabled={loading}>
@@ -619,11 +625,24 @@ const MonitorPage = () => {
                 const preferredHours = info.preferred_hours;
                 const preferredDays = info.preferred_days;
                 const targetUserList = Array.isArray(info.target_users) ? (info.target_users as string[]) : [];
-                const excludeUserList = Array.isArray(info.exclude_users) ? (info.exclude_users as string[]) : [];
+                const displayTargetUsers = targetUserList
+                  .map((identifier) => {
+                    const key = String(identifier).trim();
+                    return userLabelMap.get(key) ?? key;
+                  })
+                  .filter((value, idx, array) => value && array.indexOf(value) === idx);
                 const parsedSlots = toSlotPreviewList(info.found_slots);
                 const slotPreview = formatSlotPreview(parsedSlots);
-                const runtimeLimit = info.max_runtime_minutes ?? info.maxRuntimeMinutes;
-                const runUntilValue = (info.run_until as string) || (info.auto_stop_at as string) || "";
+                const operatingStartHour = Number(
+                  info.operating_start_hour ?? info.operatingStartHour ?? OPERATING_RANGE.min,
+                );
+                const operatingEndHour = Number(
+                  info.operating_end_hour ?? info.operatingEndHour ?? OPERATING_RANGE.max,
+                );
+                const operatingWindowLabel = formatOperatingWindow(operatingStartHour, operatingEndHour);
+                const nextWindowStartRaw = (info.next_window_start as string) || (info.nextWindowStart as string) || "";
+                const nextWindowStartLabel = nextWindowStartRaw ? formatDateTime(nextWindowStartRaw) : "-";
+                const windowActive = Boolean(info.window_active ?? info.windowActive ?? true);
 
                 const actionButtons = () => {
                   if (statusLower === "running") {
@@ -714,12 +733,16 @@ const MonitorPage = () => {
                         {lastCheck}
                       </div>
                       <div>
-                        <strong>最长运行：</strong>
-                        {runtimeLimit ? `${runtimeLimit} 分钟` : "未设置"}
+                        <strong>每日时段：</strong>
+                        {operatingWindowLabel}
                       </div>
                       <div>
-                        <strong>结束时间：</strong>
-                        {runUntilValue ? formatDateTime(runUntilValue) : "目标时间结束后"}
+                        <strong>当前窗口：</strong>
+                        {windowActive ? "进行中" : "暂停中"}
+                      </div>
+                      <div>
+                        <strong>下次开启：</strong>
+                        {nextWindowStartLabel}
                       </div>
                       <div>
                         <strong>优先时段：</strong>
@@ -731,11 +754,7 @@ const MonitorPage = () => {
                       </div>
                       <div>
                         <strong>指定账号：</strong>
-                        {targetUserList.length ? targetUserList.join(", ") : "全部"}
-                      </div>
-                      <div>
-                        <strong>排除账号：</strong>
-                        {excludeUserList.length ? excludeUserList.join(", ") : "-"}
+                        {displayTargetUsers.length ? displayTargetUsers.join(", ") : "全部"}
                       </div>
                       {slotPreview.length > 0 ? (
                         <div style={{ gridColumn: "1 / -1" }}>

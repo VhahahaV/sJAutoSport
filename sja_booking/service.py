@@ -28,6 +28,95 @@ except ImportError as exc:  # pragma: no cover - configuration should exist
     raise RuntimeError("service module requires top-level config.py") from exc
 
 
+_ORDER_ID_KEYS: Tuple[str, ...] = (
+    "orderId",
+    "order_id",
+    "orderID",
+    "orderid",
+    "pOrderId",
+    "pOrderid",
+    "porderid",
+    "id",
+    "data",
+)
+
+
+def _extract_order_identifier(payload: Any) -> Optional[str]:
+    """Best-effort extraction of order identifiers from nested payloads."""
+    if payload is None:
+        return None
+    if isinstance(payload, (int, float)):
+        value = int(payload)
+        return str(value) if value else None
+    if isinstance(payload, str):
+        text = payload.strip()
+        return text or None
+    if isinstance(payload, dict):
+        for key in _ORDER_ID_KEYS:
+            if key not in payload:
+                continue
+            candidate = _extract_order_identifier(payload[key])
+            if candidate:
+                return candidate
+    return None
+
+
+def _resolve_order_identifier(result: OrderResult) -> Optional[str]:
+    direct = _extract_order_identifier(result.order_id)
+    if direct:
+        return direct
+    return _extract_order_identifier(result.raw_response)
+
+
+def _normalise_operating_hours(
+    start_raw: Optional[Any],
+    end_raw: Optional[Any],
+) -> Tuple[int, int]:
+    try:
+        start = int(start_raw) if start_raw is not None else 0
+    except (TypeError, ValueError):
+        start = 0
+    try:
+        end = int(end_raw) if end_raw is not None else 24
+    except (TypeError, ValueError):
+        end = 24
+
+    start = max(0, min(24, start))
+    end = max(0, min(24, end))
+
+    if start == end:
+        return 0, 24
+    if start > end:
+        start, end = end, start
+    return start, end
+
+
+def _seconds_until_operating_window(monitor_info: Dict[str, Any]) -> Tuple[int, Optional[datetime]]:
+    start_hour, end_hour = _normalise_operating_hours(
+        monitor_info.get("operating_start_hour"),
+        monitor_info.get("operating_end_hour"),
+    )
+
+    if start_hour <= 0 and end_hour >= 24:
+        return 0, None
+
+    now = datetime.now()
+    current_seconds = now.hour * 3600 + now.minute * 60 + now.second
+    start_seconds = start_hour * 3600
+    end_seconds = end_hour * 3600
+
+    if start_seconds <= current_seconds < end_seconds:
+        return 0, None
+
+    if current_seconds < start_seconds:
+        wait_seconds = start_seconds - current_seconds
+    else:
+        wait_seconds = 24 * 3600 - current_seconds + start_seconds
+
+    next_start = now + timedelta(seconds=wait_seconds)
+    return wait_seconds, next_start
+
+
 @dataclass
 class ResolvedTarget:
     """Resolved booking target with metadata for presentation layers."""
@@ -753,8 +842,10 @@ async def order_once(
             if user:
                 record_message = f"[{user}] {record_message}"
 
+            resolved_order_id = _resolve_order_identifier(result) or "unknown"
+
             await db_manager.save_booking_record(
-                order_id=result.order_id or "unknown",
+                order_id=resolved_order_id,
                 preset=preset,
                 venue_name=f"预设{preset}",
                 field_type_name="未知",
@@ -819,14 +910,8 @@ async def order_once(
                 if notification_context:
                     notify_message = f"{notification_context}\n{result.message}"
 
-                order_identifier = (
-                    result.order_id
-                    or (result.raw_response or {}).get("orderId")
-                    or (result.raw_response or {}).get("data")
-                )
-
                 await send_order_notification(
-                    order_id=str(order_identifier or "unknown"),
+                    order_id=resolved_order_id,
                     user_nickname=user_nickname,
                     venue_name=venue_name,
                     field_type_name=field_type_name,
@@ -1062,98 +1147,6 @@ async def _schedule_pending_payment_reminder(
         )
     )
     _pending_payment_tasks[key] = task
-
-
-def _compute_auto_stop_time(monitor_info: Dict[str, Any]) -> Optional[datetime]:
-    explicit_end = monitor_info.get("end_time")
-    if isinstance(explicit_end, str) and explicit_end.strip():
-        try:
-            return datetime.fromisoformat(explicit_end.strip())
-        except ValueError:
-            pass
-
-    max_runtime = monitor_info.get("max_runtime_minutes")
-    if isinstance(max_runtime, (int, float)) and max_runtime > 0:
-        return datetime.now() + timedelta(minutes=float(max_runtime))
-
-    def _get_value(source: Any, key: str, default: Any = None) -> Any:
-        if source is None:
-            return default
-        if isinstance(source, dict):
-            return source.get(key, default)
-        return getattr(source, key, default)
-
-    target_date: Optional[datetime] = None
-    raw_date = monitor_info.get("date")
-    if isinstance(raw_date, str) and raw_date.strip():
-        try:
-            target_date = datetime.strptime(raw_date.strip(), "%Y-%m-%d")
-        except ValueError:
-            target_date = None
-
-    if target_date is None:
-        day_offsets: List[int] = []
-        preferred_days = monitor_info.get("preferred_days") or []
-        if isinstance(preferred_days, list) and preferred_days:
-            for entry in preferred_days:
-                try:
-                    day_offsets.append(int(entry))
-                except (TypeError, ValueError):
-                    continue
-        else:
-            base_target = monitor_info.get("base_target")
-            offset_value = _get_value(base_target, "date_offset")
-            if isinstance(offset_value, list):
-                for entry in offset_value:
-                    try:
-                        day_offsets.append(int(entry))
-                    except (TypeError, ValueError):
-                        continue
-            elif isinstance(offset_value, int):
-                day_offsets.append(offset_value)
-
-        if day_offsets:
-            max_offset = max(day_offsets)
-            base_date = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
-            target_date = base_date + timedelta(days=max_offset)
-
-    hours: List[int] = []
-    raw_hours = monitor_info.get("preferred_hours")
-    if isinstance(raw_hours, list) and raw_hours:
-        for entry in raw_hours:
-            try:
-                hours.append(int(entry))
-            except (TypeError, ValueError):
-                continue
-
-    if not hours:
-        start_hour_value = monitor_info.get("start_hour")
-        if isinstance(start_hour_value, int):
-            hours.append(start_hour_value)
-        else:
-            base_target = monitor_info.get("base_target")
-            fallback_hour = _get_value(base_target, "start_hour")
-            if isinstance(fallback_hour, int):
-                hours.append(fallback_hour)
-
-    if target_date is None or not hours:
-        return None
-
-    max_hour = max(hours)
-    base_target = monitor_info.get("base_target")
-    duration = _get_value(base_target, "duration_hours", 1) or 1
-
-    if isinstance(target_date, datetime):
-        target_day = target_date.date()
-    else:
-        target_day = target_date
-
-    try:
-        start_dt = datetime.combine(target_day, time(max_hour % 24, 0))
-    except ValueError:
-        return None
-
-    return start_dt + timedelta(hours=float(duration))
 
 
 async def _attempt_order_with_backoff(
@@ -1597,10 +1590,10 @@ async def _notify_schedule_failures(
             f"[定时任务 {job_id}] 用户 {display_name} 在 {start_label}-{end_label} "
             f"尝试 {attempts} 次仍未成功：{result.message}"
         )
-        order_identifier = result.order_id or (result.raw_response or {}).get("orderId") or "unknown"
+        order_identifier = _resolve_order_identifier(result) or "unknown"
         try:
             await send_order_notification(
-                order_id=str(order_identifier),
+                order_id=order_identifier,
                 user_nickname=display_name,
                 venue_name=venue_name,
                 field_type_name=field_type_name,
@@ -1647,10 +1640,10 @@ async def _notify_schedule_successes(
             f"[定时任务 {job_id}] 用户 {display_name} 在 {start_label}-{end_label} "
             f"第 {attempts} 次尝试成功：{result.message}"
         )
-        order_identifier = result.order_id or (result.raw_response or {}).get("orderId") or "unknown"
+        order_identifier = _resolve_order_identifier(result) or "unknown"
         try:
             await send_order_notification(
-                order_id=str(order_identifier),
+                order_id=order_identifier,
                 user_nickname=display_name,
                 venue_name=venue_name,
                 field_type_name=field_type_name,
@@ -1677,8 +1670,8 @@ async def start_monitor(
     auto_book: bool = False,
     require_all_users_success: bool = False,
     max_time_gap_hours: Optional[int] = None,
-    max_runtime_minutes: Optional[int] = None,
-    end_time: Optional[str] = None,
+    operating_start_hour: Optional[int] = None,
+    operating_end_hour: Optional[int] = None,
     base_target: Optional[BookingTarget] = None,
     target_users: Optional[List[str]] = None,
     exclude_users: Optional[List[str]] = None,
@@ -1728,6 +1721,14 @@ async def start_monitor(
         except (TypeError, ValueError):
             max_gap_hours = getattr(default_plan, "max_time_gap_hours", 1)
     max_gap_hours = max(0, min(max_gap_hours, 4))
+
+    start_window = 0 if operating_start_hour is None else int(max(0, min(24, operating_start_hour)))
+    end_window = 24 if operating_end_hour is None else int(max(0, min(24, operating_end_hour)))
+    if start_window == end_window:
+        start_window, end_window = 0, 24
+    if start_window > end_window:
+        start_window, end_window = end_window, start_window
+
     monitor_info = {
         "id": monitor_id,
         "preset": preset,
@@ -1739,8 +1740,8 @@ async def start_monitor(
         "auto_book": auto_book,
         "require_all_users_success": require_all_users_success,
         "max_time_gap_hours": max_gap_hours,
-        "max_runtime_minutes": max_runtime_minutes,
-        "end_time": end_time,
+        "operating_start_hour": start_window,
+        "operating_end_hour": end_window,
         "base_target": working_target,
         "preferred_hours": preferred_hours,
         "preferred_days": preferred_days,
@@ -1754,17 +1755,13 @@ async def start_monitor(
         "exclude_users": list(exclude_users or []),
         "last_notified_signature": None,
         "resolved": None,
+        "window_active": True,
     }
 
-    auto_stop_at = _compute_auto_stop_time(monitor_info)
-    monitor_info["auto_stop_at"] = auto_stop_at.isoformat() if auto_stop_at else None
-    if monitor_info["auto_stop_at"]:
-        monitor_info["run_until"] = monitor_info["auto_stop_at"]
-    
     # 保存到数据库
     db_manager = get_db_manager()
     await db_manager.save_monitor(monitor_info)
-    
+
     _active_monitors[monitor_id] = monitor_info
     
     # 启动监控任务（异步）
@@ -1797,6 +1794,8 @@ async def stop_monitor(monitor_id: str) -> Dict[str, Any]:
     monitor_info = _active_monitors[monitor_id]
     monitor_info["status"] = "stopped"
     monitor_info["stop_time"] = datetime.now().isoformat()
+    monitor_info["window_active"] = False
+    monitor_info.pop("next_window_start", None)
     
     # 更新数据库
     db_manager = get_db_manager()
@@ -1816,6 +1815,8 @@ async def pause_monitor(monitor_id: str) -> Dict[str, Any]:
     monitor_info = _active_monitors.pop(monitor_id)
     monitor_info["status"] = "paused"
     monitor_info["paused_time"] = datetime.now().isoformat()
+    monitor_info["window_active"] = False
+    monitor_info.pop("next_window_start", None)
 
     _paused_monitors[monitor_id] = monitor_info
 
@@ -1836,14 +1837,11 @@ async def resume_monitor(monitor_id: str) -> Dict[str, Any]:
     monitor_info["status"] = "running"
     monitor_info.pop("paused_time", None)
     monitor_info["resume_time"] = datetime.now().isoformat()
+    monitor_info.pop("next_window_start", None)
+    monitor_info["window_active"] = True
 
     _active_monitors[monitor_id] = monitor_info
     del _paused_monitors[monitor_id]
-
-    auto_stop_at = _compute_auto_stop_time(monitor_info)
-    monitor_info["auto_stop_at"] = auto_stop_at.isoformat() if auto_stop_at else None
-    if monitor_info["auto_stop_at"]:
-        monitor_info["run_until"] = monitor_info["auto_stop_at"]
 
     db_manager = get_db_manager()
     await db_manager.save_monitor(monitor_info)
@@ -2039,35 +2037,44 @@ async def _monitor_worker(monitor_id: str) -> None:
     monitor_info = _active_monitors.get(monitor_id)
     if not monitor_info:
         return
-    
+
     monitor_info["status"] = "running"
-    
+    monitor_info.pop("auto_stop_at", None)
+    monitor_info.pop("run_until", None)
+
     # 更新数据库状态
     db_manager = get_db_manager()
     await db_manager.save_monitor(monitor_info)
-    
+
     retry_count = 0
     max_retries = 3
     
     try:
         while monitor_id in _active_monitors and monitor_info["status"] == "running":
-            auto_stop_raw = monitor_info.get("auto_stop_at")
-            if auto_stop_raw:
-                try:
-                    deadline = datetime.fromisoformat(auto_stop_raw)
-                except (TypeError, ValueError):
-                    deadline = None
-                if deadline and datetime.now() >= deadline:
-                    monitor_info["status"] = "completed"
-                    monitor_info["stop_time"] = datetime.now().isoformat()
-                    monitor_info.setdefault("message", "已超过监控时间窗口，自动结束")
+            wait_seconds, next_start = _seconds_until_operating_window(monitor_info)
+            if wait_seconds > 0:
+                next_start_iso = next_start.isoformat() if next_start else None
+                state_changed = False
+                if monitor_info.get("window_active", True):
+                    monitor_info["window_active"] = False
+                    state_changed = True
+                if next_start_iso and monitor_info.get("next_window_start") != next_start_iso:
+                    monitor_info["next_window_start"] = next_start_iso
+                    state_changed = True
+                if state_changed:
                     await db_manager.save_monitor(monitor_info)
-                    break
+                await asyncio.sleep(min(wait_seconds, max(30, monitor_info["interval_seconds"])))
+                continue
+            else:
+                if not monitor_info.get("window_active", True) or monitor_info.get("next_window_start"):
+                    monitor_info["window_active"] = True
+                    monitor_info.pop("next_window_start", None)
+                    await db_manager.save_monitor(monitor_info)
             try:
                 # 执行监控检查
                 await _monitor_check(monitor_id)
                 retry_count = 0  # 重置重试计数
-                
+
                 # 更新数据库
                 await db_manager.save_monitor(monitor_info)
                 
@@ -2310,6 +2317,8 @@ async def _auto_book_from_monitor(monitor_id: str, slots: List[Dict]) -> None:
                 )
                 last_message = result.message
 
+                resolved_order_id = _resolve_order_identifier(result)
+
                 monitor_info["last_booking_results"].append(
                     {
                         "user": user.nickname,
@@ -2321,7 +2330,7 @@ async def _auto_book_from_monitor(monitor_id: str, slots: List[Dict]) -> None:
                         },
                         "success": result.success,
                         "message": result.message,
-                        "order_id": result.order_id,
+                        "order_id": resolved_order_id,
                     }
                 )
 
@@ -2345,7 +2354,7 @@ async def _auto_book_from_monitor(monitor_id: str, slots: List[Dict]) -> None:
                     await _schedule_pending_payment_reminder(
                         monitor_id=monitor_id,
                         user=user,
-                        order_id=result.order_id,
+                        order_id=resolved_order_id,
                         slot=slot,
                         monitor_info=monitor_info,
                     )
