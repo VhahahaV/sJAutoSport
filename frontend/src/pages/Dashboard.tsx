@@ -147,6 +147,8 @@ const DashboardPage = () => {
     };
   });
 
+  const showLoginNotice = !loginStatus || !loginStatus.users || loginStatus.users.length === 0;
+
   return (
     <>
       <div className="content-header">
@@ -156,30 +158,12 @@ const DashboardPage = () => {
         </div>
       </div>
 
-      {/* 默认查询显示 */}
-      {loginStatus && loginStatus.users && loginStatus.users.length > 0 && (
-        <section className="section">
-          <h3>📊 今日场次查询</h3>
-          <div className="dashboard-preset-grid">
-            {dashboardTiles.map((tile) => (
-              <SlotTable
-                key={tile.index}
-                preset={tile.index}
-                venueName={tile.venueName}
-                fieldTypeName={tile.fieldTypeName}
-                displayName={tile.displayName}
-              />
-            ))}
-          </div>
-        </section>
-      )}
-      
-      {(!loginStatus || !loginStatus.users || loginStatus.users.length === 0) && (
+      {showLoginNotice ? (
         <div className="panel notice">
           <strong>⚠️ 未登录</strong>
           <span>请先登录后再查看场次信息。</span>
         </div>
-      )}
+      ) : null}
 
       {error ? (
         <div className="panel notice notice-error">
@@ -207,7 +191,7 @@ const DashboardPage = () => {
         <StatusCard
           title="定时任务"
           value={jobsLoading ? "..." : scheduleJobs}
-          meta="预设执行计划"
+          meta="计划执行数"
         />
       </div>
 
@@ -283,6 +267,24 @@ const DashboardPage = () => {
           )}
         </div>
       </section>
+
+      {/* 今日场次移动至页面底部 */}
+      {loginStatus && loginStatus.users && loginStatus.users.length > 0 ? (
+        <section className="section">
+          <h3>📊 今日场次</h3>
+          <div className="dashboard-preset-grid">
+            {dashboardTiles.map((tile) => (
+              <SlotTable
+                key={tile.index}
+                preset={tile.index}
+                venueName={tile.venueName}
+                fieldTypeName={tile.fieldTypeName}
+                displayName={tile.displayName}
+              />
+            ))}
+          </div>
+        </section>
+      ) : null}
     </>
   );
 };

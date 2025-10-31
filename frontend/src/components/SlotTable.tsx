@@ -87,7 +87,7 @@ const SlotTable = ({ preset, venueName, fieldTypeName, displayName }: SlotTableP
         <tbody>
           {availableSlots.map((slot, index) => (
             <tr key={index}>
-              <td>{slot.slot.start}-{slot.slot.end}</td>
+              <td>{slot.slot.start}</td>
               <td>{slot.slot.field_name || "-"}</td>
               <td>{slot.slot.remain || "-"}</td>
               <td>¥{slot.slot.price || "-"}</td>

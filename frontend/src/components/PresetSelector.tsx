@@ -107,7 +107,7 @@ const PresetSelector = ({ presets, value, onChange, disabled = false, onClear }:
               );
             })
           ) : (
-            <div className="preset-selector__empty">该场馆暂无可用预设</div>
+            <div className="preset-selector__empty">该场馆暂无可用场馆运动</div>
           )
         ) : (
           <div className="preset-selector__hint">请选择一个场馆以查看可预订的运动项目</div>

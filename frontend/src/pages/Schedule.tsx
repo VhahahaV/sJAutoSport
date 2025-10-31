@@ -228,7 +228,7 @@ const SchedulePage = () => {
       <div className="content-header">
         <div>
           <h2>定时任务</h2>
-          <p className="content-subtitle">按固定时间执行预订请求，可配合预设快速配置。</p>
+          <p className="content-subtitle">按固定时间执行预订请求，可配合场馆运动快速配置。</p>
         </div>
       </div>
 
@@ -245,55 +245,7 @@ const SchedulePage = () => {
           </label>
 
           <div className="form-label form-label--full">
-            <span>执行时间</span>
-            <div className="inline-field-group">
-              <label className="inline-field">
-                <span>小时</span>
-                <select
-                  value={executeHour}
-                  onChange={(event) => setExecuteHour(Number(event.target.value))}
-                  className="input"
-                >
-                  {executionHourOptions.map((option) => (
-                    <option key={option.value} value={option.value}>
-                      {option.label}
-                    </option>
-                  ))}
-                </select>
-              </label>
-              <label className="inline-field">
-                <span>分钟</span>
-                <select
-                  value={executeMinute}
-                  onChange={(event) => setExecuteMinute(Number(event.target.value))}
-                  className="input"
-                >
-                  {minuteOptions.map((option) => (
-                    <option key={option.value} value={option.value}>
-                      {option.label}
-                    </option>
-                  ))}
-                </select>
-              </label>
-              <label className="inline-field">
-                <span>秒</span>
-                <select
-                  value={executeSecond}
-                  onChange={(event) => setExecuteSecond(Number(event.target.value))}
-                  className="input"
-                >
-                  {secondOptions.map((option) => (
-                    <option key={option.value} value={option.value}>
-                      {option.label}
-                    </option>
-                  ))}
-                </select>
-              </label>
-            </div>
-          </div>
-
-          <div className="form-label form-label--full">
-            <span>预设（可选）</span>
+            <span>场馆运动（可选）</span>
             <PresetSelector
               presets={presets}
               value={presetIndex}
@@ -303,7 +255,7 @@ const SchedulePage = () => {
           </div>
 
           <label className="form-label">
-            <span>日期</span>
+            <span>预定日期</span>
             <select
               value={selectedDate}
               onChange={(event) => setSelectedDate(event.target.value)}
@@ -324,10 +276,10 @@ const SchedulePage = () => {
               max={START_HOUR_RANGE.max}
               value={startHourRange}
               onChange={setStartHourRange}
-              label="开始小时（可选）"
+              label="预定小时（可选）"
               formatValue={formatHourValue}
             />
-            <span className="muted-text">未限制时，将使用预设或目标配置的默认开始时间。</span>
+            <span className="muted-text">未限制时，将使用场馆运动配置的默认开始时间。</span>
           </div>
 
           <fieldset className="fieldset" style={{ gridColumn: "1 / -1" }}>
@@ -384,6 +336,54 @@ const SchedulePage = () => {
             </div>
           )}
 
+          <div className="form-label form-label--full">
+            <span>执行时间</span>
+            <div className="inline-field-group">
+              <label className="inline-field">
+                <span>小时</span>
+                <select
+                  value={executeHour}
+                  onChange={(event) => setExecuteHour(Number(event.target.value))}
+                  className="input"
+                >
+                  {executionHourOptions.map((option) => (
+                    <option key={option.value} value={option.value}>
+                      {option.label}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <label className="inline-field">
+                <span>分钟</span>
+                <select
+                  value={executeMinute}
+                  onChange={(event) => setExecuteMinute(Number(event.target.value))}
+                  className="input"
+                >
+                  {minuteOptions.map((option) => (
+                    <option key={option.value} value={option.value}>
+                      {option.label}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <label className="inline-field">
+                <span>秒</span>
+                <select
+                  value={executeSecond}
+                  onChange={(event) => setExecuteSecond(Number(event.target.value))}
+                  className="input"
+                >
+                  {secondOptions.map((option) => (
+                    <option key={option.value} value={option.value}>
+                      {option.label}
+                    </option>
+                  ))}
+                </select>
+              </label>
+            </div>
+          </div>
+
           <div className="form-actions">
             <button className="button button-primary" type="submit" disabled={loading}>
               {loading ? "提交中..." : "创建定时任务"}
@@ -418,7 +418,7 @@ const SchedulePage = () => {
                     <th>ID</th>
                     <th>执行时间</th>
                     <th>时段</th>
-                    <th>预设</th>
+                    <th>场馆运动</th>
                     <th>用户</th>
                     <th>状态</th>
                     <th>最近运行</th>

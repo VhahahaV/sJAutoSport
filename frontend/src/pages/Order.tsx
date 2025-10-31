@@ -76,7 +76,7 @@ const OrderPage = () => {
   const handleSubmit = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
     if (!selectedPreset || !selectedDate) {
-      setError("请完整填写预设、日期与开始时间");
+      setError("请完整填写场馆运动、日期与开始时间");
       return;
     }
     try {
@@ -109,14 +109,14 @@ const OrderPage = () => {
       <div className="content-header">
         <div>
           <h2>立即预订</h2>
-          <p className="content-subtitle">使用预设快速下单，可选择指定登录用户。</p>
+          <p className="content-subtitle">使用场馆运动快速下单，可选择指定登录用户。</p>
         </div>
       </div>
 
       <div className="panel">
         <form onSubmit={handleSubmit} className="form-grid">
           <div className="form-label form-label--full">
-            <span>选择预设</span>
+            <span>选择场馆运动</span>
             <PresetSelector
               presets={presets}
               value={selectedPreset}
