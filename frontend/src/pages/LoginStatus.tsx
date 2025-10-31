@@ -87,6 +87,7 @@ const LoginStatusPage = () => {
           ...prev,
           username: candidate.username,
           nickname: candidate.nickname ?? prev.nickname,
+          password: candidate.password_masked ?? prev.password,
         };
       });
     } catch (err) {

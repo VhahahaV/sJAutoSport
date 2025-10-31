@@ -233,14 +233,14 @@ const SlotsPage = () => {
       <div className="content-header">
         <div>
           <h2>查询场地</h2>
-          <p className="content-subtitle">根据预设或自定义条件检索可用时段。</p>
+          <p className="content-subtitle">根据场馆运动或自定义条件检索可用时段。</p>
         </div>
       </div>
 
       <div className="panel">
         <form onSubmit={handleSubmit} className="form-grid">
           <div className="form-label form-label--full">
-            <span>选择预设</span>
+            <span>选择场馆运动</span>
             <PresetSelector
               presets={presets}
               value={selectedPreset}
@@ -334,7 +334,7 @@ const SlotsPage = () => {
               </div>
               {resolved.preset ? (
                 <div>
-                  <strong>预设</strong>：{resolved.preset.index} - {resolved.preset.venue_name} / {resolved.preset.field_type_name}
+                  <strong>场馆运动</strong>：{resolved.preset.index} - {resolved.preset.venue_name} / {resolved.preset.field_type_name}
                 </div>
               ) : null}
             </div>

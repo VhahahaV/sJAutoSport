@@ -431,7 +431,7 @@ const MonitorPage = () => {
           </label>
 
           <div className="form-label form-label--full">
-            <span>预设</span>
+            <span>场馆运动</span>
             <PresetSelector
               presets={presets}
               value={presetIndex}
@@ -713,7 +713,7 @@ const MonitorPage = () => {
                         {String(resolvedLabel || "-")}
                       </div>
                       <div>
-                        <strong>预设：</strong>
+                        <strong>场馆运动：</strong>
                         {presetLabel}
                       </div>
                       <div>
