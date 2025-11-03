@@ -237,7 +237,7 @@ const OrdersPage = () => {
                             type="button"
                             onClick={() => void handleCancel(order)}
                             disabled={Boolean(cancelling[order.pOrderid])}
-                            style={{ minWidth: "140px" }}
+                            style={{ minWidth: "120px", padding: "10px 18px" }}
                           >
                             {cancelling[order.pOrderid] ? "取消中..." : "取消订单"}
                           </button>
