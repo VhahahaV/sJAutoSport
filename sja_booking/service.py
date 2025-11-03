@@ -2213,8 +2213,7 @@ async def _monitor_check(monitor_id: str) -> None:
                     )
 
         filtered_slots = _filter_slots_by_preferences_dict(slots_payload, monitor_info)
-        if filtered_slots:
-            slots_payload = filtered_slots
+        slots_payload = filtered_slots
 
         slots_payload = sorted(
             slots_payload,
