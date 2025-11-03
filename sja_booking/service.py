@@ -1749,8 +1749,8 @@ async def start_monitor(
     if preferred_days is not None:
         working_target.date_offset = list(preferred_days)
         working_target.use_all_dates = False
-    if preferred_hours is not None:
-        working_target.start_hour = preferred_hours[0] if preferred_hours else 18
+    if preferred_hours:
+        working_target.start_hour = preferred_hours[0]
 
     default_plan = getattr(CFG, "MONITOR_PLAN", MonitorPlan())
     if max_time_gap_hours is None:
