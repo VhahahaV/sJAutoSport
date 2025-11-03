@@ -171,6 +171,7 @@ export type OrderRecord = {
   spaceInfo: string;
   ordercreatement: string;
   orderpaytime?: string;
+  scDate?: string;
   countprice: number;
   cancelOrder: boolean;
   name: string;
@@ -467,4 +468,12 @@ export const api = {
     request<Record<string, unknown>>(`/booking/schedules/${jobId}`, {
       method: "DELETE",
     }),
+  cancelOrder: (orderId: string, user?: string) =>
+    request<{ success: boolean; message: string; steps?: unknown[] }>(
+      `/system/orders/${orderId}/cancel`,
+      {
+        method: "POST",
+        body: JSON.stringify({ user }),
+      },
+    ),
 };

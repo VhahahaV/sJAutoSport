@@ -3,7 +3,8 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any, Dict
 
-from fastapi import APIRouter, Query
+from fastapi import APIRouter, HTTPException, Query
+from pydantic import BaseModel
 
 from sja_booking import service
 
@@ -43,3 +44,15 @@ async def get_orders(
 ) -> Dict[str, Any]:
     """获取用户订单列表"""
     return service.get_user_orders(page_no=page_no, page_size=page_size)
+
+
+class CancelOrderRequest(BaseModel):
+    user: str | None = None
+
+
+@router.post("/orders/{order_id}/cancel")
+async def cancel_order(order_id: str, payload: CancelOrderRequest) -> Dict[str, Any]:
+    result = await service.cancel_order(order_id, user=payload.user)
+    if not result.get("success"):
+        raise HTTPException(status_code=400, detail=result.get("message", "订单取消失败"))
+    return result

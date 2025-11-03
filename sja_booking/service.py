@@ -929,6 +929,46 @@ async def order_once(
     return result
 
 
+async def cancel_order(order_id: str, *, user: Optional[str] = None) -> Dict[str, Any]:
+    """取消指定订单，触发退款流程"""
+    order_id_text = str(order_id or "").strip()
+    if not order_id_text:
+        return {"success": False, "message": "订单ID不能为空"}
+
+    api = _create_api(active_user=user)
+    try:
+        responses = api.cancel_order(order_id_text)
+        messages: List[str] = []
+        success = True
+        for entry in responses:
+            if isinstance(entry, dict):
+                code = str(entry.get("code") or entry.get("status") or entry.get("codeEn") or "")
+                msg = entry.get("msg") or entry.get("message") or entry.get("msgEn") or ""
+                if code and code not in {"1", "2", "3"}:
+                    success = False
+                if msg:
+                    messages.append(str(msg))
+                elif code:
+                    messages.append(f"code={code}")
+            else:
+                messages.append(str(entry))
+        if not messages:
+            messages.append("退款流程已提交")
+        return {
+            "success": success,
+            "message": "；".join(messages),
+            "steps": responses,
+        }
+    except Exception as exc:  # pylint: disable=broad-except
+        logger.exception("取消订单失败: %s (user=%s)", order_id_text, user)
+        return {"success": False, "message": str(exc)}
+    finally:
+        try:
+            api.close()
+        except Exception:  # pylint: disable=broad-except
+            pass
+
+
 # =============================================================================
 # 监控和调度相关接口
 # =============================================================================
@@ -3161,6 +3201,20 @@ def get_user_orders(page_no: int = 1, page_size: int = 10) -> Dict[str, Any]:
         for order in user_orders:
             order["userId"] = username
             order["name"] = nickname
+            booking_date = (
+                order.get("scDate")
+                or order.get("scdate")
+                or order.get("orderDate")
+                or order.get("orderdate")
+                or order.get("order_day")
+            )
+            if isinstance(booking_date, str):
+                booking_date = booking_date.strip()
+            if not booking_date:
+                created = order.get("ordercreatement")
+                if isinstance(created, str) and len(created) >= 10:
+                    booking_date = created[:10]
+            order["scDate"] = booking_date
             cleaned_orders.append(order)
 
         cleaned_orders.sort(key=lambda x: x.get("ordercreatement", ""), reverse=True)
