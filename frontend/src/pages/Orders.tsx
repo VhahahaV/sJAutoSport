@@ -110,6 +110,34 @@ const OrdersPage = () => {
     [loadOrders],
   );
 
+  const formatDateLabel = (raw?: string | null) => {
+    if (!raw) return "-";
+    const text = raw.trim();
+    if (!text) return "-";
+    const iso = text.length >= 10 ? text.slice(0, 10).replace(/\//g, "-") : text;
+    const parts = iso.split("-");
+    if (parts.length >= 3) {
+      const month = parts[1]?.padStart(2, "0");
+      const day = parts[2]?.padStart(2, "0");
+      if (month && day) {
+        return `${month}-${day}`;
+      }
+    }
+    return text;
+  };
+
+  const extractStartTime = (raw?: string | null) => {
+    if (!raw) return "-";
+    const text = raw.trim();
+    if (!text) return "-";
+    const match = text.match(/\b(\d{1,2}:\d{2})/);
+    if (match) {
+      const hour = match[1].split(":")[0]?.padStart(2, "0");
+      return hour ? `${hour}:00` : match[1];
+    }
+    return text;
+  };
+
   return (
     <>
       <div className="content-header">
@@ -184,9 +212,8 @@ const OrdersPage = () => {
                   <tr>
                     <th>场馆</th>
                     <th>运动类型</th>
-                    <th>运动时间</th>
+                    <th>开始时间</th>
                     <th>预约日期</th>
-                    <th>价格</th>
                     <th>状态</th>
                     <th>操作</th>
                   </tr>
@@ -196,9 +223,8 @@ const OrdersPage = () => {
                     <tr key={order.pOrderid}>
                       <td>{order.venuename}</td>
                       <td>{order.venname}</td>
-                      <td>{order.spaceInfo}</td>
-                      <td>{order.scDate || (order.ordercreatement ? order.ordercreatement.slice(0, 10) : "-")}</td>
-                      <td>¥{order.countprice.toFixed(2)}</td>
+                      <td>{extractStartTime(order.spaceInfo)}</td>
+                      <td>{formatDateLabel(order.scDate || order.ordercreatement)}</td>
                       <td>
                         <span className={`chip ${order.orderstateid === "1" ? "chip-success" : ""}`}>
                           {statusLabels[order.orderstateid] || order.orderstateid}
@@ -207,10 +233,11 @@ const OrdersPage = () => {
                       <td>
                         {order.orderstateid === "1" ? (
                           <button
-                            className="text-button"
+                            className="button button-danger"
                             type="button"
                             onClick={() => void handleCancel(order)}
                             disabled={Boolean(cancelling[order.pOrderid])}
+                            style={{ minWidth: "140px" }}
                           >
                             {cancelling[order.pOrderid] ? "取消中..." : "取消订单"}
                           </button>
