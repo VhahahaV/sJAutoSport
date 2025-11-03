@@ -24,6 +24,8 @@ const OrdersPage = () => {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [selectedStatus, setSelectedStatus] = useState<OrderStatus>("1");
+  const [message, setMessage] = useState<string | null>(null);
+  const [cancelling, setCancelling] = useState<Record<string, boolean>>({});
   const total = orders.length;
 
   const loadOrders = useCallback(async () => {
@@ -79,6 +81,35 @@ const OrdersPage = () => {
     return filtered;
   }, [ordersByUser, selectedStatus]);
 
+  const handleCancel = useCallback(
+    async (order: OrderRecord) => {
+      if (!order?.pOrderid) {
+        return;
+      }
+      if (!confirm(`确认要取消订单 ${order.pOrderid} 吗？`)) {
+        return;
+      }
+      const orderId = order.pOrderid;
+      setCancelling((prev) => ({ ...prev, [orderId]: true }));
+      setError(null);
+      setMessage(null);
+      try {
+        const result = await api.cancelOrder(orderId, order.userId);
+        await loadOrders();
+        setMessage(result.message || "取消订单请求已提交");
+      } catch (err) {
+        setError((err as Error).message);
+      } finally {
+        setCancelling((prev) => {
+          const next = { ...prev };
+          delete next[orderId];
+          return next;
+        });
+      }
+    },
+    [loadOrders],
+  );
+
   return (
     <>
       <div className="content-header">
@@ -129,6 +160,13 @@ const OrdersPage = () => {
           </div>
         )}
 
+        {message ? (
+          <div className="panel">
+            <strong>提示</strong>
+            <span>{message}</span>
+          </div>
+        ) : null}
+
         {loading && <span className="muted-text">加载订单中…</span>}
 
         {!loading && Object.keys(filteredOrdersByUser).length === 0 && (
@@ -147,9 +185,10 @@ const OrdersPage = () => {
                     <th>场馆</th>
                     <th>运动类型</th>
                     <th>运动时间</th>
-                    <th>下单时间</th>
+                    <th>预约日期</th>
                     <th>价格</th>
                     <th>状态</th>
+                    <th>操作</th>
                   </tr>
                 </thead>
                 <tbody>
@@ -158,12 +197,26 @@ const OrdersPage = () => {
                       <td>{order.venuename}</td>
                       <td>{order.venname}</td>
                       <td>{order.spaceInfo}</td>
-                      <td>{order.ordercreatement}</td>
+                      <td>{order.scDate || (order.ordercreatement ? order.ordercreatement.slice(0, 10) : "-")}</td>
                       <td>¥{order.countprice.toFixed(2)}</td>
                       <td>
                         <span className={`chip ${order.orderstateid === "1" ? "chip-success" : ""}`}>
                           {statusLabels[order.orderstateid] || order.orderstateid}
                         </span>
+                      </td>
+                      <td>
+                        {order.orderstateid === "1" ? (
+                          <button
+                            className="text-button"
+                            type="button"
+                            onClick={() => void handleCancel(order)}
+                            disabled={Boolean(cancelling[order.pOrderid])}
+                          >
+                            {cancelling[order.pOrderid] ? "取消中..." : "取消订单"}
+                          </button>
+                        ) : (
+                          <span className="muted-text">-</span>
+                        )}
                       </td>
                     </tr>
                   ))}

@@ -703,6 +703,35 @@ class SportsAPI:
         )
         return resp.json()
 
+    def cancel_order(self, order_id: str) -> List[Dict[str, Any]]:
+        if not order_id:
+            raise ValueError("cancel_order requires order_id")
+        steps = [
+            (
+                self.endpoints.refund_create_receipt,
+                {"orderId": order_id, "type": "2"},
+            ),
+            (
+                self.endpoints.refund_accept,
+                {"orderId": order_id},
+            ),
+            (
+                self.endpoints.refund_confirm,
+                {"orderId": order_id},
+            ),
+        ]
+        results: List[Dict[str, Any]] = []
+        headers = {"Content-Type": "application/x-www-form-urlencoded"}
+        for path, payload in steps:
+            if not path:
+                continue
+            resp = self._req("POST", path, data=payload, headers=headers)
+            try:
+                results.append(resp.json())
+            except Exception:
+                results.append({"raw": resp.text})
+        return results
+
     # -------------------- utilities --------------------
 
     def resolve_target_dates(self, target: BookingTarget, today: Optional[datetime] = None) -> List[str]:
@@ -783,5 +812,4 @@ class SportsAPI:
         path = "/venue/personal/personalOrderlist"
         resp = self._req("GET", path, params={"pageNo": page_no, "pageSize": page_size})
         return resp.json()
-
 
