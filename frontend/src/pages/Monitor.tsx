@@ -657,12 +657,12 @@ const MonitorPage = () => {
                           暂停任务
                         </button>
                         <button
-                          className="button button-danger"
+                          className="text-button"
                           type="button"
                           onClick={() => handleDelete(monitorKey)}
                           disabled={loading}
                         >
-                          停止任务
+                          终止任务
                         </button>
                       </>
                     );
