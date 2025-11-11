@@ -58,6 +58,30 @@ const PresetSelector = ({ presets, value, onChange, disabled = false, onClear }:
   const handleVenueClick = (option: VenueOption) => {
     if (disabled) return;
     setActiveVenue(option);
+    const sports = presetsByVenue.get(option.key) ?? [];
+    if (sports.length === 0) {
+      return;
+    }
+    const preferredMap: Record<string, string[]> = {
+      "student-center": ["健身", "健身房"],
+      qimo: ["羽毛球"],
+      zijin: ["健身"],
+      "huo-yingdong": ["健身"],
+      nanyang: ["健身"],
+      nanqu: ["篮球"],
+      "east-tennis": ["网球"],
+      huxiaoming: ["网球"],
+    };
+    const preferredKeywords = preferredMap[option.key] || [];
+    let targetPreset = sports[0];
+    for (const keyword of preferredKeywords) {
+      const match = sports.find((preset) => preset.field_type_name?.includes(keyword));
+      if (match) {
+        targetPreset = match;
+        break;
+      }
+    }
+    onChange(targetPreset.index);
   };
 
   const handlePresetClick = (presetIndex: number) => {
@@ -77,7 +101,7 @@ const PresetSelector = ({ presets, value, onChange, disabled = false, onClear }:
             <button
               key={option.key}
               type="button"
-              className={`preset-selector__button ${isActive ? "is-active" : ""}`}
+              className={`preset-selector__button preset-selector__button--venue ${isActive ? "is-active" : ""}`}
               onClick={() => handleVenueClick(option)}
               disabled={isDisabled}
             >

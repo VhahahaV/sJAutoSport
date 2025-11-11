@@ -9,6 +9,7 @@ import time
 import base64
 import random
 import string
+from datetime import datetime, timedelta
 from typing import Any, Dict, List, Optional, Tuple
 from dataclasses import dataclass
 
@@ -17,6 +18,8 @@ from Crypto.Cipher import AES
 from Crypto.Util.Padding import pad
 from Crypto.PublicKey import RSA
 from Crypto.Cipher import PKCS1_v1_5
+
+from .service import logger
 
 from .models import FieldType, Slot, OrderIntent, PresetOption
 from .api import SportsAPI
@@ -29,6 +32,16 @@ class OrderResult:
     message: str
     order_id: Optional[str] = None
     raw_response: Optional[Dict] = None
+
+
+def _next_hour(time_text: str, duration_hours: int = 1) -> str:
+    """Return time string duration_hours after time_text (HH:MM)."""
+    try:
+        base = datetime.strptime(time_text, "%H:%M")
+    except ValueError:
+        return time_text
+    result = base + timedelta(hours=duration_hours)
+    return result.strftime("%H:%M")
 
 
 class OrderManager:
@@ -295,6 +308,7 @@ class OrderManager:
         """
         current_slot = slot
         backoff_base = 2.0
+        last_message: Optional[str] = None
         for attempt in range(max_retries):
             print(f"下单尝试 {attempt + 1}/{max_retries}")
             
@@ -313,6 +327,7 @@ class OrderManager:
                 )
             
             print(f"下单失败: {message}")
+            last_message = message or last_message
 
             # 回退策略：尝试使用简单提交接口 order_immediately（与旧版一致）
             try:
@@ -361,7 +376,7 @@ class OrderManager:
         
         return OrderResult(
             success=False,
-            message=f"下单失败，已重试{max_retries}次",
+            message=f"{(last_message or '下单失败')}，已重试{max_retries}次",
             raw_response=None
         )
     
@@ -425,20 +440,58 @@ class OrderManager:
             )
         
         # 查找匹配的时间段
+        def _normalize(label: Optional[str]) -> Optional[str]:
+            if not label:
+                return None
+            label = str(label).strip()
+            if not label or label in {"-", "--", "?", "null", "None"}:
+                return None
+            if ":" in label:
+                parts = label.split(":", 1)
+                if len(parts) == 2 and parts[0].isdigit():
+                    try:
+                        hour = int(parts[0]) % 24
+                        minute = int(parts[1])
+                        return f"{hour:02d}:{minute:02d}"
+                    except (TypeError, ValueError):
+                        return None
+                return label
+            if label.startswith("slot-") and label[5:].isdigit():
+                hour = (7 + int(label[5:])) % 24
+                return f"{hour:02d}:00"
+            if label.isdigit():
+                hour = int(label) % 24
+                return f"{hour:02d}:00"
+            return None
+
+        normalized_start = _normalize(start_time)
+        normalized_end = _normalize(end_time)
+
         target_slot = None
-        for i, slot in enumerate(slots):
-            # 根据slot索引计算实际时间 - 使用与monitor.py相同的逻辑
-            actual_start_hour = (7 + i) % 24  # slot-0对应07:00
-            actual_start = f"{actual_start_hour:02d}:00"
-            actual_end_hour = (actual_start_hour + 1) % 24
-            actual_end = f"{actual_end_hour:02d}:00"
-            
-            # 使用计算出的实际时间进行匹配
-            if actual_start == start_time and actual_end == end_time and slot.available:
+        debug_matches: List[str] = []
+        for slot in slots:
+            slot_start = _normalize(slot.start)
+            slot_end = _normalize(slot.end) or (slot_start and _next_hour(slot_start, 1))
+            debug_matches.append(
+                f"slot_id={slot.slot_id} start={slot_start} end={slot_end} available={slot.available}"
+            )
+            if (
+                slot.available
+                and slot_start == normalized_start
+                and (normalized_end is None or slot_end == normalized_end)
+            ):
                 target_slot = slot
                 break
-        
+
         if not target_slot:
+            logger.warning(
+                "#CZQ_DEBUG order-by-preset miss preset=%s date=%s requested=%s-%s entries=%s",
+                preset.index,
+                date,
+                normalized_start,
+                normalized_end,
+                debug_matches,
+            )
             return OrderResult(
                 success=False,
                 message=f"未找到可用的时间段 {start_time}-{end_time}"

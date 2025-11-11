@@ -13,6 +13,7 @@ import httpx
 from .models import (
     AuthConfig,
     BookingTarget,
+    DateAvailability,
     EndpointSet,
     FieldType,
     OrderIntent,
@@ -427,35 +428,61 @@ class SportsAPI:
                 field_types.append(FieldType(id=fid, name=name, category=category, raw=item))
         return field_types
 
-    def list_available_dates(self, venue_id: str, field_type_id: str) -> List[Tuple[str, str]]:
-        path = self.endpoints.slot_summary
-        if not path or path == self.endpoints.field_situation:
+    def list_date_availability(self, venue_id: str, field_type_id: str) -> List[DateAvailability]:
+        """Return per-date availability using the date-level reserve summary endpoint."""
+        path = self.endpoints.field_reserve or self.endpoints.slot_summary
+        if not path:
             return []
-        body = {"venueId": venue_id, "fieldType": field_type_id}
+
+        headers = {"Content-Type": "application/x-www-form-urlencoded;charset=UTF-8"}
+        data = {
+            "id": venue_id,
+            "feildType": field_type_id,
+        }
+
         try:
-            resp = self._req(
-                "POST",
-                path,
-                json_body=body,
-                headers={"Content-Type": "application/json;charset=UTF-8"},
-            )
+            resp = self._req("POST", path, data=data, headers=headers)
         except Exception:
             return []
+
         payload = _maybe_parse_json(resp.json())
-        dates: List[Tuple[str, str]] = []
+        entries: List[DateAvailability] = []
         if isinstance(payload, dict):
-            for key in ("data", "result", "list", "rows"):
-                value = payload.get(key)
-                if isinstance(value, list):
-                    for item in value:
-                        if not isinstance(item, dict):
-                            continue
-                        date_str = str(item.get("date") or item.get("dateStr") or "")
-                        token = str(item.get("dateId") or item.get("id") or item.get("token") or "")
-                        if date_str:
-                            dates.append((date_str, token))
-                    break
-        return dates
+            container = payload.get("data") or payload.get("result") or payload.get("list") or payload.get("rows")
+            if isinstance(container, list):
+                for item in container:
+                    if not isinstance(item, dict):
+                        continue
+                    date_str = str(item.get("date") or item.get("dateStr") or "").strip()
+                    if not date_str:
+                        continue
+                    token = item.get("dateId") or item.get("id") or item.get("token")
+                    is_all_raw = item.get("isAll")
+                    open_raw = item.get("open")
+                    is_all = bool(is_all_raw) if isinstance(is_all_raw, bool) else str(is_all_raw).lower() in {"true", "1", "yes"}
+                    open_flag = True
+                    if open_raw is not None:
+                        open_flag = bool(open_raw) if isinstance(open_raw, bool) else str(open_raw).lower() in {"true", "1", "yes"}
+                    entries.append(
+                        DateAvailability(
+                            date=date_str,
+                            token=str(token) if token else None,
+                            open=open_flag,
+                            is_all=is_all,
+                            raw=item,
+                        )
+                    )
+        entries.sort(key=lambda entry: entry.date)
+        return entries
+
+    def list_available_dates(self, venue_id: str, field_type_id: str) -> List[Tuple[str, str]]:
+        """Backward compatible helper returning only selectable dates and tokens."""
+        availability = self.list_date_availability(venue_id, field_type_id)
+        results: List[Tuple[str, str]] = []
+        for entry in availability:
+            if entry.open and not entry.is_all:
+                results.append((entry.date, entry.token or ""))
+        return results
 
     def query_slots(self, venue_id: str, field_type_id: str, date_str: str, *, date_token: Optional[str] = None, original_field_type: Optional[FieldType] = None) -> List[Slot]:
         body: Dict[str, Any] = {
@@ -812,4 +839,3 @@ class SportsAPI:
         path = "/venue/personal/personalOrderlist"
         resp = self._req("GET", path, params={"pageNo": page_no, "pageSize": page_size})
         return resp.json()
-

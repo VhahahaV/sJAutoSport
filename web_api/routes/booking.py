@@ -11,7 +11,8 @@ from pydantic import BaseModel, Field
 
 import config as CFG
 from sja_booking import service
-from sja_booking.models import BookingTarget, PresetOption, Slot
+from sja_booking.czq_debug import end as czq_debug_end, start as czq_debug_start
+from sja_booking.models import BookingTarget, DateAvailability, PresetOption, Slot
 from sja_booking.service import SlotAvailability, SlotListResult
 
 router = APIRouter(prefix="/booking", tags=["booking"])
@@ -53,6 +54,27 @@ def _serialize_slot_availability(entry: SlotAvailability) -> Dict[str, Any]:
     return {
         "date": entry.date,
         "slot": _serialize_slot(entry.slot),
+    }
+
+
+def _serialize_resolved_target(resolved: service.ResolvedTarget) -> Dict[str, Any]:
+    return {
+        "label": resolved.label,
+        "venue_id": resolved.venue_id,
+        "venue_name": resolved.venue_name,
+        "field_type_id": resolved.field_type_id,
+        "field_type_name": resolved.field_type_name,
+        "preset": _serialize_preset(resolved.preset) if resolved.preset else None,
+    }
+
+
+def _serialize_date_availability(entry: DateAvailability) -> Dict[str, Any]:
+    return {
+        "date": entry.date,
+        "token": entry.token,
+        "open": entry.open,
+        "is_all": entry.is_all,
+        "selectable": entry.selectable,
     }
 
 
@@ -114,16 +136,8 @@ def _aggregate_by_date(entries: List[SlotAvailability]) -> List[Dict[str, Any]]:
 
 
 def _serialize_slot_result(result: SlotListResult) -> Dict[str, Any]:
-    resolved = result.resolved
     return {
-        "resolved": {
-            "label": resolved.label,
-            "venue_id": resolved.venue_id,
-            "venue_name": resolved.venue_name,
-            "field_type_id": resolved.field_type_id,
-            "field_type_name": resolved.field_type_name,
-            "preset": _serialize_preset(resolved.preset) if resolved.preset else None,
-        },
+        "resolved": _serialize_resolved_target(result.resolved),
         "slots": [_serialize_slot_availability(entry) for entry in result.slots],
         "aggregated_days": _aggregate_by_date(result.slots),
     }
@@ -234,6 +248,21 @@ class SlotQuery(BaseModel):
     target: Optional[TargetOverride] = None
     all_days: bool = False
     incremental: bool = False
+
+
+class ImmediateAvailabilityRequest(BaseModel):
+    preset: Optional[int] = None
+    venue_id: Optional[str] = None
+    field_type_id: Optional[str] = None
+    target: Optional[TargetOverride] = None
+    date: Optional[str] = Field(None, description="指定日期（可选）")
+    include_slots: bool = False
+
+
+class ImmediateSlotsRequest(ImmediateAvailabilityRequest):
+    date: str = Field(..., description="YYYY-MM-DD 日期字符串")
+    show_full: bool = True
+    include_slots: bool = False
 
 
 class OrderRequest(BaseModel):
@@ -368,6 +397,156 @@ async def query_slots(body: SlotQuery) -> Dict[str, Any]:
         all_dates=body.all_days,
     )
     return _serialize_slot_result(result)
+
+
+@router.post("/immediate/availability")
+async def immediate_availability(body: ImmediateAvailabilityRequest) -> Dict[str, Any]:
+    base_target = _build_target(body.target)
+    span = czq_debug_start(
+        f"immediate_availability preset={body.preset} venue={body.venue_id} field={body.field_type_id} include_slots={body.include_slots}"
+    )
+    availability = await service.list_date_availability(
+        preset=body.preset,
+        venue_id=body.venue_id,
+        field_type_id=body.field_type_id,
+        base_target=base_target,
+    )
+    date_payload = [_serialize_date_availability(entry) for entry in availability.dates]
+    valid_dates = {entry.date for entry in availability.dates}
+    requested_date = body.date if (body.date and body.date in valid_dates) else None
+    selected_date = requested_date or availability.default_date
+    if selected_date and selected_date not in valid_dates:
+        selected_date = availability.dates[0].date if availability.dates else None
+
+    entries_payload: List[Dict[str, Any]] = []
+    slots_payload: List[Dict[str, Any]] = []
+
+    if body.include_slots and selected_date:
+        detail_span = czq_debug_start(
+            f"immediate_availability.detail preset={body.preset} date={selected_date}"
+        )
+        slots_result = await service.list_slots(
+            preset=body.preset,
+            venue_id=body.venue_id,
+            field_type_id=body.field_type_id,
+            date=selected_date,
+            show_full=True,
+            base_target=base_target,
+        )
+        serialized = _serialize_slot_result(slots_result)
+        aggregated_days = serialized.get("aggregated_days", []) or []
+        day_payload = next((day for day in aggregated_days if day.get("date") == selected_date), None)
+        entries_payload = []
+        if day_payload:
+            entries_payload = [entry for entry in day_payload.get("entries", []) if (entry.get("available_count") or 0) > 0]
+        slots_payload = [
+            entry
+            for entry in serialized["slots"]
+            if entry.get("date") == selected_date and entry.get("slot", {}).get("available")
+        ]
+        if not entries_payload:
+            fallback_entries: List[Dict[str, Any]] = []
+            for slot_entry in slots_payload:
+                slot_info = slot_entry.get("slot") or {}
+                start = slot_info.get("start")
+                end = slot_info.get("end")
+                if not start or not end:
+                    continue
+                fallback_entries.append(
+                    {
+                        "date": selected_date,
+                        "start": start,
+                        "end": end,
+                        "site_count": 1,
+                        "available_count": 1,
+                        "total_remain": slot_info.get("remain"),
+                        "min_price": slot_info.get("price"),
+                        "max_price": slot_info.get("price"),
+                    }
+                )
+            entries_payload = fallback_entries
+        entries_payload.sort(key=lambda item: (item.get("start") or "", item.get("end") or ""))
+        czq_debug_end(
+            "immediate_availability.detail",
+            detail_span,
+            extra=f"preset={body.preset} date={selected_date} entries={len(entries_payload)} slots={len(slots_payload)}",
+        )
+
+    response_payload: Dict[str, Any] = {
+        "resolved": _serialize_resolved_target(availability.resolved),
+        "dates": date_payload,
+        "default_date": availability.default_date,
+        "selected_date": selected_date,
+    }
+    if body.include_slots:
+        response_payload["entries"] = entries_payload
+        response_payload["slots"] = slots_payload
+    czq_debug_end(
+        "immediate_availability",
+        span,
+        extra=f"preset={body.preset} dates={len(date_payload)} selected={selected_date} include_slots={body.include_slots}",
+    )
+    return response_payload
+
+
+@router.post("/immediate/slots")
+async def immediate_slots(body: ImmediateSlotsRequest) -> Dict[str, Any]:
+    base_target = _build_target(body.target)
+    span = czq_debug_start(
+        f"immediate_slots preset={body.preset} date={body.date} venue={body.venue_id} field={body.field_type_id}"
+    )
+    result = await service.list_slots(
+        preset=body.preset,
+        venue_id=body.venue_id,
+        field_type_id=body.field_type_id,
+        date=body.date,
+        show_full=body.show_full,
+        base_target=base_target,
+    )
+    serialized = _serialize_slot_result(result)
+    aggregated_days = serialized.get("aggregated_days", []) or []
+    day_payload = next((day for day in aggregated_days if day.get("date") == body.date), None)
+    filtered_entries = []
+    if day_payload:
+        filtered_entries = [entry for entry in day_payload.get("entries", []) if (entry.get("available_count") or 0) > 0]
+    filtered_slots = [
+        entry
+        for entry in serialized["slots"]
+        if entry.get("date") == body.date and entry.get("slot", {}).get("available")
+    ]
+    if not filtered_entries:
+        fallback_entries: List[Dict[str, Any]] = []
+        for slot_entry in filtered_slots:
+            slot_payload = slot_entry.get("slot") or {}
+            start = slot_payload.get("start")
+            end = slot_payload.get("end")
+            if not start or not end:
+                continue
+            fallback_entries.append(
+                {
+                    "date": body.date,
+                    "start": start,
+                    "end": end,
+                    "site_count": 1,
+                    "available_count": 1,
+                    "total_remain": slot_payload.get("remain"),
+                    "min_price": slot_payload.get("price"),
+                    "max_price": slot_payload.get("price"),
+                }
+            )
+        filtered_entries = fallback_entries
+    filtered_entries.sort(key=lambda item: (item.get("start") or "", item.get("end") or ""))
+    czq_debug_end(
+        "immediate_slots",
+        span,
+        extra=f"preset={body.preset} date={body.date} entries={len(filtered_entries)} slots={len(filtered_slots)}",
+    )
+    return {
+        "resolved": serialized["resolved"],
+        "date": body.date,
+        "entries": filtered_entries,
+        "slots": filtered_slots,
+    }
 
 
 # ---------------------------------------------------------------------------

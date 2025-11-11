@@ -126,6 +126,21 @@ class FieldType:
 
 
 @dataclass
+class DateAvailability:
+    """Single date-level availability indicator returned by reserve summary endpoint."""
+
+    date: str
+    token: Optional[str] = None
+    open: bool = True
+    is_all: bool = False
+    raw: Dict[str, Any] = field(default_factory=dict)
+
+    @property
+    def selectable(self) -> bool:
+        return self.open and not self.is_all
+
+
+@dataclass
 class Slot:
     slot_id: str
     start: str

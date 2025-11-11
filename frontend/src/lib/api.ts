@@ -226,6 +226,30 @@ export type AggregatedSlotsByDay = {
   entries: AggregatedSlotEntry[];
 };
 
+export type DateAvailabilityStatus = {
+  date: string;
+  token?: string | null;
+  open: boolean;
+  is_all: boolean;
+  selectable: boolean;
+};
+
+export type ImmediateAvailabilityResponse = {
+  resolved: SlotQueryResponse["resolved"];
+  dates: DateAvailabilityStatus[];
+  default_date?: string | null;
+  selected_date?: string | null;
+  entries?: AggregatedSlotEntry[];
+  slots?: SlotAvailability[];
+};
+
+export type ImmediateSlotsResponse = {
+  resolved: SlotQueryResponse["resolved"];
+  date: string;
+  entries: AggregatedSlotEntry[];
+  slots: SlotAvailability[];
+};
+
 export type SlotQueryResponse = {
   resolved: {
     label: string;
@@ -287,8 +311,24 @@ export type OrderRequestBody = {
   preset: number;
   date: string;
   start_time: string;
+  end_time?: string;
   user?: string;
   target?: Record<string, unknown>;
+};
+
+export type ImmediateAvailabilityRequest = {
+  preset?: number;
+  venue_id?: string;
+  field_type_id?: string;
+  target?: Record<string, unknown>;
+  date?: string;
+  include_slots?: boolean;
+};
+
+export type ImmediateSlotsRequest = ImmediateAvailabilityRequest & {
+  date: string;
+  show_full?: boolean;
+  include_slots?: boolean;
 };
 
 export type MonitorRequestBody = {
@@ -413,6 +453,16 @@ export const api = {
   // Booking actions
   querySlots: (payload: SlotQueryRequest) =>
     request<SlotQueryResponse>("/booking/slots", {
+      method: "POST",
+      body: JSON.stringify(payload),
+    }),
+  getImmediateAvailability: (payload: ImmediateAvailabilityRequest) =>
+    request<ImmediateAvailabilityResponse>("/booking/immediate/availability", {
+      method: "POST",
+      body: JSON.stringify(payload),
+    }),
+  getImmediateSlots: (payload: ImmediateSlotsRequest) =>
+    request<ImmediateSlotsResponse>("/booking/immediate/slots", {
       method: "POST",
       body: JSON.stringify(payload),
     }),
