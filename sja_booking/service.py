@@ -7,9 +7,11 @@ import os
 import random
 import re
 import uuid
+from collections import deque
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone, time
-from typing import Any, Dict, Iterable, List, Optional, Set, Tuple
+from time import monotonic
+from typing import Any, Deque, Dict, Iterable, List, Optional, Sequence, Set, Tuple
 
 logger = logging.getLogger(__name__)
 
@@ -79,6 +81,191 @@ def _resolve_order_identifier(result: OrderResult) -> Optional[str]:
     if direct:
         return direct
     return _extract_order_identifier(result.raw_response)
+
+
+def resolve_order_identifier(result: OrderResult) -> Optional[str]:
+    """Public wrapper to expose order id extraction to API layer."""
+    return _resolve_order_identifier(result)
+
+
+@dataclass(frozen=True)
+class OrderScopeInfo:
+    key: str
+    category: str
+    venue_id: Optional[str]
+    venue_name: Optional[str]
+    field_type_id: Optional[str]
+    field_type_name: Optional[str]
+
+
+_ACTIVE_ORDER_STATES: Set[str] = {"pending_payment", "confirmed"}
+
+
+def _normalize_label(value: Optional[str]) -> str:
+    return str(value or "").strip()
+
+
+def _detect_activity_category(
+    venue_name: Optional[str],
+    field_type_name: Optional[str],
+) -> str:
+    text = f"{venue_name or ''} {field_type_name or ''}".lower()
+    if any(keyword in text for keyword in ("健身", "gym", "fitness")):
+        return "gym"
+    if "羽毛球" in text or "badminton" in text:
+        return "badminton"
+    if "网球" in text or "tennis" in text:
+        return "tennis"
+    if "篮球" in text or "basketball" in text:
+        return "basketball"
+    return (_normalize_label(field_type_name) or _normalize_label(venue_name) or "unknown").lower()
+
+
+def _build_order_scope(
+    *,
+    venue_id: Optional[str],
+    venue_name: Optional[str],
+    field_type_id: Optional[str],
+    field_type_name: Optional[str],
+) -> OrderScopeInfo:
+    venue_component = _normalize_label(venue_id) or _normalize_label(venue_name) or "unknown-venue"
+    field_component = _normalize_label(field_type_id) or _normalize_label(field_type_name) or "any"
+    category = _detect_activity_category(venue_name, field_type_name)
+    scope_key = f"{venue_component.lower()}|{field_component.lower()}|{category}"
+    return OrderScopeInfo(
+        key=scope_key,
+        category=category,
+        venue_id=venue_id,
+        venue_name=venue_name,
+        field_type_id=field_type_id,
+        field_type_name=field_type_name,
+    )
+
+
+def _normalize_user_key(user_obj: Optional[UserAuth], identifier: Optional[str]) -> str:
+    for candidate in (
+        _normalize_label(identifier),
+        _normalize_label(getattr(user_obj, "username", None)),
+        _normalize_label(getattr(user_obj, "nickname", None)),
+    ):
+        if candidate:
+            return candidate
+    return "anonymous"
+
+
+def _reservation_index_key(user_key: str, scope_key: str, date: str) -> str:
+    return f"{user_key}|{scope_key}|{date}"
+
+
+def _ensure_reservation_index(container: Dict[str, Any]) -> Dict[str, Any]:
+    index = container.get("reservation_index")
+    if not isinstance(index, dict):
+        index = {}
+        container["reservation_index"] = index
+    return index
+
+
+async def _record_order_status_entry(
+    *,
+    user_key: str,
+    scope: OrderScopeInfo,
+    date: str,
+    status: str,
+    order_id: Optional[str],
+    source: Optional[str],
+    message: Optional[str],
+) -> None:
+    db_manager = get_db_manager()
+    await db_manager.upsert_order_status(
+        user_key=user_key,
+        scope_key=scope.key,
+        venue_id=scope.venue_id,
+        venue_name=scope.venue_name,
+        field_type_id=scope.field_type_id,
+        field_type_name=scope.field_type_name,
+        category=scope.category,
+        date=date,
+        status=status,
+        order_id=order_id,
+        source=source,
+        message=message,
+    )
+
+
+async def _get_existing_order_status(
+    *,
+    user_key: str,
+    scope_key: str,
+    date: str,
+) -> Optional[Dict[str, Any]]:
+    db_manager = get_db_manager()
+    record = await db_manager.get_order_status(user_key, scope_key, date)
+    if record and str(record.get("status") or "") in _ACTIVE_ORDER_STATES:
+        return record
+    return None
+
+
+async def _get_existing_order_status_for_dates(
+    *,
+    user_key: str,
+    scope_key: str,
+    dates: Sequence[str],
+) -> Dict[str, Dict[str, Any]]:
+    db_manager = get_db_manager()
+    records = await db_manager.get_order_status_for_dates(user_key, scope_key, list(dates))
+    filtered: Dict[str, Dict[str, Any]] = {}
+    for date_key, record in records.items():
+        if str(record.get("status") or "") in _ACTIVE_ORDER_STATES:
+            filtered[date_key] = record
+    return filtered
+
+
+def _format_existing_order_message(
+    *,
+    venue_name: Optional[str],
+    field_type_name: Optional[str],
+    date: str,
+    status: Optional[str],
+    order_id: Optional[str],
+) -> str:
+    status_label = "待支付" if status == "pending_payment" else "已预订"
+    order_label = order_id or "未知订单"
+    venue_label = venue_name or "该场馆"
+    field_label = field_type_name or "项目"
+    return f"{venue_label} · {field_label} {date} 已存在{status_label}订单（{order_label}），跳过重复下单。"
+
+
+async def _notify_existing_order(
+    *,
+    user_label: str,
+    venue_name: Optional[str],
+    field_type_name: Optional[str],
+    date: str,
+    order_id: Optional[str],
+    message: str,
+) -> None:
+    if not getattr(CFG, "ENABLE_NOTIFICATION", True):
+        return
+    try:
+        from .notification import send_order_notification
+    except Exception:  # pylint: disable=broad-except
+        return
+    try:
+        await send_order_notification(
+            order_id=order_id or f"existing-{date}",
+            user_nickname=user_label or "未知用户",
+            venue_name=venue_name or "未知场馆",
+            field_type_name=field_type_name or "未知项目",
+            date=date,
+            start_time="-",
+            end_time="-",
+            success=True,
+            message=message,
+            target_groups=getattr(CFG, "NOTIFICATION_TARGETS", {}).get("groups"),
+            target_users=getattr(CFG, "NOTIFICATION_TARGETS", {}).get("users"),
+        )
+    except Exception:  # pylint: disable=broad-except
+        logger.debug("发送已有订单通知失败", exc_info=True)
 
 
 def _normalise_operating_hours(
@@ -249,10 +436,16 @@ def _resolve_slot_labels(slot: Slot, fallback_hour: Optional[int]) -> Tuple[str,
 
 def _availability_to_dict(entry: SlotAvailability) -> Dict[str, Any]:
     slot = entry.slot
+    resolved_hour = _normalise_slot_times(slot)
+    start_label = slot.start or (f"{resolved_hour:02d}:00" if resolved_hour is not None else "-")
+    end_label = slot.end
+    if (not end_label or end_label == "-") and start_label not in {None, "-"}:
+        end_label = _next_hour(start_label, getattr(slot, "duration_hours", 1))
+
     return {
         "date": entry.date,
-        "start": slot.start,
-        "end": slot.end,
+        "start": start_label,
+        "end": end_label,
         "available": slot.available,
         "remain": slot.remain,
         "price": slot.price,
@@ -260,6 +453,7 @@ def _availability_to_dict(entry: SlotAvailability) -> Dict[str, Any]:
         "area_name": slot.area_name,
         "slot_id": slot.slot_id,
         "sign": slot.sign,
+        "sub_site_id": slot.sub_site_id,
     }
 
 
@@ -375,8 +569,13 @@ async def list_field_types(venue_id: str) -> List[FieldType]:
     return await asyncio.to_thread(_list_field_types_sync, venue_id)
 
 
-def _list_date_availability_sync(venue_id: str, field_type_id: str) -> List[DateAvailability]:
-    api = _create_api()
+def _list_date_availability_sync(
+    venue_id: str,
+    field_type_id: str,
+    *,
+    active_user: Optional[str] = None,
+) -> List[DateAvailability]:
+    api = _create_api(active_user=active_user)
     try:
         return api.list_date_availability(venue_id, field_type_id)
     finally:
@@ -396,10 +595,12 @@ async def list_date_availability(
         field_type_id=field_type_id,
         base_target=base_target,
     )
+    active_user = await _next_query_user_identifier()
     dates = await asyncio.to_thread(
         _list_date_availability_sync,
         resolved.venue_id,
         resolved.field_type_id,
+        active_user=active_user,
     )
     # Ensure consistent ordering and deduplicate by date
     seen: Dict[str, DateAvailability] = {}
@@ -741,8 +942,9 @@ def _list_slots_sync(
     show_full: bool,
     base_target: Optional[BookingTarget],
     all_dates: bool,
+    active_user: Optional[str] = None,
 ) -> SlotListResult:
-    api = _create_api()
+    api = _create_api(active_user=active_user)
     try:
         preset_option = _get_preset(preset)
         reference_target = base_target or getattr(CFG, "TARGET", BookingTarget())
@@ -806,6 +1008,7 @@ async def list_slots(
     base_target: Optional[BookingTarget] = None,
     all_dates: bool = False,
 ) -> SlotListResult:
+    active_user = await _next_query_user_identifier()
     return await asyncio.to_thread(
         _list_slots_sync,
         preset=preset,
@@ -816,6 +1019,7 @@ async def list_slots(
         show_full=show_full,
         base_target=base_target,
         all_dates=all_dates,
+        active_user=active_user,
     )
 
 
@@ -884,6 +1088,51 @@ async def order_once(
         except Exception:  # pylint: disable=broad-except
             normalized_end = normalized_start
 
+    preset_option = _get_preset(preset)
+    if not preset_option:
+        return OrderResult(success=False, message=f"未找到预设 {preset}")
+
+    user_obj = _find_user(user)
+    user_key = _normalize_user_key(user_obj, user)
+    scope = _build_order_scope(
+        venue_id=preset_option.venue_id,
+        venue_name=preset_option.venue_name,
+        field_type_id=preset_option.field_type_id,
+        field_type_name=preset_option.field_type_name,
+    )
+
+    enforce_user_limit = user_key != "anonymous"
+
+    if enforce_user_limit:
+        existing_record = await _get_existing_order_status(
+            user_key=user_key,
+            scope_key=scope.key,
+            date=normalized_date,
+        )
+        if existing_record:
+            message = _format_existing_order_message(
+                venue_name=scope.venue_name,
+                field_type_name=scope.field_type_name,
+                date=normalized_date,
+                status=existing_record.get("status"),
+                order_id=existing_record.get("order_id"),
+            )
+            user_label = _normalize_label(getattr(user_obj, "nickname", None)) or user_key
+            await _notify_existing_order(
+                user_label=user_label,
+                venue_name=scope.venue_name,
+                field_type_name=scope.field_type_name,
+                date=normalized_date,
+                order_id=existing_record.get("order_id"),
+                message=message,
+            )
+            return OrderResult(
+                success=False,
+                message=message,
+                order_id=existing_record.get("order_id"),
+                raw_response={"skipped": "existing_order"},
+            )
+
     result = await asyncio.to_thread(
         _order_once_sync,
         preset=preset,
@@ -919,6 +1168,17 @@ async def order_once(
             )
         except Exception as e:
             print(f"保存预订记录失败: {e}")
+        
+        if result.success and enforce_user_limit:
+            await _record_order_status_entry(
+                user_key=user_key,
+                scope=scope,
+                date=normalized_date,
+                status="pending_payment",
+                order_id=_resolve_order_identifier(result),
+                source=notification_context or "manual",
+                message=result.message,
+            )
         
         if result.success and CFG.ENABLE_ORDER_NOTIFICATION:
             try:
@@ -960,13 +1220,8 @@ async def order_once(
                 if not user_nickname:
                     user_nickname = "未知用户"
 
-                venue_name = f"预设{preset}"
-                field_type_name = "未知"
-                for preset_option in CFG.PRESET_TARGETS:
-                    if preset_option.index == preset:
-                        venue_name = preset_option.venue_name
-                        field_type_name = preset_option.field_type_name
-                        break
+                venue_name = scope.venue_name or f"预设{preset}"
+                field_type_name = scope.field_type_name or "未知"
 
                 notify_message = result.message
                 if notification_context:
@@ -1016,6 +1271,19 @@ async def cancel_order(order_id: str, *, user: Optional[str] = None) -> Dict[str
                 messages.append(str(entry))
         if not messages:
             messages.append("退款流程已提交")
+        
+        # 取消订单成功后，删除对应的订单状态索引
+        if success:
+            try:
+                db_manager = get_db_manager()
+                deleted = await db_manager.delete_order_status_by_order_id(order_id_text)
+                if deleted:
+                    logger.info("已删除订单状态索引: order_id=%s", order_id_text)
+                else:
+                    logger.debug("未找到对应的订单状态索引: order_id=%s", order_id_text)
+            except Exception as e:  # pylint: disable=broad-except
+                logger.warning("删除订单状态索引时出错: order_id=%s, error=%s", order_id_text, e)
+        
         return {
             "success": success,
             "message": "；".join(messages),
@@ -1041,6 +1309,100 @@ _scheduled_jobs: Dict[str, Dict] = {}
 _pending_payment_tasks: Dict[str, asyncio.Task] = {}
 _paused_monitors: Dict[str, Dict[str, Any]] = {}
 _auth_manager = AuthManager()
+_QUERY_USER_CYCLE_TTL = 180.0  # seconds
+_query_user_cycle: Deque[str] = deque()
+_query_user_cycle_refreshed_at: float = 0.0
+_query_cycle_lock: Optional[asyncio.Lock] = None
+_query_cycle_last_used: Optional[str] = None
+
+
+def _get_query_cycle_lock() -> asyncio.Lock:
+    global _query_cycle_lock
+    if _query_cycle_lock is None:
+        _query_cycle_lock = asyncio.Lock()
+    return _query_cycle_lock
+
+
+def _resolve_cycle_identifier(entry: Dict[str, Any]) -> Optional[str]:
+    candidates: List[str] = []
+    for key in ("nickname", "username", "key"):
+        value = entry.get(key)
+        if isinstance(value, str) and value.strip():
+            candidates.append(value.strip())
+    for candidate in candidates:
+        if _find_user(candidate):
+            return candidate
+    return None
+
+
+async def _refresh_query_user_cycle_locked() -> None:
+    global _query_user_cycle, _query_user_cycle_refreshed_at, _query_cycle_last_used
+    candidate_identifiers: List[str] = []
+    status: Optional[Dict[str, Any]] = None
+    try:
+        status = await asyncio.to_thread(login_status)
+    except Exception as exc:  # pylint: disable=broad-except
+        logger.warning("刷新在线用户列表失败，将回退到本地凭据: %s", exc)
+
+    users_payload = status.get("users") if isinstance(status, dict) else None
+    if isinstance(users_payload, list):
+        for entry in users_payload:
+            if not isinstance(entry, dict):
+                continue
+            identifier = _resolve_cycle_identifier(entry)
+            if identifier:
+                candidate_identifiers.append(identifier)
+
+    cookies_map, _ = _auth_manager.load_all_cookies()
+    for key, record in cookies_map.items():
+        identifier = _resolve_cycle_identifier(
+            {
+                "nickname": record.get("nickname"),
+                "username": record.get("username"),
+                "key": key,
+            }
+        )
+        if identifier:
+            candidate_identifiers.append(identifier)
+
+    for user in getattr(CFG.AUTH, "users", []) or []:
+        if not (user.cookie or user.token):
+            continue
+        identifier = user.nickname or user.username
+        if identifier:
+            candidate_identifiers.append(identifier)
+
+    deduped: List[str] = []
+    seen: Set[str] = set()
+    for identifier in candidate_identifiers:
+        normalized = identifier.strip()
+        if not normalized or normalized in seen:
+            continue
+        seen.add(normalized)
+        deduped.append(normalized)
+
+    if _query_cycle_last_used and _query_cycle_last_used in deduped and len(deduped) > 1:
+        start_idx = (deduped.index(_query_cycle_last_used) + 1) % len(deduped)
+        deduped = deduped[start_idx:] + deduped[:start_idx]
+
+    _query_user_cycle = deque(deduped)
+    _query_user_cycle_refreshed_at = monotonic()
+
+
+async def _next_query_user_identifier() -> Optional[str]:
+    global _query_cycle_last_used
+    lock = _get_query_cycle_lock()
+    async with lock:
+        now = monotonic()
+        needs_refresh = not _query_user_cycle or (now - _query_user_cycle_refreshed_at) >= _QUERY_USER_CYCLE_TTL
+        if needs_refresh:
+            await _refresh_query_user_cycle_locked()
+        if not _query_user_cycle:
+            return None
+        identifier = _query_user_cycle[0]
+        _query_user_cycle.rotate(-1)
+        _query_cycle_last_used = identifier
+        return identifier
 
 
 @dataclass
@@ -1058,6 +1420,9 @@ class LoginSession:
 
 _login_sessions: Dict[str, LoginSession] = {}
 _LOGIN_SESSION_TIMEOUT = timedelta(minutes=5)
+_TEST_FIELD_CACHE: Dict[str, Dict[str, Any]] = {}
+_TEST_FIELD_FAIL_THRESHOLD = 3
+_TEST_FIELD_CACHE_TTL = 3 * 3600  # seconds
 
 
 def _pending_task_key(user_identifier: Optional[str], order_id: Optional[str]) -> Optional[str]:
@@ -1065,6 +1430,75 @@ def _pending_task_key(user_identifier: Optional[str], order_id: Optional[str]) -
         return None
     owner = (user_identifier or "").strip() or "__default__"
     return f"{owner}:{order_id}"
+
+
+def _cleanup_test_field_cache(now: Optional[float] = None) -> None:
+    """Remove expired cached test fields."""
+    current = now or monotonic()
+    expired_keys: List[str] = []
+    for key, entry in _TEST_FIELD_CACHE.items():
+        expires_at = entry.get("expires_at")
+        try:
+            if expires_at is not None and float(expires_at) <= current:
+                expired_keys.append(key)
+        except Exception:
+            expired_keys.append(key)
+    for key in expired_keys:
+        _TEST_FIELD_CACHE.pop(key, None)
+
+
+def _test_field_key(slot: Dict[str, Any], monitor_info: Optional[Dict[str, Any]] = None) -> Optional[str]:
+    """Build a stable key to identify a slot/field across attempts."""
+    venue_id = None
+    resolved = monitor_info.get("resolved") if isinstance(monitor_info, dict) else None
+    if isinstance(resolved, dict):
+        venue_id = resolved.get("venue_id") or resolved.get("venueId")
+    if not venue_id and isinstance(monitor_info, dict):
+        venue_id = monitor_info.get("venue_id") or monitor_info.get("venueId")
+
+    field_marker = (
+        slot.get("slot_id")
+        or slot.get("sign")
+        or slot.get("sub_site_id")
+        or slot.get("subSiteId")
+        or slot.get("field_name")
+    )
+    date_str = slot.get("date") or (monitor_info.get("date") if isinstance(monitor_info, dict) else None)
+    start_label = slot.get("start")
+    if not field_marker:
+        return None
+    return "|".join(
+        str(part or "").strip()
+        for part in (venue_id or "unknown", field_marker, date_str or "", start_label or "")
+    )
+
+
+def _should_skip_test_field(cache_key: Optional[str]) -> bool:
+    if not cache_key:
+        return False
+    _cleanup_test_field_cache()
+    entry = _TEST_FIELD_CACHE.get(cache_key)
+    if not entry:
+        return False
+    count = entry.get("count", 0)
+    return count >= _TEST_FIELD_FAIL_THRESHOLD
+
+
+def _record_test_field_failure(cache_key: Optional[str], reason: Optional[str] = None) -> None:
+    if not cache_key:
+        return
+    _cleanup_test_field_cache()
+    entry = _TEST_FIELD_CACHE.setdefault(cache_key, {"count": 0})
+    entry["count"] = int(entry.get("count", 0) or 0) + 1
+    if reason:
+        entry["reason"] = reason
+    entry["expires_at"] = monotonic() + _TEST_FIELD_CACHE_TTL
+
+
+def _clear_test_field_flag(cache_key: Optional[str]) -> None:
+    if not cache_key:
+        return
+    _TEST_FIELD_CACHE.pop(cache_key, None)
 
 
 async def _fetch_order_record(user_identifier: Optional[str], order_id: str) -> Optional[Dict[str, Any]]:
@@ -1169,7 +1603,7 @@ async def _pending_payment_reminder_loop(
     preferred_hours: Optional[Iterable[int]],
     max_time_gap_hours: int,
     slot_hour: Optional[int],
-    interval_seconds: int = 180,
+    interval_seconds: int = 270,
     max_attempts: int = 5,
 ) -> None:
     preferred_set: Set[int] = set()
@@ -1477,6 +1911,143 @@ async def _prepare_schedule_slots(
         base_target=base_target,
         job_id="manual",  # 手动调用时的任务ID
     )
+
+
+async def _refresh_slot_pool(
+    *,
+    job_id: str,
+    preset_option: Optional[PresetOption],
+    date: str,
+    hours: Optional[Iterable[int]],
+    base_target: Optional[BookingTarget],
+) -> Dict[int, List[Slot]]:
+    """实时拉取场次，填充/更新 slot_pool。"""
+    if not preset_option:
+        return {}
+
+    hours_set: Optional[Set[int]] = None
+    if hours is not None:
+        hours_set = set()
+        for entry in hours:
+            try:
+                hours_set.add(int(entry))
+            except Exception:  # pylint: disable=broad-except
+                continue
+
+    try:
+        result = await list_slots(
+            preset=preset_option.index,
+            date=date,
+            start_hour=None,
+            show_full=True,
+            base_target=base_target,
+        )
+    except Exception as exc:  # pylint: disable=broad-except
+        logger.warning("[schedule:%s] 实时刷新场次失败: %s", job_id, exc)
+        return {}
+
+    refreshed: Dict[int, List[Slot]] = {}
+    for entry in result.slots:
+        slot_hour = _normalise_slot_times(entry.slot)
+        if slot_hour is None:
+            continue
+        if hours_set is not None and slot_hour not in hours_set:
+            continue
+        if not entry.slot.available:
+            continue
+        slot_copy = dataclasses.replace(entry.slot)
+        refreshed.setdefault(slot_hour, []).append(slot_copy)
+
+    for hour, slots in refreshed.items():
+        slots.sort(
+            key=lambda s: (
+                -(s.remain or 0),
+                s.field_name or "",
+                s.sign or "",
+            )
+        )
+
+    return refreshed
+
+
+async def _direct_order_attempt(
+    *,
+    job_id: str,
+    hour: int,
+    users: List[UserAuth],
+    preset_option: PresetOption,
+    date: str,
+    request_timeout: float,
+    base_target: Optional[BookingTarget],
+) -> Dict[str, Dict[str, Any]]:
+    """在无缓存时，直接查询目标小时的场次并并行抢票。"""
+    try:
+        live_slots = await list_slots(
+            preset=preset_option.index,
+            date=date,
+            start_hour=hour,
+            show_full=False,
+            base_target=base_target,
+        )
+    except Exception as exc:  # pylint: disable=broad-except
+        logger.warning("[schedule:%s] 直接查询小时 %s 失败: %s", job_id, hour, exc)
+        return {}
+
+    available_slots: List[Slot] = []
+    for entry in live_slots.slots:
+        slot_hour = _normalise_slot_times(entry.slot)
+        if slot_hour is None or slot_hour != hour:
+            continue
+        if not entry.slot.available:
+            continue
+        available_slots.append(dataclasses.replace(entry.slot))
+
+    # 如果目标小时仍然没有场次，尝试使用全量结果中对应小时的场次
+    if not available_slots:
+        for entry in live_slots.slots:
+            slot_hour = _normalise_slot_times(entry.slot)
+            if slot_hour is None or slot_hour != hour:
+                continue
+            available_slots.append(dataclasses.replace(entry.slot))
+
+    if not available_slots:
+        return {}
+
+    available_slots.sort(
+        key=lambda s: (
+            -(s.remain or 0),
+            s.field_name or "",
+            s.sign or "",
+        )
+    )
+
+    # 只挑一两个代表性场次进行并行下单，避免过多请求
+    trimmed_slots = available_slots[:2]
+    aggregated_results: Dict[str, Dict[str, Any]] = {}
+    for slot in trimmed_slots:
+        attempt_results = await _parallel_attempt_for_slot(
+            job_id=job_id,
+            hour=hour,
+            slot=slot,
+            users=users,
+            preset_option=preset_option,
+            date=date,
+            request_timeout=request_timeout,
+            max_retries=_SCHEDULE_ORDER_MAX_RETRIES,
+        )
+        # 合并结果：后续尝试不覆盖已成功的用户
+        for identifier, payload in attempt_results.items():
+            if identifier in aggregated_results and aggregated_results[identifier]["result"].success:
+                continue
+            aggregated_results[identifier] = payload
+
+        # 如果至少有一个成功且不要求所有用户，这个小时可提前结束
+        if any(payload["result"].success for payload in attempt_results.values()):
+            break
+
+        await asyncio.sleep(0.08)
+
+    return aggregated_results
 
 
 def _place_order_with_slot_sync(
@@ -1788,6 +2359,7 @@ async def start_monitor(
     start_hour: Optional[int] = None,
     interval_seconds: int = 240,
     auto_book: bool = False,
+    long_running: bool = False,
     require_all_users_success: bool = False,
     max_time_gap_hours: Optional[int] = None,
     operating_start_hour: Optional[int] = None,
@@ -1810,6 +2382,7 @@ async def start_monitor(
         start_hours: 开始小时列表（例如 [18,19]）
         interval_seconds: 监控间隔（秒）
         auto_book: 是否自动预订
+        long_running: 是否在成功预订后持续运行
         base_target: 基础目标配置
         
     Returns:
@@ -1842,11 +2415,26 @@ async def start_monitor(
             max_gap_hours = getattr(default_plan, "max_time_gap_hours", 1)
     max_gap_hours = max(0, min(max_gap_hours, 4))
 
-    start_window = 0 if operating_start_hour is None else int(max(0, min(24, operating_start_hour)))
-    end_window = 24 if operating_end_hour is None else int(max(0, min(24, operating_end_hour)))
+    # 处理每日运行时段
+    # 如果收到 None，使用默认值 09:00 - 18:00
+    # 如果收到 0 和 24，表示全天运行
+    if operating_start_hour is None:
+        start_window = 9
+    else:
+        start_window = int(max(0, min(24, operating_start_hour)))
+    
+    if operating_end_hour is None:
+        end_window = 18
+    else:
+        end_window = int(max(0, min(24, operating_end_hour)))
+    
+    # 如果开始和结束时间相同，或者明确设置为 0 和 24，表示全天运行
     if start_window == end_window:
         start_window, end_window = 0, 24
-    if start_window > end_window:
+    elif start_window == 0 and end_window == 24:
+        # 明确的全天运行，保持 0 和 24
+        pass
+    elif start_window > end_window:
         start_window, end_window = end_window, start_window
 
     monitor_info = {
@@ -1858,6 +2446,7 @@ async def start_monitor(
         "start_hour": start_hour,
         "interval_seconds": interval_seconds,
         "auto_book": auto_book,
+        "long_running": bool(long_running),
         "require_all_users_success": require_all_users_success,
         "max_time_gap_hours": max_gap_hours,
         "operating_start_hour": start_window,
@@ -1877,6 +2466,8 @@ async def start_monitor(
         "resolved": None,
         "window_active": True,
         "user_booking_history": {},
+        "last_cycle_completed_at": None,
+        "reservation_index": {},
     }
 
     # 保存到数据库
@@ -2290,6 +2881,7 @@ async def _monitor_check(monitor_id: str) -> None:
                             "area_name": slot_info.get("area_name"),
                             "slot_id": slot_info.get("slot_id"),
                             "sign": slot_info.get("sign"),
+                            "sub_site_id": slot_info.get("sub_site_id"),
                         }
                     )
 
@@ -2303,6 +2895,20 @@ async def _monitor_check(monitor_id: str) -> None:
                 str(item.get("start") or ""),
             ),
         )
+
+        blocked_slots: List[str] = []
+        usable_slots: List[Dict[str, Any]] = []
+        for slot in slots_payload:
+            cache_key = _test_field_key(slot, monitor_info)
+            if _should_skip_test_field(cache_key):
+                if cache_key:
+                    blocked_slots.append(cache_key)
+                continue
+            usable_slots.append(slot)
+
+        if blocked_slots:
+            monitor_info["skipped_test_fields"] = blocked_slots
+        slots_payload = usable_slots
 
         monitor_info["resolved"] = resolved_payload
         monitor_info["found_slots"] = slots_payload
@@ -2365,6 +2971,65 @@ async def _notify_monitor_slots(
         print(f"发送监控通知失败: {exc}")
 
 
+def _resolve_monitor_preset_index(monitor_info: Dict[str, Any]) -> Optional[int]:
+    preset_value = monitor_info.get("preset")
+    if preset_value is not None:
+        try:
+            return int(preset_value)
+        except (TypeError, ValueError):
+            pass
+
+    resolved = monitor_info.get("resolved") or {}
+    venue_id = str(resolved.get("venue_id") or monitor_info.get("venue_id") or "").strip()
+    field_type_id = str(resolved.get("field_type_id") or monitor_info.get("field_type_id") or "").strip()
+    venue_name = str(resolved.get("venue_name") or monitor_info.get("venue_keyword") or "").strip().lower()
+    field_type_name = str(resolved.get("field_type_name") or monitor_info.get("field_type_keyword") or "").strip().lower()
+
+    for option in _iter_presets():
+        if venue_id and field_type_id:
+            if str(option.venue_id) == venue_id and str(option.field_type_id) == field_type_id:
+                return option.index
+        if venue_name and field_type_name:
+            opt_venue = (option.venue_name or "").strip().lower()
+            opt_field = (option.field_type_name or "").strip().lower()
+            if opt_venue == venue_name and opt_field == field_type_name:
+                return option.index
+    return None
+
+
+async def _notify_monitor_skip_reason(monitor_info: Dict[str, Any], monitor_id: str, reason: str) -> None:
+    """Notify user when auto-book is skipped so the reason is visible in bot messages."""
+    if not reason or not getattr(CFG, "ENABLE_NOTIFICATION", True):
+        return
+    if monitor_info.get("_last_skip_reason") == reason:
+        return
+    monitor_info["_last_skip_reason"] = reason
+
+    try:
+        from .notification import get_notification_service
+    except Exception as exc:  # pylint: disable=broad-except
+        logger.warning("加载通知服务失败，无法发送跳过原因: %s", exc)
+        return
+
+    resolved = monitor_info.get("resolved") or {}
+    venue_name = resolved.get("venue_name") or monitor_info.get("venue_name") or monitor_info.get("venue_keyword")
+    field_type_name = resolved.get("field_type_name") or monitor_info.get("field_type_id") or monitor_info.get("field_type_keyword")
+    lines = [f"📡 监控任务 {monitor_id} 自动预订未执行"]
+    if venue_name or field_type_name:
+        lines.append(f"目标：{venue_name or '-'} / {field_type_name or '-'}")
+    lines.append(f"原因：{reason}")
+
+    try:
+        service = get_notification_service()
+        await service.broadcast(
+            "\n".join(lines),
+            target_groups=getattr(CFG, "NOTIFICATION_TARGETS", {}).get("groups"),
+            target_users=getattr(CFG, "NOTIFICATION_TARGETS", {}).get("users"),
+        )
+    except Exception as exc:  # pylint: disable=broad-except
+        logger.warning("发送监控跳过通知失败: %s", exc)
+
+
 async def _auto_book_from_monitor(monitor_id: str, slots: List[Dict]) -> None:
     """从监控结果自动预订"""
     monitor_info = _active_monitors.get(monitor_id)
@@ -2373,14 +3038,48 @@ async def _auto_book_from_monitor(monitor_id: str, slots: List[Dict]) -> None:
 
     monitor_info["booking_attempts"] += 1
     monitor_info.setdefault("last_booking_results", [])
+    preset_index = _resolve_monitor_preset_index(monitor_info)
+    if preset_index is None:
+        reason = "监控未关联有效预设，无法自动下单"
+        monitor_info["last_booking_results"].append(
+            {
+                "user": None,
+                "username": None,
+                "success": False,
+                "message": reason,
+            }
+        )
+        monitor_info["last_booking_error"] = reason
+        await _notify_monitor_skip_reason(monitor_info, monitor_id, reason)
+        return
+
+    monitor_info["preset"] = preset_index
+    resolved_ctx = monitor_info.get("resolved") or {}
+    scope = _build_order_scope(
+        venue_id=monitor_info.get("venue_id") or resolved_ctx.get("venue_id"),
+        venue_name=resolved_ctx.get("venue_name") or monitor_info.get("venue_keyword"),
+        field_type_id=monitor_info.get("field_type_id") or resolved_ctx.get("field_type_id"),
+        field_type_name=resolved_ctx.get("field_type_name") or monitor_info.get("field_type_keyword"),
+    )
+    reservation_index = _ensure_reservation_index(monitor_info)
 
     base_target = monitor_info.get("base_target") or BookingTarget()
     target_users = list(getattr(base_target, "target_users", []) or [])
     exclude_users = set(getattr(base_target, "exclude_users", []) or [])
 
     history: Dict[str, Dict[str, Any]] = monitor_info.setdefault("user_booking_history", {})
+    long_running = bool(monitor_info.get("long_running"))
 
-    available_users = [u for u in getattr(CFG.AUTH, "users", []) or [] if u.cookie]
+    available_users = [u for u in getattr(CFG.AUTH, "users", []) or [] if (u.cookie or u.token)]
+    if not available_users:
+        reason = "没有可用的登录账号，已跳过自动预订"
+        monitor_info["last_booking_results"].append(
+            {"user": None, "username": None, "success": False, "message": reason}
+        )
+        monitor_info["last_booking_error"] = reason
+        await _notify_monitor_skip_reason(monitor_info, monitor_id, reason)
+        return
+
     if target_users:
         user_sequence = [u for u in available_users if u.nickname in target_users]
     else:
@@ -2388,6 +3087,15 @@ async def _auto_book_from_monitor(monitor_id: str, slots: List[Dict]) -> None:
 
     if not user_sequence:
         user_sequence = available_users[:1]
+
+    if not user_sequence:
+        reason = "未找到符合条件的账号，已跳过自动预订"
+        monitor_info["last_booking_results"].append(
+            {"user": None, "username": None, "success": False, "message": reason}
+        )
+        monitor_info["last_booking_error"] = reason
+        await _notify_monitor_skip_reason(monitor_info, monitor_id, reason)
+        return
 
     def _history_key(user_obj: UserAuth) -> str:
         return user_obj.nickname or user_obj.username or "anonymous"
@@ -2404,7 +3112,19 @@ async def _auto_book_from_monitor(monitor_id: str, slots: List[Dict]) -> None:
     # 逐个用户尝试预订
     successful_users: List[str] = []
     used_slot_keys: Set[str] = set()
-    reference_hour: Optional[int] = None
+    slot_usage: Dict[str, int] = {}
+    slot_capacity: Dict[str, int] = {}
+    total_capacity = 0
+    def _slot_capacity(slot_item: Dict[str, Any]) -> int:
+        candidates = [slot_item.get("remain"), slot_item.get("capacity")]
+        for value in candidates:
+            try:
+                parsed = int(value)
+                if parsed > 0:
+                    return parsed
+            except Exception:  # pylint: disable=broad-except
+                continue
+        return 1
 
     def _slot_key(slot_item: Dict[str, Any]) -> str:
         return str(
@@ -2413,13 +3133,112 @@ async def _auto_book_from_monitor(monitor_id: str, slots: List[Dict]) -> None:
             or f"{slot_item.get('date')}|{slot_item.get('start')}|{slot_item.get('field_name')}"
         )
 
+    for slot in slots:
+        if not slot.get("available", False):
+            continue
+        key = _slot_key(slot)
+        cap = _slot_capacity(slot)
+        slot_capacity[key] = max(1, cap)
+        total_capacity += max(1, cap)
+
+    slot_dates_all = sorted(
+        {
+            str(slot.get("date"))
+            for slot in slots
+            if slot.get("date") and slot.get("available", False)
+        }
+    )
+
+    if require_all_success and total_capacity < len(user_sequence):
+        monitor_info["last_booking_results"].append(
+            {
+                "user": None,
+                "username": None,
+                "success": False,
+                "message": f"可用场次数 ({total_capacity}) 少于用户数 ({len(user_sequence)}), 本轮跳过自动预订",
+            }
+        )
+        monitor_info["last_booking_error"] = "可用场次数不足，已跳过"
+        await _notify_monitor_skip_reason(
+            monitor_info,
+            monitor_id,
+            f"可用场次数 ({total_capacity}) 少于用户数 ({len(user_sequence)})，已跳过自动预订",
+        )
+        return
+
+    reference_hour: Optional[int] = None
+
     for user_index, user in enumerate(user_sequence, 1):
         last_message = "未尝试"
         success_for_user = False
         user_id = user.username or user.nickname
+        user_key = _normalize_user_key(user, user_id)
 
         history_key = _history_key(user)
         booking_record = history.get(history_key)
+
+        if slot_dates_all:
+            existing_status_map = await _get_existing_order_status_for_dates(
+                user_key=user_key,
+                scope_key=scope.key,
+                dates=slot_dates_all,
+            )
+        else:
+            existing_status_map = {}
+
+        existing_block = None
+        for date_key in sorted(existing_status_map.keys()):
+            record = existing_status_map.get(date_key)
+            if record:
+                existing_block = (date_key, record)
+                break
+
+        if existing_block:
+            date_key, record = existing_block
+            message = _format_existing_order_message(
+                venue_name=scope.venue_name,
+                field_type_name=scope.field_type_name,
+                date=date_key,
+                status=record.get("status"),
+                order_id=record.get("order_id"),
+            )
+            index_key = _reservation_index_key(user_key, scope.key, date_key)
+            cached = reservation_index.get(index_key)
+            if not cached or cached.get("order_id") != record.get("order_id") or cached.get("status") != "existing":
+                user_label = user.nickname or user.username or user_key
+                await _notify_existing_order(
+                    user_label=user_label,
+                    venue_name=scope.venue_name,
+                    field_type_name=scope.field_type_name,
+                    date=date_key,
+                    order_id=record.get("order_id"),
+                    message=message,
+                )
+            reservation_index[index_key] = {
+                "status": "existing",
+                "order_id": record.get("order_id"),
+                "date": date_key,
+                "updated_at": datetime.now().isoformat(),
+            }
+            monitor_info["last_booking_results"].append(
+                {
+                    "user": user.nickname,
+                    "username": user.username,
+                    "slot": {"date": date_key, "start": None, "end": None},
+                    "success": True,
+                    "message": message,
+                    "order_id": record.get("order_id"),
+                }
+            )
+            success_for_user = True
+            successful_users.append(user.nickname or user.username or user_key)
+            history[history_key] = {
+                "date": date_key,
+                "hour": None,
+                "timestamp": datetime.now().isoformat(),
+            }
+            monitor_info["last_booking_error"] = None
+            continue
 
         filtered_slots: List[Dict[str, Any]] = []
         for slot in slots:
@@ -2427,6 +3246,9 @@ async def _auto_book_from_monitor(monitor_id: str, slots: List[Dict]) -> None:
                 continue
             key = _slot_key(slot)
             if key in used_slot_keys:
+                continue
+            capacity_left = slot_capacity.get(key, 1) - slot_usage.get(key, 0)
+            if capacity_left <= 0:
                 continue
             slot_hour = _slot_dict_hour(slot)
             if require_all_success and reference_hour is not None and not _hour_within_gap(reference_hour, slot_hour, max_gap_hours):
@@ -2438,13 +3260,32 @@ async def _auto_book_from_monitor(monitor_id: str, slots: List[Dict]) -> None:
                     continue
                 if last_hour is not None and (slot_hour is None or abs(slot_hour - last_hour) > 1):
                     continue
+            cache_key = _test_field_key(slot, monitor_info)
+            if _should_skip_test_field(cache_key):
+                continue
             filtered_slots.append(slot)
 
         for slot_index, slot in enumerate(filtered_slots, 1):
             slot_hour = _slot_dict_hour(slot)
             if require_all_success and reference_hour is not None and not _hour_within_gap(reference_hour, slot_hour, max_gap_hours):
                 continue
+            cache_key = _test_field_key(slot, monitor_info)
+            if _should_skip_test_field(cache_key):
+                continue
+            key = _slot_key(slot)
+            capacity_left = slot_capacity.get(key, 1) - slot_usage.get(key, 0)
+            if capacity_left <= 0:
+                continue
 
+            logger.info(
+                "#CZQ_DEBUG monitor-order attempt monitor=%s user=%s slot_date=%s start=%s available=%s remain=%s",
+                monitor_id,
+                user.nickname or user.username,
+                slot.get("date"),
+                slot.get("start"),
+                slot.get("available"),
+                slot.get("remain"),
+            )
             try:
                 result = await order_once(
                     preset=monitor_info["preset"],
@@ -2473,30 +3314,35 @@ async def _auto_book_from_monitor(monitor_id: str, slots: List[Dict]) -> None:
                         "order_id": resolved_order_id,
                     }
                 )
+                last_result_entry = monitor_info["last_booking_results"][-1]
+                date_label = slot.get("date") or monitor_info.get("date") or "-"
+                skipped_existing = isinstance(result.raw_response, dict) and result.raw_response.get("skipped") == "existing_order"
 
                 if result.success:
                     monitor_info["successful_bookings"] += 1
                     success_for_user = True
-                    successful_users.append(user.nickname)
-                    used_slot_keys.add(_slot_key(slot))
+                    successful_users.append(user.nickname or user.username or user_key)
+                    slot_usage[key] = slot_usage.get(key, 0) + 1
+                    if slot_usage[key] >= slot_capacity.get(key, 1):
+                        used_slot_keys.add(key)
 
                     if reference_hour is None and slot_hour is not None:
                         reference_hour = slot_hour
+                    _clear_test_field_flag(cache_key)
 
                     history[history_key] = {
                         "date": slot.get("date"),
                         "hour": slot_hour,
                         "timestamp": datetime.now().isoformat(),
                     }
+                    index_key = _reservation_index_key(user_key, scope.key, date_label)
+                    reservation_index[index_key] = {
+                        "status": "pending_payment",
+                        "order_id": resolved_order_id,
+                        "date": date_label,
+                        "updated_at": datetime.now().isoformat(),
+                    }
                     
-                    # 如果不需要所有用户成功，第一个成功就完成
-                    if not require_all_success:
-                        monitor_info["status"] = "completed"
-                    
-                    # 如果需要所有用户成功，检查是否所有用户都成功了
-                    if require_all_success and len(successful_users) == len(user_sequence):
-                        monitor_info["status"] = "completed"
-
                     await _schedule_pending_payment_reminder(
                         monitor_id=monitor_id,
                         user=user,
@@ -2512,10 +3358,38 @@ async def _auto_book_from_monitor(monitor_id: str, slots: List[Dict]) -> None:
                         result=result,
                     )
                     break
+                if skipped_existing:
+                    success_for_user = True
+                    successful_users.append(user.nickname or user.username or user_key)
+                    last_result_entry["success"] = True
+                    index_key = _reservation_index_key(user_key, scope.key, date_label)
+                    reservation_index[index_key] = {
+                        "status": "existing",
+                        "order_id": resolved_order_id,
+                        "date": date_label,
+                        "updated_at": datetime.now().isoformat(),
+                    }
+                    history[history_key] = {
+                        "date": date_label,
+                        "hour": slot_hour,
+                        "timestamp": datetime.now().isoformat(),
+                    }
+                    monitor_info["last_booking_error"] = None
+                    break
 
             except Exception as exc:  # pylint: disable=broad-except
                 last_message = str(exc)
+                _record_test_field_failure(cache_key, last_message)
                 monitor_info["last_booking_error"] = last_message
+                logger.warning(
+                    "#CZQ_DEBUG monitor-order exception monitor=%s user=%s error=%s",
+                    monitor_id,
+                    user.nickname or user.username,
+                    exc,
+                )
+            else:
+                if not result.success:
+                    _record_test_field_failure(cache_key, last_message)
 
             await asyncio.sleep(min(6.0, 2.0 + slot_index * 1.5))
 
@@ -2546,8 +3420,18 @@ async def _auto_book_from_monitor(monitor_id: str, slots: List[Dict]) -> None:
         if user_index < len(user_sequence) and monitor_info.get("status") != "completed":
             await asyncio.sleep(2.5)
     
-    # 如果要求所有用户成功但未全部成功，任务状态保持为running
-    if require_all_success and len(successful_users) < len(user_sequence):
+    if require_all_success:
+        cycle_completed = len(successful_users) == len(user_sequence) and bool(user_sequence)
+    else:
+        cycle_completed = len(successful_users) > 0
+
+    if cycle_completed:
+        if long_running:
+            monitor_info["status"] = "running"
+            monitor_info["last_cycle_completed_at"] = datetime.now().isoformat()
+        else:
+            monitor_info["status"] = "completed"
+    else:
         monitor_info["status"] = "running"
 
     monitor_info["user_booking_history"] = history
@@ -2718,7 +3602,7 @@ async def _execute_scheduled_job(job_id: str) -> None:
         job_info["start_hours"] = start_hours
         job_info["start_hour"] = start_hours[0] if start_hours else None
 
-        available_users = [u for u in getattr(CFG.AUTH, "users", []) or [] if u.cookie]
+        available_users = [u for u in getattr(CFG.AUTH, "users", []) or [] if (u.cookie or u.token)]
         if target_users:
             lowered_targets = {item.lower() for item in target_users}
             user_sequence = [
@@ -2803,6 +3687,16 @@ async def _execute_scheduled_job(job_id: str) -> None:
                 base_target=base_target,
                 job_id=job_id,
             )
+        if not slot_pool:
+            refreshed = await _refresh_slot_pool(
+                job_id=job_id,
+                preset_option=preset_option,
+                date=target_date,
+                hours=start_hours if start_hours else None,
+                base_target=base_target,
+            )
+            if refreshed:
+                slot_pool = refreshed
 
         attempt_counts: Dict[str, int] = {identifier: 0 for identifier in identifier_map}
         results_map: Dict[str, Dict[str, Any]] = {}
@@ -2841,6 +3735,7 @@ async def _execute_scheduled_job(job_id: str) -> None:
                         preset_option=preset_option,
                         date=target_date,
                         request_timeout=request_timeout,
+                        base_target=base_target,
                     )
                     if direct_results:
                         for identifier, payload in direct_results.items():
@@ -2863,6 +3758,20 @@ async def _execute_scheduled_job(job_id: str) -> None:
                 except Exception as e:
                     logger.warning("[schedule:%s] 直接下单尝试失败: %s", job_id, e)
                 continue
+
+            if not slots_for_hour:
+                refreshed = await _refresh_slot_pool(
+                    job_id=job_id,
+                    preset_option=preset_option,
+                    date=target_date,
+                    hours=[hour],
+                    base_target=base_target,
+                )
+                if refreshed:
+                    slot_pool.update(refreshed)
+                    slots_for_hour = slot_pool.get(hour, [])
+                if not slots_for_hour:
+                    continue
 
             for slot in slots_for_hour:
                 parallel_results = await _parallel_attempt_for_slot(
@@ -2911,6 +3820,20 @@ async def _execute_scheduled_job(job_id: str) -> None:
                 ]
                 if constrained:
                     candidate_hours = constrained
+
+            if slot_pool and candidate_hours:
+                missing_hours = [hour for hour in candidate_hours if hour not in slot_pool]
+                if missing_hours:
+                    refreshed = await _refresh_slot_pool(
+                        job_id=job_id,
+                        preset_option=preset_option,
+                        date=target_date,
+                        hours=missing_hours,
+                        base_target=base_target,
+                    )
+                    if refreshed:
+                        slot_pool.update(refreshed)
+                        hours_to_try = sorted(set(hours_to_try + list(refreshed.keys())))
 
             for identifier in list(remaining_identifiers):
                 user = identifier_map.get(identifier)

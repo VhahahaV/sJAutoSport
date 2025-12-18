@@ -18,6 +18,7 @@ const HOUR_RANGE = {
   max: BOOKING_HOURS[BOOKING_HOURS.length - 1],
 } as const;
 const OPERATING_RANGE = { min: 0, max: 24 } as const;
+const DEFAULT_OPERATING_WINDOW: [number, number] = [9, 18];
 
 const createMonitorId = () => `monitor-${Date.now().toString(36).slice(-6)}`;
 
@@ -90,15 +91,18 @@ const MonitorPage = () => {
 
   const [monitorId, setMonitorId] = useState(createMonitorId());
   const [presetIndex, setPresetIndex] = useState<number | "">("");
-  const [intervalMinutes, setIntervalMinutes] = useState(15);
+  const [intervalMinutes, setIntervalMinutes] = useState(3);
   const [autoBook, setAutoBook] = useState(true);  // 默认打开
+  const [longRunning, setLongRunning] = useState(false);
   const [requireAllUsersSuccess, setRequireAllUsersSuccess] = useState(false);
   const [includeAllTargets, setIncludeAllTargets] = useState(true);
   const [selectedTargetUsers, setSelectedTargetUsers] = useState<string[]>([]);
   const [preferredHourRange, setPreferredHourRange] = useState<[number, number] | null>(null);
-  const [preferredDayRange, setPreferredDayRange] = useState<[number, number] | null>(null);
-  const [operatingHourRange, setOperatingHourRange] = useState<[number, number] | null>(null);
+  const [preferredDayRange, setPreferredDayRange] = useState<[number, number] | null>([0, 0]);
+  const [operatingHourRange, setOperatingHourRange] =
+    useState<[number, number] | null>(DEFAULT_OPERATING_WINDOW);
   const [deleteAllLoading, setDeleteAllLoading] = useState(false);
+  const [selectedSport, setSelectedSport] = useState<string>("");
 
   const userOptions = useMemo<UserOption[]>(
     () =>
@@ -144,6 +148,74 @@ const MonitorPage = () => {
     return mapping;
   }, [users]);
 
+  const sportOptions = useMemo(() => {
+    // 只保留两个批量监控选项：健身房、羽毛球
+    const flags = {
+      gym: false,
+      badminton: false,
+    };
+
+    presets.forEach((preset) => {
+      const name = (preset.field_type_name || "").toLowerCase();
+      const venue = (preset.venue_name || "").toLowerCase();
+
+      // 识别"健身房"类：包含"健身"关键字，或学生中心健身房等变体
+      if (
+        name.includes("健身") ||
+        name.includes("fitness") ||
+        venue.includes("健身")
+      ) {
+        flags.gym = true;
+      }
+
+      // 识别"羽毛球"类
+      if (name.includes("羽毛球") || name.includes("badminton")) {
+        flags.badminton = true;
+      }
+    });
+
+    const options: string[] = [];
+    if (flags.gym) options.push("健身房");
+    if (flags.badminton) options.push("羽毛球");
+    return options;
+  }, [presets]);
+
+  const matchedSportPresets = useMemo(() => {
+    if (!selectedSport) return [];
+    const keyword = selectedSport.trim().toLowerCase();
+
+    // "健身房"按钮：只匹配学生中心、子衿街、霍英东这三个场馆的健身房
+    if (keyword === "健身房") {
+      // 匹配关键词：学生中心、子衿街、霍英东
+      const allowedKeywords = ["学生中心", "子衿街", "霍英东"];
+      return presets.filter((preset) => {
+        const name = (preset.field_type_name || "").toLowerCase();
+        const venue = (preset.venue_name || "").toLowerCase();
+        const isGym = name.includes("健身") || name.includes("fitness") || venue.includes("健身");
+        // 检查场馆名称是否包含任一允许的关键词
+        const isAllowedVenue = allowedKeywords.some((keyword) => venue.includes(keyword.toLowerCase()));
+        return isGym && isAllowedVenue;
+      });
+    }
+
+    // "羽毛球"按钮：只匹配霍英东、气膜这两个场馆的羽毛球
+    if (keyword === "羽毛球") {
+      const allowedVenues = ["霍英东", "气膜"];
+      return presets.filter((preset) => {
+        const name = (preset.field_type_name || "").toLowerCase();
+        const isBadminton = name.includes("羽毛球") || name.includes("badminton");
+        const venue = (preset.venue_name || "").toLowerCase();
+        const isAllowedVenue = allowedVenues.some((allowed) => venue.includes(allowed.toLowerCase()));
+        return isBadminton && isAllowedVenue;
+      });
+    }
+
+    // 兜底逻辑（理论上不会走到）
+    return presets.filter((preset) =>
+      (preset.field_type_name || "").toLowerCase().includes(keyword),
+    );
+  }, [presets, selectedSport]);
+
   const loadMonitors = async () => {
     try {
       const response = await api.listMonitors();
@@ -175,14 +247,16 @@ const MonitorPage = () => {
 
   const resetForm = () => {
     setMonitorId(createMonitorId());
-    setIntervalMinutes(15);
+    setIntervalMinutes(3);
     setAutoBook(true);
+    setLongRunning(false);
     setRequireAllUsersSuccess(false);
     setIncludeAllTargets(true);
     setSelectedTargetUsers([]);
     setPreferredHourRange(null);
-    setPreferredDayRange(null);
-    setOperatingHourRange(null);
+    setPreferredDayRange([0, 0]);
+    setOperatingHourRange(DEFAULT_OPERATING_WINDOW);
+    setSelectedSport("");
   };
 
   const toggleTargetUser = (userId: string) => {
@@ -193,6 +267,12 @@ const MonitorPage = () => {
         : [...prev, userId]
     );
   };
+
+  const slugify = (value: string) =>
+    value
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, "-")
+      .replace(/^-+|-+$/g, "") || "preset";
 
   const handleSubmit = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
@@ -209,11 +289,12 @@ const MonitorPage = () => {
       const preferredHoursPayload = buildRangeValues(preferredHourRange, HOUR_RANGE);
       const preferredDaysPayload = buildRangeValues(preferredDayRange, DAY_RANGE);
 
-      const payload: MonitorRequestBody = {
+      const basePayload: MonitorRequestBody = {
         monitor_id: monitorId.trim(),
         preset: presetIndex ? Number(presetIndex) : undefined,
         interval_seconds: intervalMinutes * 60,
         auto_book: autoBook,
+        long_running: longRunning,
         require_all_users_success: requireAllUsersSuccess,
         target_users: targetUsersPayload,
         preferred_hours: preferredHoursPayload,
@@ -224,14 +305,57 @@ const MonitorPage = () => {
         const [rawStart, rawEnd] = operatingHourRange;
         const operatingStart = Math.min(rawStart, rawEnd);
         const operatingEnd = Math.max(rawStart, rawEnd);
-        if (!(operatingStart === OPERATING_RANGE.min && operatingEnd === OPERATING_RANGE.max)) {
-          payload.operating_start_hour = operatingStart;
-          payload.operating_end_hour = operatingEnd;
-        }
+        // 始终发送 operating_start_hour 和 operating_end_hour，包括 0:00-24:00 的情况
+        basePayload.operating_start_hour = operatingStart;
+        basePayload.operating_end_hour = operatingEnd;
       }
 
-      await api.createMonitor(payload);
-      setMessage("监控任务已创建");
+      const presetTarget = typeof presetIndex === "number"
+        ? presets.find((item) => item.index === Number(presetIndex))
+        : undefined;
+
+      if (selectedSport && matchedSportPresets.length === 0) {
+        setError(`未找到包含「${selectedSport}」的场馆项目`);
+        return;
+      }
+
+      const targets = matchedSportPresets.length > 0 ? matchedSportPresets : (presetTarget ? [presetTarget] : []);
+
+      if (targets.length === 0) {
+        setError("请选择场馆运动或运动类型");
+        return;
+      }
+
+      const trimmedId = monitorId.trim();
+      const creationResults = await Promise.allSettled(
+        targets.map(async (target) => {
+          const venueSlug = slugify(target.venue_name || `venue-${target.index}`);
+          const sportSlug = slugify(target.field_type_name || target.field_type_id || "");
+          const suffixParts = [venueSlug, `preset${target.index}`];
+          if (sportSlug) {
+            suffixParts.push(sportSlug);
+          }
+          const suffix = suffixParts.join("-");
+          const monitorKey = targets.length === 1 ? trimmedId : `${trimmedId}-${suffix}`;
+          const payload: MonitorRequestBody = { ...basePayload, monitor_id: monitorKey, preset: target.index };
+          await api.createMonitor(payload);
+          return { id: monitorKey, venue: target.venue_name };
+        }),
+      );
+
+      const succeeded = creationResults
+        .filter((entry): entry is PromiseFulfilledResult<{ id: string; venue?: string | null }> => entry.status === "fulfilled")
+        .map((entry) => entry.value);
+      const failed = creationResults.filter((entry) => entry.status === "rejected");
+
+      if (succeeded.length > 0) {
+        const venues = succeeded.map((item) => item.venue || item.id).join(", ");
+        setMessage(`监控任务已创建：${venues}`);
+      }
+      if (failed.length > 0) {
+        setError(`部分任务创建失败：${failed.length} 项`);
+      }
+
       resetForm();
       await loadMonitors();
     } catch (err) {
@@ -441,6 +565,39 @@ const MonitorPage = () => {
           </div>
 
           <div className="form-label form-label--full">
+            <span>选择运动类型（可选，批量监控）</span>
+            <div className="toggle-group toggle-group--wrap">
+              <button
+                type="button"
+                className={`toggle-button ${selectedSport ? "" : "is-active"}`}
+                onClick={() => setSelectedSport("")}
+              >
+                不限运动
+              </button>
+              {sportOptions.map((sport) => {
+                const isActive = selectedSport === sport;
+                return (
+                  <button
+                    key={sport}
+                    type="button"
+                    className={`toggle-button ${isActive ? "is-active" : ""}`}
+                    onClick={() => setSelectedSport(sport)}
+                  >
+                    {sport}
+                  </button>
+                );
+              })}
+            </div>
+            {selectedSport ? (
+              <span className="muted-text">
+                将为所有包含「{selectedSport}」的场馆创建监控任务
+              </span>
+            ) : (
+              <span className="muted-text">默认仅创建上方选择的单个场馆监控</span>
+            )}
+          </div>
+
+          <div className="form-label form-label--full">
             <RangeSelector
               min={HOUR_RANGE.min}
               max={HOUR_RANGE.max}
@@ -548,10 +705,33 @@ const MonitorPage = () => {
                   style={{ width: "18px", height: "18px" }}
                 />
                 <span style={{ color: "#0891B2" }}>
-                  ✓ 要求所有用户都成功 - 所有指定账号都抢到场次才算任务完成，并自动限制开始时间相差不超过 1 小时
+                  ✓ 要求所有用户都成功 - 所有指定账号都在同一场馆抢到场次才算完成，并自动限制开始时间相差不超过 1 小时
                 </span>
               </label>
             )}
+          </div>
+
+          <div
+            className="panel"
+            style={{
+              gridColumn: "1 / -1",
+              border: "1px solid rgba(34,197,94,0.4)",
+              background: "#F0FDF4",
+              padding: "16px",
+            }}
+          >
+            <label style={{ display: "flex", alignItems: "center", gap: "12px", fontWeight: 600 }}>
+              <input
+                type="checkbox"
+                checked={longRunning}
+                onChange={(event) => setLongRunning(event.target.checked)}
+                style={{ width: "20px", height: "20px" }}
+              />
+              <span style={{ color: "#15803d" }}>♾️ 长期监控 - 成功抢到票后仍持续监控优先天数窗口</span>
+            </label>
+            <p className="muted-text" style={{ marginTop: "8px" }}>
+              启用后任务不会进入完成状态，而是每天追踪「今天~明天」这样的滑动窗口，并避免为同一账号重复下单。
+            </p>
           </div>
 
           <div className="form-actions">
@@ -624,6 +804,10 @@ const MonitorPage = () => {
                 const resolvedLabel = resolved.label || resolved.venue_name || "目标";
                 const preferredHours = info.preferred_hours;
                 const preferredDays = info.preferred_days;
+                const longRunningFlag = Boolean(info.long_running ?? info.longRunning);
+                const lastCycleCompletedRaw =
+                  (info.last_cycle_completed_at as string) || (info.lastCycleCompletedAt as string) || "";
+                const lastCycleLabel = lastCycleCompletedRaw ? formatDateTime(lastCycleCompletedRaw) : "未完成";
                 const targetUserList = Array.isArray(info.target_users) ? (info.target_users as string[]) : [];
                 const displayTargetUsers = targetUserList
                   .map((identifier) => {
@@ -729,8 +913,16 @@ const MonitorPage = () => {
                         {autoBookFlag ? "是" : "否"}
                       </div>
                       <div>
+                        <strong>长期任务：</strong>
+                        {longRunningFlag ? "是" : "否"}
+                      </div>
+                      <div>
                         <strong>最后检查：</strong>
                         {lastCheck}
+                      </div>
+                      <div>
+                        <strong>上次完成：</strong>
+                        {lastCycleLabel}
                       </div>
                       <div>
                         <strong>每日时段：</strong>

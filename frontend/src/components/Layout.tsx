@@ -60,6 +60,9 @@ const Layout = ({ children }: PropsWithChildren) => {
         </nav>
       <div style={{ marginTop: "auto", fontSize: "13px", opacity: 0.8 }}>
         <div>Made for efficient bookings</div>
+        <div style={{ marginTop: "8px", fontSize: "11px", opacity: 0.6 }}>
+          Build: {new Date().toLocaleDateString("zh-CN", { month: "2-digit", day: "2-digit" })} {new Date().toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit" })}
+        </div>
       </div>
     </aside>
     <main className="content">

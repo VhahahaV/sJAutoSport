@@ -269,13 +269,22 @@ ufw status
 **配置文件**: `/etc/caddy/Caddyfile`
 
 ```caddy
-sports.auto-booking.sjtu.edu.cn {
-    reverse_proxy /api/* localhost:8000
-    reverse_proxy /onebot/* localhost:8080
-    
-    # 前端静态文件
-    root * /opt/sja/frontend/dist
-    try_files {path} /index.html
+example.com {
+    encode zstd gzip
+
+    handle /api/* {
+        reverse_proxy 127.0.0.1:8000
+    }
+
+    handle /webui* {
+        reverse_proxy 127.0.0.1:6099
+    }
+
+    handle {
+        root * /opt/sja/frontend/dist
+        try_files {path} /index.html
+        file_server
+    }
 }
 ```
 

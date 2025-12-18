@@ -41,6 +41,7 @@ const OrderPage = () => {
   const [slotEntries, setSlotEntries] = useState<AggregatedSlotEntry[]>([]);
   const [selectedSlotKey, setSelectedSlotKey] = useState<string>("");
   const [slotsCache, setSlotsCache] = useState<Record<string, AggregatedSlotEntry[]>>({});
+  const [availabilityRequested, setAvailabilityRequested] = useState(false);
   const [availabilityLoading, setAvailabilityLoading] = useState(false);
   const [slotsLoading, setSlotsLoading] = useState(false);
   const [submitLoading, setSubmitLoading] = useState(false);
@@ -141,16 +142,19 @@ const OrderPage = () => {
   );
 
   const loadAvailability = useCallback(
-    async (presetId: number) => {
+    async (presetId: number, autoLoadSlots: boolean = false) => {
+      let succeeded = false;
       setAvailabilityLoading(true);
       setError(null);
       setResult(null);
       setSlotsCache({});
+      setSlotEntries([]);
+      setSelectedSlotKey("");
       const overallStart = czqDebugStart(`OrderPage.loadAvailability preset=${presetId}`);
       let requestStart: number | null = null;
       try {
         requestStart = czqDebugStart(`OrderPage.loadAvailability.request preset=${presetId}`);
-        const response = await api.getImmediateAvailability({ preset: presetId, include_slots: true });
+        const response = await api.getImmediateAvailability({ preset: presetId, include_slots: false });
         if (requestStart !== null) {
           czqDebugEnd(`OrderPage.loadAvailability.response preset=${presetId}`, requestStart);
           requestStart = null;
@@ -166,24 +170,22 @@ const OrderPage = () => {
           return;
         }
 
-        const candidate = response.selected_date && availableDates.some((entry) => entry.date === response.selected_date)
-          ? response.selected_date
-          : response.default_date && availableDates.some((entry) => entry.date === response.default_date)
-            ? response.default_date
-            : availableDates[0].date;
+        const candidate =
+          response.selected_date && availableDates.some((entry) => entry.date === response.selected_date)
+            ? response.selected_date
+            : response.default_date && availableDates.some((entry) => entry.date === response.default_date)
+              ? response.default_date
+              : availableDates[0].date;
 
-        setSelectedDate(candidate);
-
-        let initialEntries = aggregateAvailableSlots(response.slots || [], candidate || "");
-
-        setSlotEntries(initialEntries);
-        setSlotsCache((prev) => ({ ...prev, ...(candidate ? { [candidate]: initialEntries } : {}) }));
-        setSelectedSlotKey(initialEntries[0] ? initialEntries[0].start : "");
-
-        if ((initialEntries.length === 0) && candidate) {
+        setSelectedDate(autoLoadSlots ? candidate : "");
+        if (autoLoadSlots && candidate) {
           await loadSlots(presetId, candidate, true);
         }
-        czqDebugEnd(`OrderPage.loadAvailability.complete preset=${presetId} dates=${availableDates.length} initial=${initialEntries.length}`, overallStart);
+        succeeded = true;
+        czqDebugEnd(
+          `OrderPage.loadAvailability.complete preset=${presetId} dates=${availableDates.length}`,
+          overallStart,
+        );
       } catch (err) {
         setDateAvailability([]);
         setSelectedDate("");
@@ -199,6 +201,7 @@ const OrderPage = () => {
         czqDebugEnd(`OrderPage.loadAvailability.complete preset=${presetId} error`, overallStart);
       } finally {
         setAvailabilityLoading(false);
+        setAvailabilityRequested(succeeded);
       }
     },
     [loadSlots],
@@ -223,21 +226,31 @@ const OrderPage = () => {
   }, [selectDefaultPreset]);
 
   useEffect(() => {
-    if (typeof selectedPreset === "number") {
-      setError(null);
-      void loadAvailability(selectedPreset);
-    } else {
-      setDateAvailability([]);
-      setSelectedDate("");
-      setSlotEntries([]);
-      setSelectedSlotKey("");
+    setDateAvailability([]);
+    setSelectedDate("");
+    setSlotEntries([]);
+    setSelectedSlotKey("");
+    setSlotsCache({});
+    setAvailabilityRequested(false);
+  }, [selectedPreset]);
+
+  const handleLoadAvailabilityClick = async () => {
+    if (typeof selectedPreset !== "number") {
+      setError("请选择场馆与运动项目");
+      return;
     }
-  }, [selectedPreset, loadAvailability]);
+    setError(null);
+    await loadAvailability(selectedPreset, true);
+  };
 
   const handleSubmit = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
     if (typeof selectedPreset !== "number") {
       setError("请选择场馆与运动项目");
+      return;
+    }
+    if (!availabilityRequested) {
+      setError("请先加载可预订日期");
       return;
     }
     if (!selectedDate) {
@@ -331,6 +344,19 @@ const OrderPage = () => {
 
           <div className="form-label form-label--full">
             <span>选择日期</span>
+            <div style={{ display: "flex", gap: "8px", alignItems: "center", marginTop: "6px" }}>
+              <button
+                type="button"
+                className="button button-secondary"
+                onClick={handleLoadAvailabilityClick}
+                disabled={availabilityLoading || slotsLoading || typeof selectedPreset !== "number"}
+              >
+                {availabilityLoading ? "加载中..." : "加载可订日期"}
+              </button>
+              {!availabilityRequested ? (
+                <span className="muted-text">选择场馆后点击加载，以减少切换时的等待</span>
+              ) : null}
+            </div>
             <div className="toggle-row" role="radiogroup" aria-label="可预订日期">
               {dateAvailability.map((entry) => {
                 const isActive = selectedDate === entry.date;
@@ -362,7 +388,10 @@ const OrderPage = () => {
               })}
             </div>
             {availabilityLoading ? <div className="muted-text">正在加载日期...</div> : null}
-            {!availabilityLoading && dateAvailability.length === 0 ? (
+            {!availabilityLoading && !availabilityRequested ? (
+              <div className="muted-text">尚未加载日期，请先点击“加载可订日期”。</div>
+            ) : null}
+            {!availabilityLoading && availabilityRequested && dateAvailability.length === 0 ? (
               <div className="muted-text">暂未查询到可预订日期。</div>
             ) : null}
           </div>
@@ -420,6 +449,9 @@ const OrderPage = () => {
                 );
               })}
             </div>
+            {!selectedUser ? (
+              <div className="muted-text">默认依次为所有可用账号尝试下单</div>
+            ) : null}
           </div>
 
           <div className="form-actions">
@@ -463,6 +495,17 @@ const OrderPage = () => {
         <div className="panel">
           <div style={{ fontWeight: 600, marginBottom: "6px" }}>{result.success ? "预订成功" : "预订失败"}</div>
           <div>{result.message}</div>
+          {Array.isArray(result.results) && result.results.length > 0 ? (
+            <ul style={{ marginTop: "8px", paddingLeft: "18px", color: "#475467" }}>
+              {result.results.map((entry) => (
+                <li key={entry.user}>
+                  <strong>{entry.user}：</strong>
+                  {entry.success ? "成功" : "失败"} - {entry.message}
+                  {entry.order_id ? ` (#${entry.order_id})` : ""}
+                </li>
+              ))}
+            </ul>
+          ) : null}
         </div>
       ) : null}
     </>

@@ -267,6 +267,12 @@ export type OrderResponse = {
   success: boolean;
   message: string;
   order_id?: string | null;
+  results?: Array<{
+    user: string;
+    success: boolean;
+    message: string;
+    order_id?: string | null;
+  }>;
 };
 
 export type MonitorInfo = Record<string, unknown>;
@@ -340,6 +346,7 @@ export type MonitorRequestBody = {
   start_hour?: number;
   interval_seconds?: number;
   auto_book?: boolean;
+  long_running?: boolean;
   require_all_users_success?: boolean;
   target?: Record<string, unknown>;
   target_users?: string[];

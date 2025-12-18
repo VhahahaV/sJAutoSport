@@ -3,7 +3,7 @@ from __future__ import annotations
 import dataclasses
 import json
 from collections import defaultdict
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, Iterable, List, Optional, Set
 
 from fastapi import APIRouter, HTTPException, Query
 from fastapi.responses import StreamingResponse
@@ -272,6 +272,12 @@ class OrderRequest(BaseModel):
     end_time: Optional[str] = Field(None, description="HH or HH:MM (optional)")
     user: Optional[str] = Field(None, description="Nickname or username to use for booking")
     target: Optional[TargetOverride] = None
+    target_users: Optional[List[str]] = Field(
+        None, description="Optional list of users to book for when未指定单个用户"
+    )
+    require_all_users_success: bool = Field(
+        False, description="是否要求所有用户都预订成功（用于批量下单）"
+    )
 
 
 class MonitorRequest(BaseModel):
@@ -283,6 +289,7 @@ class MonitorRequest(BaseModel):
     start_hour: Optional[int] = None
     interval_seconds: int = Field(240, ge=30)
     auto_book: bool = False
+    long_running: bool = Field(False, description="成功预订后是否持续运行")
     require_all_users_success: bool = Field(False, description="是否要求所有用户都成功")
     max_time_gap_hours: Optional[int] = Field(1, ge=0, le=4, description="要求所有用户成功时允许的最大时间差（小时）")
     operating_start_hour: Optional[int] = Field(None, ge=0, le=24, description="每日运行开始时间（小时）")
@@ -557,18 +564,93 @@ async def immediate_slots(body: ImmediateSlotsRequest) -> Dict[str, Any]:
 @router.post("/order")
 async def create_order(request: OrderRequest) -> Dict[str, Any]:
     base_target = _build_target(request.target)
-    result = await service.order_once(
-        preset=request.preset,
-        date=request.date,
-        start_time=request.start_time,
-        end_time=request.end_time,
-        base_target=base_target,
-        user=request.user,
-    )
+    # 构建目标用户列表：优先单选用户，其次显式列表，默认尝试所有已配置且可用的账号
+    def _normalize_users(users: Iterable[Optional[str]]) -> List[str]:
+        normalized: List[str] = []
+        seen: Set[str] = set()
+        for entry in users:
+            if not entry:
+                continue
+            key = str(entry).strip()
+            if not key or key in seen:
+                continue
+            seen.add(key)
+            normalized.append(key)
+        return normalized
+
+    selected_users: List[str] = []
+    if request.user:
+        selected_users = _normalize_users([request.user])
+    elif request.target_users:
+        selected_users = _normalize_users(request.target_users)
+    else:
+        fallback_users = []
+        for user in getattr(CFG.AUTH, "users", []) or []:
+            if not (user.cookie or user.token):
+                continue
+            identifier = user.nickname or user.username
+            fallback_users.append(identifier)
+        selected_users = _normalize_users(fallback_users)
+
+    if not selected_users:
+        # 回退到当前激活用户
+        selected_users = _normalize_users([request.user])
+        if not selected_users:
+            selected_users = []
+
+    results: List[Dict[str, Any]] = []
+    success_count = 0
+    first_order_id: Optional[str] = None
+
+    # 当没有显式指定用户且配置中存在多个可用用户时，尝试为所有用户下单
+    require_all = bool(request.require_all_users_success)
+    if not request.user and len(selected_users) > 1 and not request.require_all_users_success:
+        require_all = True
+
+    if not selected_users:
+        raise HTTPException(status_code=400, detail="未找到可用于下单的用户，请先登录或配置账户")
+
+    for identifier in selected_users:
+        result = await service.order_once(
+            preset=request.preset,
+            date=request.date,
+            start_time=request.start_time,
+            end_time=request.end_time,
+            base_target=base_target,
+            user=identifier,
+            notification_context="立即预订（批量）",
+        )
+        resolved_order_id = service.resolve_order_identifier(result) or result.order_id
+        if result.success:
+            success_count += 1
+            if not first_order_id and resolved_order_id:
+                first_order_id = resolved_order_id
+        results.append(
+            {
+                "user": identifier,
+                "success": result.success,
+                "message": result.message,
+                "order_id": resolved_order_id,
+            }
+        )
+
+    if require_all:
+        overall_success = success_count == len(selected_users)
+    else:
+        overall_success = success_count > 0
+
+    summary_parts = [
+        f"{entry['user']}: {'成功' if entry['success'] else '失败'}"
+        for entry in results
+    ]
+    summary_text = "；".join(summary_parts)
+    message = summary_text or "下单完成"
+
     return {
-        "success": result.success,
-        "message": result.message,
-        "order_id": result.order_id,
+        "success": overall_success,
+        "message": message,
+        "order_id": first_order_id,
+        "results": results,
     }
 
 
@@ -595,6 +677,7 @@ async def create_monitor(request: MonitorCreateRequest) -> Dict[str, Any]:
         start_hour=request.start_hour,
         interval_seconds=request.interval_seconds,
         auto_book=request.auto_book,
+        long_running=request.long_running,
         require_all_users_success=request.require_all_users_success,
         max_time_gap_hours=request.max_time_gap_hours,
         operating_start_hour=request.operating_start_hour,

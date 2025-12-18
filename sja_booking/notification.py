@@ -125,7 +125,10 @@ class NotificationService:
             await asyncio.sleep(self.default_delay)
 
         success = False
-        for group_id in groups:
+        # 为每个群组发送之间添加间隔，避免触发 QQ 风控
+        for index, group_id in enumerate(groups):
+            if index > 0:
+                await asyncio.sleep(2.5)  # 每个群组之间间隔 2.5 秒
             try:
                 group_numeric = int(float(group_id))
             except (TypeError, ValueError):
@@ -136,7 +139,10 @@ class NotificationService:
                 {"group_id": int(group_numeric), "message": message},
             ):
                 success = True
-        for user_id in users:
+        # 为每个用户发送之间添加间隔
+        for index, user_id in enumerate(users):
+            if index > 0 or groups:  # 如果有群组，第一个用户也需要间隔
+                await asyncio.sleep(2.5)  # 每个用户之间间隔 2.5 秒
             try:
                 user_numeric = int(float(user_id))
             except (TypeError, ValueError):

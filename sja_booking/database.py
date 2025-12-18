@@ -8,7 +8,7 @@ import json
 import sqlite3
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 from .models import BookingTarget
 
@@ -41,6 +41,7 @@ class DatabaseManager:
                     operating_start_hour INTEGER,
                     operating_end_hour INTEGER,
                     auto_book BOOLEAN,
+                    long_running BOOLEAN,
                     status TEXT,
                     start_time TEXT,
                     last_check TEXT,
@@ -51,6 +52,8 @@ class DatabaseManager:
                     last_booking_error TEXT,
                     window_active BOOLEAN,
                     next_window_start TEXT,
+                    last_cycle_completed_at TEXT,
+                    reservation_index TEXT,
                     created_at TEXT,
                     updated_at TEXT
                 )
@@ -66,6 +69,12 @@ class DatabaseManager:
                 cursor.execute("ALTER TABLE monitors ADD COLUMN window_active BOOLEAN")
             if "next_window_start" not in monitor_columns:
                 cursor.execute("ALTER TABLE monitors ADD COLUMN next_window_start TEXT")
+            if "long_running" not in monitor_columns:
+                cursor.execute("ALTER TABLE monitors ADD COLUMN long_running BOOLEAN")
+            if "last_cycle_completed_at" not in monitor_columns:
+                cursor.execute("ALTER TABLE monitors ADD COLUMN last_cycle_completed_at TEXT")
+            if "reservation_index" not in monitor_columns:
+                cursor.execute("ALTER TABLE monitors ADD COLUMN reservation_index TEXT")
             
             # 创建定时任务表
             cursor.execute("""
@@ -148,6 +157,29 @@ class DatabaseManager:
                     created_at TEXT
                 )
             """)
+
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS order_status (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    user_key TEXT NOT NULL,
+                    scope_key TEXT NOT NULL,
+                    venue_id TEXT,
+                    venue_name TEXT,
+                    field_type_id TEXT,
+                    field_type_name TEXT,
+                    category TEXT,
+                    date TEXT NOT NULL,
+                    status TEXT NOT NULL,
+                    order_id TEXT,
+                    source TEXT,
+                    message TEXT,
+                    created_at TEXT,
+                    updated_at TEXT,
+                    UNIQUE(user_key, scope_key, date)
+                )
+            """)
+            cursor.execute("CREATE INDEX IF NOT EXISTS idx_order_status_status ON order_status(status)")
+            cursor.execute("CREATE INDEX IF NOT EXISTS idx_order_status_date ON order_status(date)")
             
             conn.commit()
     
@@ -160,16 +192,18 @@ class DatabaseManager:
                 # 序列化复杂字段
                 found_slots = json.dumps(monitor_info.get("found_slots", []))
                 base_target = json.dumps(monitor_info.get("base_target", {}).__dict__ if monitor_info.get("base_target") else {})
+                reservation_index = json.dumps(monitor_info.get("reservation_index", {}))
                 
                 cursor.execute("""
                     INSERT OR REPLACE INTO monitors (
                         id, preset, venue_id, venue_keyword, field_type_id, field_type_keyword,
                         date, start_hour, interval_seconds, operating_start_hour, operating_end_hour,
-                        auto_book, status, start_time,
+                        auto_book, long_running, status, start_time,
                         last_check, found_slots, booking_attempts, successful_bookings,
                         last_error, last_booking_error, window_active, next_window_start,
+                        last_cycle_completed_at, reservation_index,
                         created_at, updated_at
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """, (
                     monitor_info["id"],
                     monitor_info.get("preset"),
@@ -183,6 +217,7 @@ class DatabaseManager:
                     monitor_info.get("operating_start_hour"),
                     monitor_info.get("operating_end_hour"),
                     monitor_info.get("auto_book", False),
+                    monitor_info.get("long_running", False),
                     monitor_info.get("status"),
                     monitor_info.get("start_time"),
                     monitor_info.get("last_check"),
@@ -193,6 +228,8 @@ class DatabaseManager:
                     monitor_info.get("last_booking_error"),
                     monitor_info.get("window_active"),
                     monitor_info.get("next_window_start"),
+                    monitor_info.get("last_cycle_completed_at"),
+                    reservation_index,
                     datetime.now().isoformat(),
                     datetime.now().isoformat()
                 ))
@@ -224,6 +261,13 @@ class DatabaseManager:
                 # 反序列化复杂字段
                 if monitor_info.get("found_slots"):
                     monitor_info["found_slots"] = json.loads(monitor_info["found_slots"])
+                if monitor_info.get("reservation_index"):
+                    try:
+                        monitor_info["reservation_index"] = json.loads(monitor_info["reservation_index"])
+                    except json.JSONDecodeError:
+                        monitor_info["reservation_index"] = {}
+                else:
+                    monitor_info["reservation_index"] = {}
                 
                 return monitor_info
                 
@@ -249,6 +293,13 @@ class DatabaseManager:
                     # 反序列化复杂字段
                     if monitor_info.get("found_slots"):
                         monitor_info["found_slots"] = json.loads(monitor_info["found_slots"])
+                    if monitor_info.get("reservation_index"):
+                        try:
+                            monitor_info["reservation_index"] = json.loads(monitor_info["reservation_index"])
+                        except json.JSONDecodeError:
+                            monitor_info["reservation_index"] = {}
+                    else:
+                        monitor_info["reservation_index"] = {}
                     
                     monitors.append(monitor_info)
                 
@@ -553,6 +604,146 @@ class DatabaseManager:
         except Exception as e:
             print(f"加载自动抢票结果失败: {e}")
             return []
+
+    async def upsert_order_status(
+        self,
+        *,
+        user_key: str,
+        scope_key: str,
+        venue_id: Optional[str],
+        venue_name: Optional[str],
+        field_type_id: Optional[str],
+        field_type_name: Optional[str],
+        category: Optional[str],
+        date: str,
+        status: str,
+        order_id: Optional[str],
+        source: Optional[str],
+        message: Optional[str],
+    ) -> bool:
+        try:
+            with sqlite3.connect(self.db_path) as conn:
+                cursor = conn.cursor()
+                now = datetime.now().isoformat()
+                cursor.execute(
+                    """
+                    INSERT INTO order_status (
+                        user_key, scope_key, venue_id, venue_name, field_type_id, field_type_name,
+                        category, date, status, order_id, source, message, created_at, updated_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(user_key, scope_key, date) DO UPDATE SET
+                        venue_id = COALESCE(excluded.venue_id, venue_id),
+                        venue_name = COALESCE(excluded.venue_name, venue_name),
+                        field_type_id = COALESCE(excluded.field_type_id, field_type_id),
+                        field_type_name = COALESCE(excluded.field_type_name, field_type_name),
+                        category = COALESCE(excluded.category, category),
+                        status = excluded.status,
+                        order_id = COALESCE(excluded.order_id, order_id),
+                        source = COALESCE(excluded.source, source),
+                        message = COALESCE(excluded.message, message),
+                        created_at = COALESCE(created_at, excluded.created_at),
+                        updated_at = excluded.updated_at
+                    """,
+                    (
+                        user_key,
+                        scope_key,
+                        venue_id,
+                        venue_name,
+                        field_type_id,
+                        field_type_name,
+                        category,
+                        date,
+                        status,
+                        order_id,
+                        source,
+                        message,
+                        now,
+                        now,
+                    ),
+                )
+                conn.commit()
+                return True
+        except Exception as e:
+            print(f"保存订单状态失败: {e}")
+            return False
+
+    async def get_order_status(
+        self,
+        user_key: str,
+        scope_key: str,
+        date: str,
+    ) -> Optional[Dict[str, Any]]:
+        try:
+            with sqlite3.connect(self.db_path) as conn:
+                cursor = conn.cursor()
+                cursor.execute(
+                    """
+                    SELECT * FROM order_status
+                    WHERE user_key = ? AND scope_key = ? AND date = ?
+                    """,
+                    (user_key, scope_key, date),
+                )
+                row = cursor.fetchone()
+                if not row:
+                    return None
+                columns = [description[0] for description in cursor.description]
+                return dict(zip(columns, row))
+        except Exception as e:
+            print(f"查询订单状态失败: {e}")
+            return None
+
+    async def get_order_status_for_dates(
+        self,
+        user_key: str,
+        scope_key: str,
+        dates: Sequence[str],
+    ) -> Dict[str, Dict[str, Any]]:
+        if not dates:
+            return {}
+        try:
+            with sqlite3.connect(self.db_path) as conn:
+                cursor = conn.cursor()
+                placeholders = ",".join("?" for _ in dates)
+                cursor.execute(
+                    f"""
+                    SELECT * FROM order_status
+                    WHERE user_key = ? AND scope_key = ? AND date IN ({placeholders})
+                    """,
+                    (user_key, scope_key, *dates),
+                )
+                rows = cursor.fetchall()
+                columns = [description[0] for description in cursor.description]
+                results: Dict[str, Dict[str, Any]] = {}
+                for row in rows:
+                    record = dict(zip(columns, row))
+                    date_value = record.get("date")
+                    if date_value:
+                        results[str(date_value)] = record
+                return results
+        except Exception as e:
+            print(f"批量查询订单状态失败: {e}")
+            return {}
+
+    async def delete_order_status_by_order_id(self, order_id: str) -> bool:
+        """根据订单ID删除订单状态索引记录"""
+        if not order_id:
+            return False
+        try:
+            with sqlite3.connect(self.db_path) as conn:
+                cursor = conn.cursor()
+                cursor.execute(
+                    """
+                    DELETE FROM order_status
+                    WHERE order_id = ?
+                    """,
+                    (order_id,),
+                )
+                conn.commit()
+                deleted_count = cursor.rowcount
+                return deleted_count > 0
+        except Exception as e:
+            print(f"删除订单状态索引失败: {e}")
+            return False
 
 
 # 全局数据库管理器实例

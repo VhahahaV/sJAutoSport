@@ -58,6 +58,7 @@ async def handle_start_monitor(bot: Bot, event: MessageEvent, args: Message = Co
             start_hour=params.get("start_hour"),
             interval_seconds=params.get("interval_seconds", 240),
             auto_book=params.get("auto_book", False),
+            long_running=params.get("long_running", False),
             base_target=base_target,
             target_users=target_users,
             exclude_users=exclude_users,
@@ -72,6 +73,7 @@ async def handle_start_monitor(bot: Bot, event: MessageEvent, args: Message = Co
             response += f"🕐 目标时间: {params.get('start_hour', '任意时间')}\n"
             response += f"⏱️ 检查间隔: {params.get('interval_seconds', 240)}秒\n"
             response += f"🤖 自动预订: {'是' if params.get('auto_book', False) else '否'}\n"
+            response += f"♾️ 长期任务: {'是' if params.get('long_running', False) else '否'}\n"
             if target_users:
                 response += f"👥 指定用户: {', '.join(target_users)}\n"
             if exclude_users:
@@ -224,20 +226,40 @@ def parse_monitor_args(args_str: str) -> dict:
         (r"start=(\d+)", "start_hour"),
         (r"interval=(\d+)", "interval_seconds"),
         (r"auto", "auto_book"),
+        (r"long(?:_?term)?=(true|false|1|0)", "long_running"),
+        (r"\blong(?:_?term)?\b", "long_running"),
+        (r"长期", "long_running"),
         (r"users=([^\s]+)", "target_users"),
         (r"exclude=([^\s]+)", "exclude_users"),
     ]
+
+    int_fields = {"preset", "date", "start_hour", "interval_seconds"}
+    list_fields = {"target_users", "exclude_users"}
+    bool_fields = {"auto_book", "long_running"}
     
     for pattern, param_name in patterns:
-        match = re.search(pattern, args_str)
+        match = re.search(pattern, args_str, flags=re.IGNORECASE)
         if match:
-            if param_name == "auto_book":
-                params[param_name] = True
-            else:
-                value = match.group(1)
-            if param_name in ["preset", "date", "start_hour", "interval_seconds"]:
-                params[param_name] = int(value)
-            elif param_name in ["target_users", "exclude_users"]:
+            groups = match.groups()
+            value = groups[0] if groups else None
+
+            if param_name in bool_fields:
+                if value is None:
+                    params[param_name] = True
+                else:
+                    normalized = str(value).strip().lower()
+                    params[param_name] = normalized in {"1", "true", "yes", "on"}
+                continue
+
+            if value is None:
+                continue
+
+            if param_name in int_fields:
+                try:
+                    params[param_name] = int(value)
+                except ValueError:
+                    continue
+            elif param_name in list_fields:
                 params[param_name] = [item.strip() for item in value.split(',') if item.strip()]
             else:
                 params[param_name] = value
@@ -261,6 +283,7 @@ def format_monitor_status(monitor_info: dict, brief: bool = False) -> str:
         response += f"🏟️ 场馆: 预设{monitor_info.get('preset', 'N/A')}\n"
         response += f"⏱️ 间隔: {monitor_info.get('interval_seconds', 240)}秒\n"
         response += f"🤖 自动预订: {'是' if monitor_info.get('auto_book', False) else '否'}\n"
+        response += f"♾️ 长期任务: {'是' if monitor_info.get('long_running') else '否'}\n"
         if target_users:
             response += f"👥 用户: {', '.join(target_users)}\n"
         if exclude_users:
@@ -280,6 +303,7 @@ def format_monitor_status(monitor_info: dict, brief: bool = False) -> str:
     response += f"🕐 目标时间: {monitor_info.get('start_hour', '任意时间')}\n"
     response += f"⏱️ 检查间隔: {monitor_info.get('interval_seconds', 240)}秒\n"
     response += f"🤖 自动预订: {'是' if monitor_info.get('auto_book', False) else '否'}\n"
+    response += f"♾️ 长期任务: {'是' if monitor_info.get('long_running') else '否'}\n"
     if target_users:
         response += f"👥 指定用户: {', '.join(target_users)}\n"
     if exclude_users:
@@ -289,6 +313,8 @@ def format_monitor_status(monitor_info: dict, brief: bool = False) -> str:
     response += f"📋 找到时间段: {len(monitor_info.get('found_slots', []))}个\n"
     response += f"🔄 预订尝试: {monitor_info.get('booking_attempts', 0)}次\n"
     response += f"✅ 成功预订: {monitor_info.get('successful_bookings', 0)}次\n"
+    if monitor_info.get("last_cycle_completed_at"):
+        response += f"🔁 上次完成: {monitor_info['last_cycle_completed_at']}\n"
 
     if monitor_info.get('last_error'):
         response += f"❌ 最后错误: {monitor_info['last_error']}\n"

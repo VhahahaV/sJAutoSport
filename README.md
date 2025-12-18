@@ -122,8 +122,8 @@ python sjtu_sports.py bot
 ```
 
 访问地址：
-- 前端门户：`http://localhost:5173`（上线后替换为你的域名）
-- 后端 API：`http://localhost:8000/api`
+- 前端门户：`http://localhost:5173`（开发环境）或 `https://example.com`（生产环境）
+- 后端 API：`http://localhost:8000/api`（开发环境）或 `https://example.com/api`（生产环境）
 - QQ Bot：根据 `bot/.env` 配置链接 OneBot/Napcat
 
 ### 5. 验证
@@ -174,7 +174,7 @@ python sjtu_sports.py bot
 
 | 变量 | 说明 |
 | --- | --- |
-| `VITE_API_BASE_URL` | 指向后端 API 的完整 URL，例如 `https://your-domain.com/api` |
+| `VITE_API_BASE_URL` | 指向后端 API 的完整 URL，例如 `https://example.com/api` 或 `/api`（相对路径，适用于同域部署） |
 | `VITE_PORTAL_PASSWORD` | 门户密码页的口令 |
 
 ---
