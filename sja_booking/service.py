@@ -1533,6 +1533,38 @@ async def _fetch_order_record(user_identifier: Optional[str], order_id: str) -> 
             pass
 
 
+async def _refresh_order_status_from_remote(
+    *,
+    user_key: str,
+    scope: OrderScopeInfo,
+    order_id: str,
+    date_hint: Optional[str],
+    message: Optional[str],
+) -> None:
+    """Fetch latest order info and persist status for later duplicate checks."""
+    record = await _fetch_order_record(user_key, order_id)
+    if not record:
+        return
+
+    state = str(record.get("orderstateid") or record.get("orderStateId") or "")
+    status_label = "pending_payment" if state == "0" else "confirmed"
+    date_label = (
+        record.get("scDate")
+        or record.get("ordercreatement", "")[:10]
+        or date_hint
+        or "-"
+    )
+    await _record_order_status_entry(
+        user_key=user_key,
+        scope=scope,
+        date=date_label,
+        status=status_label,
+        order_id=order_id,
+        source="monitor-auto",
+        message=message or record.get("spaceInfo"),
+    )
+
+
 async def _send_pending_payment_reminder(
     *,
     monitor_id: str,
@@ -3150,21 +3182,21 @@ async def _auto_book_from_monitor(monitor_id: str, slots: List[Dict]) -> None:
     )
 
     if require_all_success and total_capacity < len(user_sequence):
+        warning = f"可用场次数 ({total_capacity}) 少于用户数 ({len(user_sequence)})，将先为部分用户下单"
         monitor_info["last_booking_results"].append(
             {
                 "user": None,
                 "username": None,
                 "success": False,
-                "message": f"可用场次数 ({total_capacity}) 少于用户数 ({len(user_sequence)}), 本轮跳过自动预订",
+                "message": warning,
             }
         )
-        monitor_info["last_booking_error"] = "可用场次数不足，已跳过"
+        monitor_info["last_booking_error"] = warning
         await _notify_monitor_skip_reason(
             monitor_info,
             monitor_id,
-            f"可用场次数 ({total_capacity}) 少于用户数 ({len(user_sequence)})，已跳过自动预订",
+            warning,
         )
-        return
 
     reference_hour: Optional[int] = None
 
@@ -3342,6 +3374,15 @@ async def _auto_book_from_monitor(monitor_id: str, slots: List[Dict]) -> None:
                         "date": date_label,
                         "updated_at": datetime.now().isoformat(),
                     }
+
+                    if resolved_order_id:
+                        await _refresh_order_status_from_remote(
+                            user_key=user_key,
+                            scope=scope,
+                            order_id=str(resolved_order_id),
+                            date_hint=date_label,
+                            message=result.message,
+                        )
                     
                     await _schedule_pending_payment_reminder(
                         monitor_id=monitor_id,
@@ -3369,6 +3410,14 @@ async def _auto_book_from_monitor(monitor_id: str, slots: List[Dict]) -> None:
                         "date": date_label,
                         "updated_at": datetime.now().isoformat(),
                     }
+                    if resolved_order_id:
+                        await _refresh_order_status_from_remote(
+                            user_key=user_key,
+                            scope=scope,
+                            order_id=str(resolved_order_id),
+                            date_hint=date_label,
+                            message=result.message,
+                        )
                     history[history_key] = {
                         "date": date_label,
                         "hour": slot_hour,

@@ -167,7 +167,7 @@ def check_catnapqq_connection():
     except:
         # 如果无法检查 Docker，继续尝试 HTTP 检查
         pass
-    
+
     # 尝试检查 HTTP API（即使未登录也可能返回响应）
     try:
         import requests
@@ -177,14 +177,33 @@ def check_catnapqq_connection():
         # 如果返回 200 或 401（未授权但服务可用），都认为服务可用
         return response.status_code in (200, 401, 403)
     except requests.exceptions.Timeout:
-        # 超时可能表示服务未启动
-        return False
+        # 超时可能表示服务未启动，但容器在运行，仍然允许启动
+        try:
+            import subprocess
+            result = subprocess.run(
+                ["docker", "ps", "--filter", "name=napcat", "--format", "{{.Names}}"],
+                capture_output=True,
+                text=True,
+                timeout=3
+            )
+            return "napcat" in result.stdout
+        except:
+            return False
     except requests.exceptions.ConnectionError:
-        # 连接错误可能表示服务未启动
-        return False
+        # 连接错误可能表示服务未启动，但容器在运行，仍然允许启动
+        try:
+            import subprocess
+            result = subprocess.run(
+                ["docker", "ps", "--filter", "name=napcat", "--format", "{{.Names}}"],
+                capture_output=True,
+                text=True,
+                timeout=3
+            )
+            return "napcat" in result.stdout
+        except:
+            return False
     except:
-        # 其他错误，可能是服务未完全启动，但容器在运行
-        # 如果容器在运行，我们仍然允许启动 bot（让 NoneBot 自己处理连接）
+        # 其他错误，可能是服务未完全启动，但容器在运行，我们仍然允许启动 bot（让 NoneBot 自己处理连接）
         try:
             import subprocess
             result = subprocess.run(
