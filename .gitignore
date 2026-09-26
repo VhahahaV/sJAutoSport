@@ -135,6 +135,12 @@ dmypy.json
 .env.local
 .env.production
 
+# 凭据与部署密钥（含账号密码 / Cookie，严禁提交）
+# 需要时从对应 .example 模板复制
+config/users.json
+data/credentials.json
+deploy.env
+
 # 日志文件
 *.log
 logs/
