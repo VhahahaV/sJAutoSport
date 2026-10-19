@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import json
 import base64
@@ -9,6 +9,7 @@ import random
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 import httpx
+from .config import TRUST_ENV
 
 from .models import (
     AuthConfig,
@@ -16,7 +17,6 @@ from .models import (
     DateAvailability,
     EndpointSet,
     FieldType,
-    OrderIntent,
     Slot,
     Venue,
     UserAuth,
@@ -186,51 +186,13 @@ class SportsAPI:
         self.endpoints = endpoints
         self.auth = auth
         self.preset_targets = preset_targets or []
-        self._current_user = None
-        self._clients: Dict[str, httpx.Client] = {}
         self._min_post_interval = max(0.0, post_throttle_seconds)
         self._last_post_time = 0.0
-        
-        # 初始化多用户客户端
-        self._init_multi_user_clients(timeout)
-        
-        # 设置默认客户端
-        default_user = self._get_default_user()
-        if default_user and default_user.nickname in self._clients:
-            self.client = self._clients[default_user.nickname]
-        elif self._clients:
-            # 如果有其他用户客户端，使用第一个
-            self.client = list(self._clients.values())[0]
-        else:
-            # 如果没有用户，创建一个空的客户端
-            self.client = httpx.Client(
-                base_url=self.base_url,
-                headers={
-                    "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Safari/537.36",
-                    "Accept": "application/json, text/plain, */*",
-                    "Referer": f"{self.base_url}/pc/",
-                    "Origin": self.base_url,
-                },
-                timeout=timeout,
-                http2=True
-            )
-    
-    def _get_default_user(self) -> Optional[UserAuth]:
-        """获取默认用户"""
-        if self.auth.users:
-            return self.auth.users[0]
-        return None
-    
-    def _init_multi_user_clients(self, timeout: float):
-        """初始化多用户客户端"""
-        users = self.auth.users or []
-        
-        for user in users:
-            if user.cookie or user.token:
-                self._clients[user.nickname] = self._create_client_for_user(user, timeout)
-    
-    def _create_client_for_user(self, user: UserAuth, timeout: float) -> httpx.Client:
-        """为特定用户创建HTTP客户端"""
+        self.client = self._create_client(timeout)
+
+    def _create_client(self, timeout: float) -> httpx.Client:
+        """Create the current account HTTP client."""
+        user = self.auth.user
         headers = {
             "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Safari/537.36",
             "Accept": "application/json, text/plain, */*",
@@ -238,11 +200,11 @@ class SportsAPI:
             "Origin": self.base_url,
         }
         
-        if user.token:
+        if user and user.token:
             headers["Authorization"] = user.token
         
         cookies: Dict[str, str] = {}
-        if user.cookie and user.cookie.strip():
+        if user and user.cookie and user.cookie.strip():
             # 只使用JSESSIONID，过滤掉无效的Cookie
             for kv in user.cookie.split(";"):
                 if "=" in kv:
@@ -256,6 +218,7 @@ class SportsAPI:
                         cookies[k] = v
         
         return httpx.Client(
+                trust_env=TRUST_ENV,
             base_url=self.base_url,
             headers=headers,
             cookies=cookies,
@@ -263,43 +226,8 @@ class SportsAPI:
             http2=True
         )
     
-    def _get_client_for_user(self, user: Optional[UserAuth]) -> httpx.Client:
-        """获取特定用户的客户端"""
-        if user and user.nickname in self._clients:
-            return self._clients[user.nickname]
-        
-        # 如果没有找到用户客户端，返回第一个可用的客户端
-        if self._clients:
-            return list(self._clients.values())[0]
-        
-        # 如果没有任何客户端，创建一个默认客户端
-        return httpx.Client(
-            base_url=self.base_url,
-            headers={
-                "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Safari/537.36",
-                "Accept": "application/json, text/plain, */*",
-                "Referer": f"{self.base_url}/pc/",
-                "Origin": self.base_url,
-            },
-            timeout=10.0,
-            http2=True
-        )
-    
-    def switch_to_user(self, user: UserAuth):
-        """切换到指定用户"""
-        self._current_user = user
-        self.client = self._get_client_for_user(user)
-    
-    def get_available_users(self) -> List[UserAuth]:
-        """获取可用的用户列表"""
-        return [user for user in (self.auth.users or []) if user.nickname in self._clients]
-
-    # -------------------- generic helpers --------------------
-
     def close(self) -> None:
-        """关闭所有客户端连接"""
-        for client in self._clients.values():
-            client.close()
+        self.client.close()
 
     def _req(
         self,
@@ -443,12 +371,12 @@ class SportsAPI:
             "feildType": field_type_id,
         }
 
-        try:
-            resp = self._req("POST", path, data=data, headers=headers)
-        except Exception:
-            return []
-
+        resp = self._req("POST", path, data=data, headers=headers)
         payload = _maybe_parse_json(resp.json())
+        if not isinstance(payload, dict):
+            raise RuntimeError("日期余位接口返回格式异常，请稍后重试")
+        if payload.get("code") not in (None, 0, "0"):
+            raise RuntimeError(payload.get("msg") or payload.get("message") or "日期余位查询失败")
         entries: List[DateAvailability] = []
         if isinstance(payload, dict):
             container = payload.get("data") or payload.get("result") or payload.get("list") or payload.get("rows")
@@ -564,12 +492,12 @@ class SportsAPI:
                         or sign_info.get("end")
                     )
                     slot_id = entry.get("sign") or entry.get("id") or f"{field_id}:{idx}"
-                    price_raw = entry.get("price") or entry.get("amount")
+                    price_raw = entry.get("price") if entry.get("price") is not None else entry.get("amount")
                     try:
                         price_val = float(price_raw) if price_raw not in (None, "") else None
                     except (TypeError, ValueError):
                         price_val = None
-                    count = entry.get("count") or entry.get("remain")
+                    count = entry.get("count") if entry.get("count") is not None else entry.get("remain")
                     remain_val: Optional[int] = None
                     if isinstance(count, (int, float)):
                         remain_val = int(count)
@@ -579,8 +507,8 @@ class SportsAPI:
                     available_bool = False
                     if remain_val is not None:
                         available_bool = remain_val > 0
-                    if status:
-                        available_bool = available_bool or status in {"0", "1"}
+                    elif status:
+                        available_bool = status in {"0", "1"}
                     slots.append(
                         Slot(
                             slot_id=str(slot_id),
@@ -618,12 +546,21 @@ class SportsAPI:
                 slot_id = str(item.get("id") or item.get("detailId") or item.get("timeId") or item.get("siteId") or "")
                 start = item.get("startTime") or item.get("beginTime") or item.get("startHour") or item.get("timeStart")
                 end = item.get("endTime") or item.get("finishTime") or item.get("endHour") or item.get("timeEnd")
-                remain = item.get("remain") or item.get("left") or item.get("availableNumber")
+                remain = next((item[key] for key in ("remain", "left", "availableNumber") if item.get(key) is not None), None)
+                try:
+                    remain_value = int(remain) if remain is not None else None
+                except (TypeError, ValueError):
+                    remain_value = None
                 capacity = item.get("capacity") or item.get("total") or item.get("maxNumber")
-                available = item.get("isFull")
-                if isinstance(available, str) and available.isdigit():
-                    available = available == "0"
-                available_bool = _bool(item.get("available")) or _bool(item.get("status")) or _bool(remain) or not _bool(available)
+                if remain_value is not None:
+                    available_bool = remain_value > 0
+                elif item.get("available") is not None:
+                    available_bool = _bool(item["available"])
+                elif item.get("isFull") is not None:
+                    available_bool = not _bool(item["isFull"])
+                else:
+                    available_bool = _bool(item.get("status"))
+                price = item.get("price") if item.get("price") is not None else item.get("amount")
                 field_name = item.get("fieldName") or item.get("siteName") or item.get("name") or item.get("courtName")
                 area_name = item.get("areaName") or item.get("fieldAreaName") or item.get("venueFieldName") or item.get("zoneName")
                 slots.append(
@@ -631,9 +568,9 @@ class SportsAPI:
                         slot_id=slot_id or f"{venue_id}:{field_type_id}:{start}-{end}",
                         start=str(start),
                         end=str(end),
-                        price=float(item.get("price") or item.get("amount") or 0) if item.get("price") or item.get("amount") else None,
+                        price=float(price) if price not in (None, "") else None,
                         available=available_bool,
-                        remain=int(remain) if isinstance(remain, (int, float, str)) and str(remain).isdigit() else None,
+                        remain=remain_value,
                         capacity=int(capacity) if isinstance(capacity, (int, float, str)) and str(capacity).isdigit() else None,
                         field_name=str(field_name) if field_name is not None else None,
                         area_name=str(area_name) if area_name is not None else None,
@@ -722,17 +659,6 @@ class SportsAPI:
             )
         return slots
 
-    def order_immediately(self, intent: OrderIntent) -> Dict[str, Any]:
-        if not intent.order_id:
-            raise ValueError("order_immediately requires intent.order_id")
-        resp = self._req(
-            "POST",
-            self.endpoints.order_submit,
-            data={"orderId": intent.order_id},
-            headers={"Content-Type": "application/x-www-form-urlencoded"},
-        )
-        return resp.json()
-
     def cancel_order(self, order_id: str) -> List[Dict[str, Any]]:
         if not order_id:
             raise ValueError("cancel_order requires order_id")
@@ -757,9 +683,15 @@ class SportsAPI:
                 continue
             resp = self._req("POST", path, data=payload, headers=headers)
             try:
-                results.append(resp.json())
-            except Exception:
-                results.append({"raw": resp.text})
+                result = resp.json()
+            except ValueError as exc:
+                raise RuntimeError("取消订单接口未返回 JSON，请先检查登录状态并查询订单") from exc
+            if not isinstance(result, dict):
+                raise RuntimeError("取消订单接口返回格式异常，请查询订单确认结果")
+            code = result.get("code", result.get("status"))
+            if result.get("error") or code not in (None, 0, "0", 1, "1", 2, "2", 3, "3"):
+                raise RuntimeError(result.get("msg") or result.get("message") or f"取消订单失败，code={code}")
+            results.append(result)
         return results
 
     # -------------------- utilities --------------------

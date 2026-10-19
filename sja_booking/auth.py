@@ -6,6 +6,10 @@ import base64
 import json
 import os
 import re
+from html import unescape
+from html.parser import HTMLParser
+import threading
+from functools import wraps
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -13,8 +17,30 @@ from typing import Any, Awaitable, Callable, Dict, Iterable, Optional, Tuple
 from urllib.parse import urlparse
 
 import httpx
+from .config import TRUST_ENV
 
 from .models import AuthConfig, EndpointSet
+
+
+class LoginImages(HTMLParser):
+    def __init__(self):
+        super().__init__()
+        self.images = {}
+
+    def handle_starttag(self, tag, attrs):
+        attrs = dict(attrs)
+        if tag == "img" and attrs.get("id"):
+            self.images[attrs["id"]] = attrs.get("src", "")
+
+_STORE_LOCK = threading.RLock()
+
+
+def synchronized(method):
+    @wraps(method)
+    def locked(*args, **kwargs):
+        with _STORE_LOCK:
+            return method(*args, **kwargs)
+    return locked
 
 try:  # 可选加密 support
     from cryptography.fernet import Fernet  # type: ignore
@@ -25,8 +51,6 @@ except Exception:  # pragma: no cover - 加密依赖非必选
 
 
 HiddenPair = Tuple[str, str]
-CaptchaSolver = Callable[[bytes], Awaitable[Tuple[str, float]]]
-HumanFallback = Callable[[bytes], Awaitable[str]]
 
 
 HIDDEN_RE = re.compile(
@@ -44,31 +68,6 @@ CAPTCHA_UUID_RE = re.compile(r"uuid=([0-9a-f\-]{8,})", re.IGNORECASE)
 
 def _now_utc() -> datetime:
     return datetime.now(timezone.utc)
-
-
-def _save_login_debug(prefix: str, content: str, url: httpx.URL) -> None:
-    try:
-        debug_dir = Path.home() / ".sja" / "debug"
-        debug_dir.mkdir(parents=True, exist_ok=True)
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        base_name = f"{prefix}_{timestamp}"
-        html_path = debug_dir / f"{base_name}.html"
-        meta_path = debug_dir / f"{base_name}.meta"
-        html_path.write_text(content, encoding="utf-8", errors="ignore")
-        meta_path.write_text(
-            json.dumps(
-                {
-                    "url": str(url),
-                    "saved_at": datetime.now(timezone.utc).isoformat(),
-                },
-                ensure_ascii=False,
-                indent=2,
-            ),
-            encoding="utf-8",
-        )
-        print(f"[yellow]登录失败调试信息已保存: {html_path}[/yellow]")
-    except Exception:  # pragma: no cover - debug helper best effort
-        pass
 
 
 def _cookie_header(cookies: httpx.Cookies, *, domain: Optional[str] = None) -> str:
@@ -108,27 +107,22 @@ class AuthState:
     metadata: Dict[str, Any] = field(default_factory=dict)
 
 
-@dataclass
-class AuthResult:
-    cookies: httpx.Cookies
-    cookie_header: str
-    expires_at: datetime
-
-
 class AuthStore:
     """文件持久化，支持可选 Fernet 加密。"""
 
-    def __init__(self, path: Optional[Path] = None, *, secret_env: str = "SJABOT_SECRET") -> None:
-        default_store = os.getenv("SJABOT_CREDENTIAL_STORE") or os.getenv("SJA_CREDENTIAL_STORE")
+    def __init__(self, path: Optional[Path] = None, *, secret_env: str = "SJA_SECRET") -> None:
+        default_store = os.getenv("SJA_CREDENTIAL_STORE")
         if default_store:
             default_path = Path(default_store).expanduser()
         else:
-            default_path = Path(__file__).resolve().parent.parent / "data" / "credentials.json"
+            default_path = Path(os.environ.get("SJA_DATA_DIR", Path.home() / ".local/share/sja-sport")) / "credentials.json"
 
         self.path = Path(path).expanduser() if path else default_path
         self.path = self.path.resolve()
         self.path.parent.mkdir(parents=True, exist_ok=True)
         secret = os.getenv(secret_env)
+        if secret and not _FERNET_AVAILABLE:
+            raise RuntimeError("SJA_SECRET requires cryptography; install the secure extra or unset SJA_SECRET")
         self._fernet: Optional[Any] = None
         if secret and _FERNET_AVAILABLE:
             key = secret.strip().encode("utf-8")
@@ -138,14 +132,19 @@ class AuthStore:
                 key = base64.urlsafe_b64encode(key)
             try:
                 self._fernet = Fernet(key)
-            except Exception:
-                self._fernet = None
+            except ValueError as exc:
+                raise RuntimeError("SJA_SECRET cannot initialize credential encryption") from exc
 
     def save(self, payload: Dict[str, Any]) -> None:
         data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
         if self._fernet:
             data = self._fernet.encrypt(data)
-        self.path.write_bytes(data)
+        temporary = self.path.with_suffix(".tmp")
+        fd = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, "wb") as handle:
+            handle.write(data)
+        temporary.chmod(0o600)
+        temporary.replace(self.path)
 
     def load(self) -> Optional[Dict[str, Any]]:
         if not self.path.exists():
@@ -154,12 +153,12 @@ class AuthStore:
         if self._fernet:
             try:
                 data = self._fernet.decrypt(data)
-            except Exception:
-                return None
+            except Exception as exc:
+                raise RuntimeError("凭据解密失败，请核对 SJA_SECRET；原文件已保留") from exc
         try:
             return json.loads(data.decode("utf-8"))
-        except json.JSONDecodeError:
-            return None
+        except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+            raise RuntimeError("凭据文件损坏或未使用正确的解密配置；原文件已保留") from exc
 
     def clear(self) -> None:
         if self.path.exists():
@@ -167,153 +166,47 @@ class AuthStore:
 
 
 class AuthManager:
-    def __init__(self, store: Optional[AuthStore] = None) -> None:
+    """Persist exactly one verified account. A successful login replaces it."""
+    def __init__(self, store: Optional[AuthStore] = None):
         self.store = store or AuthStore()
 
-    def _load_data(self) -> Tuple[Dict[str, Any], bool]:
-        data_raw = self.store.load()
-        changed = False
-        if not isinstance(data_raw, dict):
-            data_raw = {}
-            changed = True
-
-        data = dict(data_raw)
-
-        # 迁移旧结构
-        if "cookies" not in data or not isinstance(data.get("cookies"), dict):
-            cookies: Dict[str, Any] = {}
-            cookie_value = data.get("cookie")
-            expires_at = data.get("expires_at")
-            if cookie_value:
-                cookies["__default__"] = {
-                    "cookie": cookie_value,
-                    "expires_at": expires_at,
-                }
-                data["active_user"] = "__default__"
-            data["cookies"] = cookies
-            changed = True
-
-        data.setdefault("version", 2)
-        data.setdefault("cookies", {})
-        return data, changed
-
-    def load_all_cookies(self) -> Tuple[Dict[str, Dict[str, Any]], Optional[str]]:
-        data, changed = self._load_data()
-        cookies: Dict[str, Dict[str, Any]] = {}
-        stale_keys: Dict[str, Any] = {}
-        now = _now_utc()
-
-        for key, entry in list(data["cookies"].items()):
-            if not isinstance(entry, dict):
-                stale_keys[key] = entry
-                continue
-            cookie_value = entry.get("cookie")
-            if not cookie_value:
-                stale_keys[key] = entry
-                continue
-
-            expires_raw = entry.get("expires_at")
-            expires_at = None
-            if expires_raw:
-                try:
-                    expires_at = datetime.fromisoformat(str(expires_raw))
-                except Exception:
-                    expires_at = None
-
-            if expires_at and expires_at < now:
-                stale_keys[key] = entry
-                continue
-
-            if not expires_at:
-                expires_at = now + timedelta(hours=4)
-
-            record = {
-                "cookie": cookie_value,
-                "expires_at": expires_at,
-                "nickname": entry.get("nickname"),
-                "username": entry.get("username") or (None if key == "__default__" else key),
-            }
-            cookies[key] = record
-
-        if stale_keys:
-            for key in stale_keys:
-                data["cookies"].pop(key, None)
-            changed = True
-
-        if changed:
-            self.store.save(data)
-
-        return cookies, data.get("active_user")
-
-    def load_cookie(self, username: Optional[str] = None) -> Optional[Tuple[str, datetime]]:
-        cookies, active_user = self.load_all_cookies()
-        key: Optional[str] = None
-
-        if username and username in cookies:
-            key = username
-        elif active_user and active_user in cookies:
-            key = active_user
-        elif cookies:
-            key = next(iter(cookies.keys()))
-
-        if not key:
+    @synchronized
+    def load_record(self):
+        record = self.store.load()
+        if not record:
             return None
-        record = cookies[key]
-        return record["cookie"], record["expires_at"]
+        if not isinstance(record, dict) or "cookies" in record:
+            raise RuntimeError("凭据文件必须为单账号结构，请根据 README 迁移或重新登录")
+        if not record.get("cookie"):
+            return None
+        result = dict(record)
+        value = result.get("expires_at")
+        if value:
+            expires = datetime.fromisoformat(value)
+            result["expires_at"] = expires.replace(tzinfo=timezone.utc) if expires.tzinfo is None else expires
+        return result
 
-    def save_cookie(
-        self,
-        cookie: str,
-        expires_at: datetime,
-        *,
-        username: Optional[str] = None,
-        nickname: Optional[str] = None,
-    ) -> None:
-        data, _ = self._load_data()
-        key = username or "__default__"
-        entry: Dict[str, Any] = {
-            "cookie": cookie,
-            "expires_at": expires_at.isoformat(),
-            "updated_at": _now_utc().isoformat(),
-        }
-        if username:
-            entry["username"] = username
-        if nickname:
-            entry["nickname"] = nickname
+    @synchronized
+    def save_cookie(self, cookie, expires_at, *, username=None, nickname=None):
+        self.store.save({"username": username, "nickname": nickname, "cookie": cookie,
+                         "expires_at": expires_at.isoformat()})
 
-        data["cookies"][key] = entry
-        data["active_user"] = key
-        self.store.save(data)
+    @synchronized
+    def update_identity(self, cookie, *, username=None, nickname=None):
+        """Enrich this session's identity without replacing newer credentials."""
+        record = self.store.load()
+        if not record or record.get("cookie") != cookie:
+            return
+        updated = dict(record)
+        if username and username != "__default__":
+            updated["username"] = username
+        if nickname and record.get("nickname") in (None, "", "__default__"):
+            updated["nickname"] = nickname
+        if updated != record:
+            self.store.save(updated)
 
-    def set_active_user(self, username: Optional[str]) -> bool:
-        data, _ = self._load_data()
-        if username is None:
-            data["active_user"] = None
-            self.store.save(data)
-            return True
-
-        if username not in data["cookies"]:
-            return False
-        data["active_user"] = username
-        self.store.save(data)
-        return True
-
-    def delete_user(self, username: str) -> bool:
-        data, _ = self._load_data()
-        removed = False
-        for key in list(data["cookies"].keys()):
-            entry = data["cookies"].get(key, {})
-            entry_username = entry.get("username") or key
-            if entry_username == username:
-                data["cookies"].pop(key, None)
-                removed = True
-        if removed:
-            if data.get("active_user") == username:
-                data["active_user"] = None
-            self.store.save(data)
-        return removed
-
-    def clear(self) -> None:
+    @synchronized
+    def clear(self):
         self.store.clear()
 
 
@@ -331,7 +224,7 @@ class AuthClient:
         self.base_url = base_url.rstrip("/")
         self.endpoints = endpoints
         self.auth_config = auth_config
-        self._client = httpx.AsyncClient(timeout=timeout, headers={"User-Agent": "Mozilla/5.0"}, follow_redirects=False)
+        self._client = httpx.AsyncClient(timeout=timeout, headers={"User-Agent": "Mozilla/5.0"}, follow_redirects=False, trust_env=TRUST_ENV)
 
     async def close(self) -> None:
         await self._client.aclose()
@@ -391,7 +284,7 @@ class AuthClient:
         match = CAPTCHA_IMG_RE.search(html)
         if not match:
             return None, None
-        raw_src = match.group("src")
+        raw_src = unescape(match.group("src"))
         if not raw_src or raw_src.endswith("image/captcha.png"):
             raw_src = ""
         captcha_url = AuthClient._absolute_url(base_url, raw_src) if raw_src else None
@@ -410,6 +303,8 @@ class AuthClient:
         html = resp.text
         hidden = self._parse_hidden_inputs(html)
         metadata: Dict[str, Any] = {}
+        images = LoginImages()
+        images.feed(html)
 
         captcha_url, captcha_uuid = self._extract_captcha_info(resp.request.url, html)
         if captcha_uuid and "uuid" not in hidden:
@@ -420,6 +315,16 @@ class AuthClient:
             if match:
                 hidden["uuid"] = match.group(1)
                 metadata["captcha_uuid"] = match.group(1)
+
+        if "qr-img" in images.images:
+            image_url = httpx.URL(self._absolute_url(resp.request.url, images.images["qr-img"] or "qrcode"))
+            qr_uuid = image_url.params.get("uuid") or metadata.get("captcha_uuid") or hidden.get("uuid")
+            if image_url.host != resp.request.url.host or not qr_uuid:
+                raise RuntimeError("二维码登录页面返回异常地址")
+            image_url = image_url.copy_merge_params({"uuid": qr_uuid})
+            metadata.update(qr_image_url=str(image_url), qr_uuid=qr_uuid,
+                            qr_socket_url=f"{'wss' if resp.request.url.scheme == 'https' else 'ws'}://{resp.request.url.host}/jaccount/sub/{qr_uuid}",
+                            qr_express_url=str(resp.request.url.join("expresslogin").copy_merge_params({"uuid": qr_uuid})))
 
         form_action = self._extract_form_action(html) or self.endpoints.login_submit or str(resp.request.url)
         submit_url = self._absolute_url(resp.request.url, form_action)
@@ -495,76 +400,11 @@ class AuthClient:
                 current = await self._client.request(method, target, headers=headers)
                 continue
             break
+        current.raise_for_status()
+        if "jaccount" in (current.request.url.host or "").lower():
+            reason = self._extract_error_message(current.text)
+            raise RuntimeError(reason or "登录停留在 jAccount，请检查账号、密码、验证码或额外认证要求")
         return current
-
-    async def login(
-        self,
-        username: str,
-        password: str,
-        *,
-        solver: Optional[CaptchaSolver] = None,
-        fallback: Optional[HumanFallback] = None,
-        threshold: float = 0.3,
-        expires_in_hours: int = 8,
-    ) -> AuthResult:
-        state = await self.prepare()
-        captcha_text: Optional[str] = None
-        if state.captcha_required:
-            if not solver:
-                from .ocr import solve_captcha_async  # 延迟导入
-
-                solver = solve_captcha_async
-            image = await self.fetch_captcha(state)
-            
-            # 保存验证码图片用于调试
-            import os
-            import tempfile
-            from datetime import datetime
-            debug_dir = os.path.join(os.path.expanduser("~"), ".sja", "debug")
-            os.makedirs(debug_dir, exist_ok=True)
-            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            debug_path = os.path.join(debug_dir, f"captcha_{timestamp}.png")
-            with open(debug_path, "wb") as f:
-                f.write(image)
-            print(f"[blue]验证码图片已保存到: {debug_path}[/blue]")
-            
-            captcha_text = ""
-            confidence = 0.0
-            if solver:
-                captcha_text, confidence = await solver(image)
-            # 智能验证码处理策略
-            if not captcha_text:
-                if fallback:
-                    captcha_text = await fallback(image)
-            elif confidence < threshold:
-                # 如果置信度低但结果长度合理，仍然尝试使用
-                # if 4 <= len(captcha_text) <= 6:
-                #     print(f"[yellow]验证码识别置信度较低 ({confidence:.2f})，但将尝试使用识别结果: {captcha_text}[/yellow]")
-                # else:
-                if fallback:
-                    captcha_text = await fallback(image)
-            else:
-                print(f"[green]验证码识别成功，置信度: {confidence:.2f}, 结果: {captcha_text}[/green]")
-        submit_resp = await self.submit(state, username, password, captcha_text)
-        final_resp = await self.follow_redirects(submit_resp, max_jumps=8)
-
-        final_host = final_resp.request.url.host or ""
-        if "jaccount" in final_host.lower():
-            error_message = self._extract_error_message(final_resp.text) or f"{final_resp.status_code}"
-            _save_login_debug("login_failure", final_resp.text, final_resp.request.url)
-            raise RuntimeError(f"登录失败：{error_message}")
-
-        if final_resp.status_code >= 400:
-            _save_login_debug("login_failure", final_resp.text, final_resp.request.url)
-            raise RuntimeError(f"登录失败：{final_resp.status_code}")
-
-        sports_domain = urlparse(self.base_url).hostname
-        cookie_header = _cookie_header(self._client.cookies, domain=sports_domain)
-        if not cookie_header:
-            _save_login_debug("login_no_cookie", final_resp.text, final_resp.request.url)
-            raise RuntimeError("登录失败：未获得场馆系统会话 Cookie")
-        expires_at = _now_utc() + timedelta(hours=expires_in_hours)
-        return AuthResult(_clone_cookies(self._client.cookies), cookie_header, expires_at)
 
     async def __aenter__(self) -> "AuthClient":
         return self
@@ -578,99 +418,3 @@ class AuthClient:
         for match in HIDDEN_RE.finditer(html):
             form[match.group("name")] = match.group("value")
         return form
-
-
-async def default_fallback_prompt(image_bytes: bytes) -> str:
-    import tempfile
-
-    path = Path(tempfile.gettempdir()) / f"captcha_{int(_now_utc().timestamp())}.png"
-    path.write_bytes(image_bytes)
-    console_message = (
-        "验证码识别置信度不足，请查看文件并输入结果：\n"
-        f"{path}\n  输入验证码："
-    )
-    loop = asyncio.get_running_loop()
-    return await loop.run_in_executor(None, lambda: input(console_message).strip())
-
-
-async def perform_login(
-    base_url: str,
-    endpoints: EndpointSet,
-    auth_config: AuthConfig,
-    username: str,
-    password: str,
-    *,
-    solver: Optional[CaptchaSolver] = None,
-    fallback: Optional[HumanFallback] = None,
-    threshold: float = 0.3,
-    max_retries: int = 5,
-    retry_delay: float = 2.0,
-) -> AuthResult:
-    """
-    执行登录，支持重试机制
-    
-    Args:
-        base_url: 基础URL
-        endpoints: 端点配置
-        auth_config: 认证配置
-        username: 用户名
-        password: 密码
-        solver: 验证码求解器
-        fallback: 人工回退函数
-        threshold: 验证码置信度阈值
-        max_retries: 最大重试次数
-        retry_delay: 重试间隔（秒）
-    
-    Returns:
-        AuthResult: 认证结果
-        
-    Raises:
-        RuntimeError: 所有重试都失败后抛出最后一次的错误
-    """
-    last_error = None
-    
-    for attempt in range(max_retries):
-        try:
-            async with AuthClient(base_url, endpoints, auth_config) as client:
-                result = await client.login(
-                    username,
-                    password,
-                    solver=solver,
-                    fallback=fallback or default_fallback_prompt,
-                    threshold=threshold,
-                )
-                
-                if attempt > 0:
-                    print(f"[green]✅ 登录成功（第{attempt + 1}次尝试）[/green]")
-                
-                return result
-                
-        except RuntimeError as e:
-            last_error = e
-            error_msg = str(e)
-            
-            # 检查是否是验证码相关的错误
-            if "验证码" in error_msg or "captcha" in error_msg.lower():
-                print(f"[yellow]⚠️  验证码错误（第{attempt + 1}次尝试）: {error_msg}[/yellow]")
-            elif "Missing your account" in error_msg:
-                print(f"[yellow]⚠️  账号信息错误（第{attempt + 1}次尝试）: {error_msg}[/yellow]")
-            else:
-                print(f"[yellow]⚠️  登录失败（第{attempt + 1}次尝试）: {error_msg}[/yellow]")
-            
-            # 如果不是最后一次尝试，等待后重试
-            if attempt < max_retries - 1:
-                print(f"[blue]⏳ 等待 {retry_delay} 秒后重试...[/blue]")
-                await asyncio.sleep(retry_delay)
-            else:
-                print(f"[red]❌ 登录失败，已尝试 {max_retries} 次[/red]")
-        
-        except Exception as e:
-            last_error = e
-            print(f"[red]❌ 登录过程中发生错误（第{attempt + 1}次尝试）: {e}[/red]")
-            
-            if attempt < max_retries - 1:
-                print(f"[blue]⏳ 等待 {retry_delay} 秒后重试...[/blue]")
-                await asyncio.sleep(retry_delay)
-    
-    # 所有重试都失败了
-    raise RuntimeError(f"登录失败，已尝试 {max_retries} 次。最后一次错误: {last_error}")

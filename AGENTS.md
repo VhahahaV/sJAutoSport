@@ -1,35 +1,31 @@
-# Repository Guidelines
+# sJAutoSport project map
 
-Automates SJTU sports venue bookings with a FastAPI backend, React control panel, and QQ bot workflow. Use these notes to collaborate smoothly.
+Single-account SJTU sports booking: one Python core and two heads (CLI + React).
 
-## Project Structure & Module Organization
-- `sja_booking/` hosts the booking engine, schedulers, and credential helpers used by every entry point.
-- `web_api/` contains the FastAPI app, routers, and background tasks; `start_integrated.py` wires the long-running services together.
-- `frontend/` is a Vite + React + TypeScript SPA; `bot/` holds the NoneBot adapters and plugins.
-- `config/` and `data/` store environment-driven templates (`config/users.json`, `data/credentials.json`); `scripts/` bundles deployment helpers; docs live in `docs/`.
+- `sja_booking/operations.py`: canonical operation names, Pydantic input contracts and dispatch. Run `sja schema` before using an operation. No duplicate protocol in Web.
+- `sja_booking/service.py`: verified password/captcha and QR login, queries, booking, orders, live monitors and session keepalive.
+- `sja_booking/auth.py`, `api.py`, `order.py`: campus protocol. Never log passwords/cookies or recognize captchas automatically; return images for the user.
+- `sja_booking/database.py`: SQLite state/history/events. `config.py`: public presets, environment configuration.
+- `sja_booking/daemon.py`: singleton core process and private Unix socket. Both CLI and HTTP use this process; stopping a head must not stop monitors.
+- `sja_booking/cli.py`: `sja`, also `python -m sja_booking`.
+- `web_api/app.py`: thin localhost HTTP gateway; `frontend/`: Vite + React + TypeScript.
+- `frontend/src/pages/Order.tsx`: canonical `/slots` booking flow, from venue/date/slots through confirmation. `/order` redirects here.
+- `frontend/src/pages/Dashboard.tsx` and `components/AvailabilityCard.tsx`: saved availability cards; `dashboard.*` core operations persist config and screen date summaries before loading slots. Fixed card height, daily chart, scrollable full details.
+- Other protected pages: overview `/dashboard`, orders `/orders`, live monitors `/monitor`, account and keepalive `/keep-alive`. `/` shows login only when unauthenticated.
+- `data/`: ignored private runtime state. Keep the same `SJA_DATA_DIR` for core, CLI and HTTP. Do not commit this directory or `deploy.env`.
 
-## Build, Test, and Development Commands
-- `python -m venv .venv && source .venv/bin/activate` prepares a local virtualenv; `pip install -r requirements.txt` installs backend/bot deps.
-- `uvicorn web_api.app:app --reload --port 8000` runs the API; `python start_integrated.py` launches API, worker, and bot together.
-- `cd frontend && npm install` for dependencies, then `npm run dev` (hot reload) or `npm run build` for production bundles.
-- `npm run lint` applies ESLint/Prettier rules to the SPA; add `--fix` locally before committing.
+## Commands
 
-## Coding Style & Naming Conventions
-- Python: 4-space indentation, type-hint public functions, prefer `Path` over raw strings, and format with `black` followed by `flake8` and `mypy`.
-- React/TypeScript: keep components in PascalCase, hooks/utilities in camelCase, and colocate styles/assets beside the component under `frontend/src`.
-- Keep environment templates (`deploy.env`, `config/*.json`) free of real secrets; example placeholders should be uppercase snake case.
+Python 3.11+, Linux. See [README.md](README.md) for installation/login/deployment.
 
-## Testing Guidelines
-- Add backend tests under `tests/` using `pytest`/`pytest-asyncio`; run `pytest -q` before pushing.
-- Mock external services (sports API, QQ bot) via fixtures; avoid hitting production endpoints.
-- Target meaningful coverage on booking flows, credential rotation, and API contracts; document any skipped scenarios in the PR.
+- Install: `python -m pip install -c constraints.txt -e '.[web,test]'` inside `.venv`.
+- CLI: `.venv/bin/sja daemon start`, `.venv/bin/sja schema`.
+- API: `.venv/bin/python -m uvicorn web_api.app:app --host 127.0.0.1 --port 8000`.
+- Frontend: `cd frontend && npm ci && npm run dev`; `npm run build` typechecks and builds.
+- Tests: `.venv/bin/python -m pytest -q`; mock campus mutations. Never make real bookings/refunds during validation.
 
-## Commit & Pull Request Guidelines
-- Follow Conventional Commits (`feat:`, `fix:`, `refactor:`) as seen in history; keep bodies imperative and scoped to one change.
-- Each PR should include: summary, manual/automated test results, affected services, new env vars, and UI screenshots when touching the frontend.
-- Reference related issues/tasks and note rollout steps (e.g., `scripts/deploy.sh`) so operators can execute them after merge.
+## Boundaries
 
-## Deployment & Configuration Tips
-- Never commit populated `deploy.env`, `config/users.json`, or `data/credentials.json`; share secrets via secure channels.
-- Document any dependency on OCR (Tesseract) or captchas in the PR so ops can provision it.
-- Prefer upgrading services via `scripts/deploy.sh` or `deploy_quick.sh`; call out schema or cache changes that require manual intervention.
+One account, one credential record, one core runtime. No QQ bot, account pools, scheduled reservations, browser automation or OCR. Live monitoring may optionally book immediately when a slot appears; keepalive periodically maintains the saved login. These are the only background workflows.
+
+Preserve user edits, stage specific files, and commit/push only when requested. Use public placeholder identities in tests/docs. Update this map and README when operation or page boundaries change.

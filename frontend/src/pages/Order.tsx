@@ -1,510 +1,70 @@
-import { FormEvent, useCallback, useEffect, useMemo, useState } from "react";
-
-import {
-  api,
-  type AggregatedSlotEntry,
-  type DateAvailabilityStatus,
-  type OrderResponse,
-  type Preset,
-  type UserSummary,
-} from "../lib/api";
+import { useEffect, useState } from "react";
+import { Link, useSearchParams } from "react-router-dom";
+import { api, type AggregatedSlotEntry, type DateAvailabilityStatus, type OrderResponse, type Preset } from "../lib/api";
 import PresetSelector from "../components/PresetSelector";
-import { aggregateAvailableSlots } from "../lib/slotAggregations";
-import { czqDebugEnd, czqDebugLog, czqDebugStart } from "../lib/czqDebug";
 
-const WEEKDAY_LABELS = ["周日", "周一", "周二", "周三", "周四", "周五", "周六"];
-
-const formatDateLabel = (value: string): string => {
-  const date = new Date(`${value}T00:00:00`);
-  if (Number.isNaN(date.getTime())) {
-    return value;
-  }
-  const month = `${date.getMonth() + 1}`.padStart(2, "0");
-  const day = `${date.getDate()}`.padStart(2, "0");
-  const weekday = WEEKDAY_LABELS[date.getDay()] ?? "";
-  return `${month}-${day} ${weekday}`.trim();
-};
-
-const buildSlotLabel = (entry: AggregatedSlotEntry): string => {
-  const remainDisplay = entry.total_remain ?? entry.available_count ?? 0;
-  return `${entry.start} 余${remainDisplay}`;
-};
-
-const OrderPage = () => {
+export default function OrderPage() {
+  const [params, setParams] = useSearchParams();
   const [presets, setPresets] = useState<Preset[]>([]);
-  const [users, setUsers] = useState<UserSummary[]>([]);
-  const [selectedPreset, setSelectedPreset] = useState<number | "">("");
-  const [selectedUser, setSelectedUser] = useState<string>("");
-  const [dateAvailability, setDateAvailability] = useState<DateAvailabilityStatus[]>([]);
-  const [selectedDate, setSelectedDate] = useState<string>("");
-  const [slotEntries, setSlotEntries] = useState<AggregatedSlotEntry[]>([]);
-  const [selectedSlotKey, setSelectedSlotKey] = useState<string>("");
-  const [slotsCache, setSlotsCache] = useState<Record<string, AggregatedSlotEntry[]>>({});
-  const [availabilityRequested, setAvailabilityRequested] = useState(false);
-  const [availabilityLoading, setAvailabilityLoading] = useState(false);
-  const [slotsLoading, setSlotsLoading] = useState(false);
-  const [submitLoading, setSubmitLoading] = useState(false);
+  const preset = Number(params.get("preset")) || 5;
+  const requestedDate = params.get("date") || "";
+  const [dates, setDates] = useState<DateAvailabilityStatus[]>([]);
+  const [date, setDate] = useState("");
+  const [slots, setSlots] = useState<AggregatedSlotEntry[]>([]);
+  const [selected, setSelected] = useState<AggregatedSlotEntry | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [booking, setBooking] = useState(false);
+  const [error, setError] = useState("");
   const [result, setResult] = useState<OrderResponse | null>(null);
-  const [error, setError] = useState<string | null>(null);
-
-  const userOptions = useMemo(
-    () =>
-      users
-        .map((user, index) => {
-          const username = user.username?.trim();
-          const nickname = user.nickname?.trim();
-          const compactUsername =
-            username && username.includes("@") ? username.split("@", 1)[0] : username;
-          const value = username || nickname || compactUsername || "";
-          if (!value) {
-            return null;
-          }
-          const label = nickname || compactUsername || `用户 ${index + 1}`;
-          const description =
-            username && nickname && username !== nickname
-              ? username
-              : username && compactUsername !== username
-                ? username
-                : undefined;
-          return {
-            id: value,
-            value,
-            label,
-            description,
-          };
-        })
-        .filter((entry): entry is NonNullable<typeof entry> => entry !== null),
-    [users],
-  );
-
-  const selectDefaultPreset = useCallback((presetList: Preset[]): number | "" => {
-    if (presetList.length === 0) {
-      return "";
-    }
-    const preferred = presetList.find((item) => {
-      const venue = item.venue_name || "";
-      const field = item.field_type_name || "";
-      return /学活|学生中心/.test(venue) && /健身中心|学生健身中心/.test(field);
-    });
-    return preferred?.index ?? presetList[0].index;
-  }, []);
-
-  const loadSlots = useCallback(
-    async (presetId: number, dateStr: string, autoSelect: boolean = false) => {
-      if (!dateStr) {
-        setSlotEntries([]);
-        setSelectedSlotKey("");
-        return;
-      }
-
-      const overallStart = czqDebugStart(`OrderPage.loadSlots preset=${presetId} date=${dateStr}`);
-      let requestStart: number | null = null;
-      setSlotsLoading(true);
-      setError(null);
-      setResult(null);
-      try {
-        requestStart = czqDebugStart(`OrderPage.loadSlots.request preset=${presetId} date=${dateStr}`);
-        const response = await api.getImmediateSlots({
-          preset: presetId,
-          date: dateStr,
-          show_full: true,
-        });
-        if (requestStart !== null) {
-          czqDebugEnd(`OrderPage.loadSlots.response preset=${presetId} date=${dateStr}`, requestStart);
-          requestStart = null;
-        }
-        const entries = aggregateAvailableSlots(response.slots || [], response.date);
-        setSlotEntries(entries);
-        if (autoSelect) {
-          const first = entries[0];
-          setSelectedSlotKey(first ? first.start : "");
-        }
-        setSlotsCache((prev) => ({ ...prev, [dateStr]: entries }));
-        czqDebugEnd(`OrderPage.loadSlots.complete preset=${presetId} date=${dateStr} entries=${entries.length}`, overallStart);
-      } catch (err) {
-        setSlotEntries([]);
-        if (autoSelect) {
-          setSelectedSlotKey("");
-        }
-        setError((err as Error).message);
-        czqDebugLog(`OrderPage.loadSlots.error preset=${presetId} date=${dateStr}`);
-        if (requestStart !== null) {
-          czqDebugEnd(`OrderPage.loadSlots.response preset=${presetId} date=${dateStr} error`, requestStart);
-          requestStart = null;
-        }
-        czqDebugEnd(`OrderPage.loadSlots.complete preset=${presetId} date=${dateStr} error`, overallStart);
-      } finally {
-        setSlotsLoading(false);
-      }
-    },
-    [],
-  );
-
-  const loadAvailability = useCallback(
-    async (presetId: number, autoLoadSlots: boolean = false) => {
-      let succeeded = false;
-      setAvailabilityLoading(true);
-      setError(null);
-      setResult(null);
-      setSlotsCache({});
-      setSlotEntries([]);
-      setSelectedSlotKey("");
-      const overallStart = czqDebugStart(`OrderPage.loadAvailability preset=${presetId}`);
-      let requestStart: number | null = null;
-      try {
-        requestStart = czqDebugStart(`OrderPage.loadAvailability.request preset=${presetId}`);
-        const response = await api.getImmediateAvailability({ preset: presetId, include_slots: false });
-        if (requestStart !== null) {
-          czqDebugEnd(`OrderPage.loadAvailability.response preset=${presetId}`, requestStart);
-          requestStart = null;
-        }
-        const availableDates = (response.dates || []).filter((entry) => entry.selectable);
-        setDateAvailability(availableDates);
-        if (availableDates.length === 0) {
-          setSelectedDate("");
-          setSlotEntries([]);
-          setSelectedSlotKey("");
-          setError("当前场馆暂无可预订日期，请稍后再试。");
-          czqDebugEnd(`OrderPage.loadAvailability.complete preset=${presetId} dates=0`, overallStart);
-          return;
-        }
-
-        const candidate =
-          response.selected_date && availableDates.some((entry) => entry.date === response.selected_date)
-            ? response.selected_date
-            : response.default_date && availableDates.some((entry) => entry.date === response.default_date)
-              ? response.default_date
-              : availableDates[0].date;
-
-        setSelectedDate(autoLoadSlots ? candidate : "");
-        if (autoLoadSlots && candidate) {
-          await loadSlots(presetId, candidate, true);
-        }
-        succeeded = true;
-        czqDebugEnd(
-          `OrderPage.loadAvailability.complete preset=${presetId} dates=${availableDates.length}`,
-          overallStart,
-        );
-      } catch (err) {
-        setDateAvailability([]);
-        setSelectedDate("");
-        setSlotEntries([]);
-        setSelectedSlotKey("");
-        setSlotsCache({});
-        setError((err as Error).message);
-        czqDebugLog(`OrderPage.loadAvailability.error preset=${presetId}`);
-        if (requestStart !== null) {
-          czqDebugEnd(`OrderPage.loadAvailability.response preset=${presetId} error`, requestStart);
-          requestStart = null;
-        }
-        czqDebugEnd(`OrderPage.loadAvailability.complete preset=${presetId} error`, overallStart);
-      } finally {
-        setAvailabilityLoading(false);
-        setAvailabilityRequested(succeeded);
-      }
-    },
-    [loadSlots],
-  );
-
+  const [revision, setRevision] = useState(0);
+  const target = presets.find(item => item.index === preset);
+  useEffect(() => { api.getPresets().then(data => setPresets(data.presets)).catch(error => setError(error.message)); }, []);
   useEffect(() => {
-    const load = async () => {
-      try {
-        const [presetResp, userResp] = await Promise.all([
-          api.getPresets(),
-          api.listUsers(),
-        ]);
-        setPresets(presetResp.presets);
-        const presetIndex = selectDefaultPreset(presetResp.presets);
-        setSelectedPreset(presetIndex);
-        setUsers(userResp.users);
-      } catch (err) {
-        setError((err as Error).message);
-      }
-    };
-    void load();
-  }, [selectDefaultPreset]);
-
+    let active = true;
+    setLoading(true); setError(""); setDates([]); setDate(""); setSlots([]); setSelected(null); setResult(null);
+    api.getImmediateAvailability({ preset }).then(data => {
+      if (!active) return;
+      const available = data.dates.filter(item => item.selectable);
+      setDates(available); setDate(available.find(item => item.date === requestedDate)?.date || available[0]?.date || "");
+    }).catch(error => { if (active) setError(error.message); }).finally(() => { if (active) setLoading(false); });
+    return () => { active = false; };
+  }, [preset, requestedDate, revision]);
   useEffect(() => {
-    setDateAvailability([]);
-    setSelectedDate("");
-    setSlotEntries([]);
-    setSelectedSlotKey("");
-    setSlotsCache({});
-    setAvailabilityRequested(false);
-  }, [selectedPreset]);
-
-  const handleLoadAvailabilityClick = async () => {
-    if (typeof selectedPreset !== "number") {
-      setError("请选择场馆与运动项目");
-      return;
-    }
-    setError(null);
-    await loadAvailability(selectedPreset, true);
-  };
-
-  const handleSubmit = async (event: FormEvent<HTMLFormElement>) => {
-    event.preventDefault();
-    if (typeof selectedPreset !== "number") {
-      setError("请选择场馆与运动项目");
-      return;
-    }
-    if (!availabilityRequested) {
-      setError("请先加载可预订日期");
-      return;
-    }
-    if (!selectedDate) {
-      setError("请选择可预订的日期");
-      return;
-    }
-    if (!selectedSlotKey) {
-      setError("请选择可预订的时间段");
-      return;
-    }
-
-    const targetEntry = slotEntries.find((entry) => entry.start === selectedSlotKey);
-    if (!targetEntry) {
-      setError("时间段信息缺失，请重新选择");
-      czqDebugLog("OrderPage.submit.missing_slot");
-      return;
-    }
-    const startTime = targetEntry.start;
-    const endTime = targetEntry.end;
-    if (!startTime || !endTime) {
-      setError("时间段信息缺失，请重新选择");
-      czqDebugLog("OrderPage.submit.invalid_slot");
-      return;
-    }
-
-    let submitStart: number | null = null;
+    if (!date) return;
+    let active = true;
+    setLoading(true); setError(""); setSlots([]); setSelected(null);
+    api.getImmediateSlots({ preset, date, show_full: true }).then(data => { if (active) setSlots(data.entries); })
+      .catch(error => { if (active) setError(error.message); }).finally(() => { if (active) setLoading(false); });
+    return () => { active = false; };
+  }, [preset, date]);
+  async function submit() {
+    if (!selected) return;
+    setBooking(true); setError(""); setResult(null);
     try {
-      submitStart = czqDebugStart(`OrderPage.submit preset=${selectedPreset} date=${selectedDate}`);
-      setSubmitLoading(true);
-      setError(null);
-      setResult(null);
-      const payload = {
-        preset: selectedPreset,
-        date: selectedDate,
-        start_time: startTime,
-        end_time: endTime,
-        user: selectedUser || undefined,
-      };
-      const response = await api.createOrder(payload);
+      const response = await api.createOrder({ preset, date, start_time: selected.start, end_time: selected.end });
       setResult(response);
-      if (submitStart !== null) {
-        czqDebugEnd(`OrderPage.submit.complete preset=${selectedPreset} success=${response.success}`, submitStart);
+      if (response.success) {
+        setSelected(null);
+        try { const data = await api.getImmediateSlots({ preset, date, show_full: true }); setSlots(data.entries); }
+        catch { setError("预约已成功，但余位刷新失败。请在我的订单中核对结果。"); }
       }
-    } catch (err) {
-      setResult(null);
-      setError((err as Error).message);
-      czqDebugLog(`OrderPage.submit.error preset=${selectedPreset}`);
-      if (submitStart !== null) {
-        czqDebugEnd(`OrderPage.submit.complete preset=${selectedPreset} error`, submitStart);
-      }
-    } finally {
-      setSubmitLoading(false);
-    }
-  };
-
-  const presetSummary = useMemo(() => {
-    if (typeof selectedPreset !== "number") {
-      return "";
-    }
-    const preset = presets.find((item) => item.index === selectedPreset);
-    if (!preset) {
-      return "";
-    }
-    return `${preset.venue_name} · ${preset.field_type_name}`;
-  }, [presets, selectedPreset]);
-
-  return (
-    <>
-      <div className="content-header">
-        <div>
-          <h2>立即预订</h2>
-          <p className="content-subtitle">使用场馆运动快速下单，可选择指定登录用户。</p>
-        </div>
-      </div>
-
-      <div className="panel">
-        <form onSubmit={handleSubmit} className="form-grid">
-          <div className="form-label form-label--full">
-            <span>选择场馆运动</span>
-            <PresetSelector
-              presets={presets}
-              value={selectedPreset}
-              onChange={(nextPreset) => setSelectedPreset(nextPreset)}
-            />
-            {presetSummary ? <div className="muted-text">当前选择：{presetSummary}</div> : null}
-          </div>
-
-          <div className="form-label form-label--full">
-            <span>选择日期</span>
-            <div style={{ display: "flex", gap: "8px", alignItems: "center", marginTop: "6px" }}>
-              <button
-                type="button"
-                className="button button-secondary"
-                onClick={handleLoadAvailabilityClick}
-                disabled={availabilityLoading || slotsLoading || typeof selectedPreset !== "number"}
-              >
-                {availabilityLoading ? "加载中..." : "加载可订日期"}
-              </button>
-              {!availabilityRequested ? (
-                <span className="muted-text">选择场馆后点击加载，以减少切换时的等待</span>
-              ) : null}
-            </div>
-            <div className="toggle-row" role="radiogroup" aria-label="可预订日期">
-              {dateAvailability.map((entry) => {
-                const isActive = selectedDate === entry.date;
-                return (
-                  <button
-                    key={entry.date}
-                    type="button"
-                    className={`toggle-button toggle-button--compact ${isActive ? "is-active" : ""}`}
-                    onClick={() => {
-                      if (availabilityLoading || slotsLoading) return;
-                      setSelectedDate(entry.date);
-                      const cached = slotsCache[entry.date];
-                      if (cached && cached.length > 0) {
-                        czqDebugLog(`OrderPage.loadSlots.cache_hit date=${entry.date}`);
-                        setSlotEntries(cached);
-                        setSelectedSlotKey(cached[0] ? cached[0].start : "");
-                      } else if (typeof selectedPreset === "number") {
-                        czqDebugLog(`OrderPage.loadSlots.fetch date=${entry.date}`);
-                        setSlotEntries([]);
-                        setSelectedSlotKey("");
-                        void loadSlots(selectedPreset, entry.date, true);
-                      }
-                    }}
-                    disabled={availabilityLoading || slotsLoading}
-                  >
-                    {formatDateLabel(entry.date)}
-                  </button>
-                );
-              })}
-            </div>
-            {availabilityLoading ? <div className="muted-text">正在加载日期...</div> : null}
-            {!availabilityLoading && !availabilityRequested ? (
-              <div className="muted-text">尚未加载日期，请先点击“加载可订日期”。</div>
-            ) : null}
-            {!availabilityLoading && availabilityRequested && dateAvailability.length === 0 ? (
-              <div className="muted-text">暂未查询到可预订日期。</div>
-            ) : null}
-          </div>
-
-          <div className="form-label form-label--full">
-            <span>选择时间段</span>
-            <div className="toggle-row" role="radiogroup" aria-label="可预订时间段">
-              {slotEntries.map((entry) => {
-                const key = entry.start;
-                const isActive = selectedSlotKey === key;
-                return (
-                  <button
-                    key={key}
-                    type="button"
-                    className={`toggle-button toggle-button--compact ${isActive ? "is-active" : ""}`}
-                    disabled={slotsLoading}
-                    onClick={() => {
-                      if (slotsLoading) return;
-                      setSelectedSlotKey(entry.start);
-                    }}
-                  >
-                    {buildSlotLabel(entry)}
-                  </button>
-                );
-              })}
-            </div>
-            {slotsLoading ? <div className="muted-text">正在加载时间段...</div> : null}
-            {!slotsLoading && selectedDate && slotEntries.length === 0 ? (
-              <div className="muted-text">该日期暂时无空余时间段，请尝试其他日期。</div>
-            ) : null}
-          </div>
-
-          <div className="form-label form-label--full">
-            <span>指定用户（可选）</span>
-            <div className="toggle-group toggle-group--wrap">
-              <button
-                type="button"
-                className={`toggle-button ${selectedUser ? "" : "is-active"}`}
-                onClick={() => setSelectedUser("")}
-              >
-                所有用户
-              </button>
-              {userOptions.map((user) => {
-                const isActive = selectedUser === user.value && user.value !== "";
-                return (
-                  <button
-                    key={user.id}
-                    type="button"
-                    className={`toggle-button ${isActive ? "is-active" : ""}`}
-                    onClick={() => setSelectedUser(user.value)}
-                    title={user.description || undefined}
-                  >
-                    {user.label}
-                  </button>
-                );
-              })}
-            </div>
-            {!selectedUser ? (
-              <div className="muted-text">默认依次为所有可用账号尝试下单</div>
-            ) : null}
-          </div>
-
-          <div className="form-actions">
-            <button
-              className="button button-primary"
-              type="submit"
-              disabled={submitLoading || availabilityLoading || slotsLoading || slotEntries.length === 0}
-            >
-              {submitLoading ? "下单中..." : "提交订单"}
-            </button>
-          </div>
-        </form>
-        {users.length > 0 ? (
-          <div className="muted-text" style={{ gridColumn: "1 / -1" }}>
-            已保存用户：{" "}
-            {users
-              .map((user, index) => {
-                const nickname = user.nickname?.trim();
-                const username = user.username?.trim();
-                if (nickname) {
-                  return nickname;
-                }
-                if (username) {
-                  return username.includes("@") ? username.split("@", 1)[0] : username;
-                }
-                return `用户 ${index + 1}`;
-              })
-              .join(" / ")}
-          </div>
-        ) : null}
-      </div>
-
-      {error ? (
-        <div className="panel notice notice-error">
-          <strong>下单提示</strong>
-          <span>{error}</span>
-        </div>
-      ) : null}
-
-      {result ? (
-        <div className="panel">
-          <div style={{ fontWeight: 600, marginBottom: "6px" }}>{result.success ? "预订成功" : "预订失败"}</div>
-          <div>{result.message}</div>
-          {Array.isArray(result.results) && result.results.length > 0 ? (
-            <ul style={{ marginTop: "8px", paddingLeft: "18px", color: "var(--cm-muted)" }}>
-              {result.results.map((entry) => (
-                <li key={entry.user}>
-                  <strong>{entry.user}：</strong>
-                  {entry.success ? "成功" : "失败"} - {entry.message}
-                  {entry.order_id ? ` (#${entry.order_id})` : ""}
-                </li>
-              ))}
-            </ul>
-          ) : null}
-        </div>
-      ) : null}
-    </>
-  );
-};
-
-export default OrderPage;
+    } catch (error) { setError((error as Error).message); }
+    finally { setBooking(false); }
+  }
+  return <>
+    <div className="content-header"><div><h2>场地预约</h2><p className="content-subtitle">选好场馆和时段，在这里完成预约。</p></div><Link to="/orders" className="button button-secondary">查看我的订单 →</Link></div>
+    <ol className="booking-steps" aria-label="预约流程"><li className="is-current">1 选择场馆</li><li className={date ? "is-current" : ""}>2 选择时段</li><li className={selected ? "is-current" : ""}>3 确认预约</li></ol>
+    <section className="panel"><h3>选择场馆与运动</h3><PresetSelector presets={presets} value={preset} onChange={value => setParams({ preset: String(value) })} disabled={booking} /></section>
+    {error && <div className="notice notice-error" role="alert">{error}<button className="button button-secondary" disabled={booking || loading} onClick={() => setRevision(value => value + 1)}>重新查询</button></div>}
+    {result && <section className={`notice ${result.success ? "notice-success" : "notice-error"}`} role="status"><h3>{result.success ? "预约已提交成功" : "预约未完成"}</h3><p>{result.message}</p>{result.order_id && <p>订单号：{result.order_id}</p>}<Link to="/orders" className="button button-primary">查看订单与支付状态 →</Link></section>}
+    <section className="panel" aria-busy={loading}><div className="content-header"><h3>选择日期与时段</h3><button className="button button-secondary" disabled={loading || booking} onClick={() => setRevision(value => value + 1)}>刷新余位</button></div>
+      <div className="choice-list" aria-label="可预约日期">{dates.map(item => <button key={item.date} className={`choice-button${item.date === date ? " is-selected" : ""}`} aria-pressed={item.date === date} disabled={booking} onClick={() => { setDate(item.date); setResult(null); }}>{new Date(`${item.date}T00:00:00`).toLocaleDateString("zh-CN", { month: "long", day: "numeric", weekday: "short" })}</button>)}</div>
+      {loading ? <p role="status">正在查询可预约时段…</p> : <>
+        {!slots.some(slot => slot.available_count > 0) && <div className="empty-state"><h4>{dates.length ? "这个日期暂时没有余位" : "当前暂无开放的预约日期"}</h4><p>换一个日期或场馆，也可以创建余位监控。</p></div>}
+        <div className="slot-choices">{slots.map(slot => <button key={`${slot.start}-${slot.end}`} className={`choice-button${selected === slot ? " is-selected" : ""}`} disabled={booking || slot.available_count <= 0} aria-pressed={selected === slot} onClick={() => { setSelected(slot); setResult(null); }}><strong>{slot.start}–{slot.end}</strong><span>{slot.available_count > 0 ? `余 ${slot.total_remain ?? slot.available_count}` : "已满"}{slot.min_price != null ? ` · ¥${slot.min_price}${slot.max_price !== slot.min_price ? `–${slot.max_price}` : ""}` : ""}</span></button>)}</div>
+        <p className="muted-text">没有合适的时段？<Link to={`/monitor?preset=${preset}`}>为这个项目创建余位监控 →</Link></p>
+      </>}
+    </section>
+    {selected && <section className="panel booking-confirm"><div><h3>确认这场运动</h3><p>{target?.venue_name} · {target?.field_type_name}</p><strong>{date} · {selected.start}–{selected.end}</strong><p className="muted-text">系统将分配该时段的可用场地；实际金额及支付要求以订单为准。</p></div><button className="button button-primary" disabled={booking || loading} onClick={submit}>{booking ? "正在提交，请稍候…" : "确认预约"}</button></section>}
+  </>;
+}

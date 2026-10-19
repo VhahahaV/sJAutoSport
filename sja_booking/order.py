@@ -1,27 +1,24 @@
 """
 下单模块 - 处理体育场馆预订的下单逻辑
 
-包含加密、下单确认、错误重试等功能
+包含加密、单次下单确认及明确的错误反馈
 """
 
 import json
 import time
 import base64
-import random
+import secrets
 import string
 from datetime import datetime, timedelta
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, Optional, Tuple
 from dataclasses import dataclass
 
-import httpx
 from Crypto.Cipher import AES
 from Crypto.Util.Padding import pad
 from Crypto.PublicKey import RSA
 from Crypto.Cipher import PKCS1_v1_5
 
-from .service import logger
-
-from .models import FieldType, Slot, OrderIntent, PresetOption
+from .models import FieldType, Slot, PresetOption
 from .api import SportsAPI
 
 
@@ -118,7 +115,7 @@ class OrderManager:
     def _generate_aes_key(self) -> str:
         """生成16位AES密钥"""
         alphabet = string.ascii_uppercase + string.digits
-        return ''.join(random.choice(alphabet) for _ in range(16))
+        return ''.join(secrets.choice(alphabet) for _ in range(16))
     
     def _aes_encrypt(self, key: str, plaintext: str) -> str:
         """AES-128-ECB加密"""
@@ -173,19 +170,9 @@ class OrderManager:
             encrypted_key = self._rsa_encrypt(aes_key)
             encrypted_timestamp = self._rsa_encrypt(timestamp)
             # 构建请求头
-            # 统一从当前 httpx 客户端获取 Cookie（多用户模式下与当前用户绑定），并确保含有 JSESSIONID
-            # 完全对齐单用户版本：若配置中提供了 cookie，则优先使用（常见为 "JSESSIONID=..."）
-            cookie_str = ""
-            try:
-                # 优先使用当前切换到的用户
-                if getattr(self.api, "_current_user", None) and self.api._current_user.cookie:
-                    cookie_str = self.api._current_user.cookie
-                elif getattr(self.api, "auth", None) and getattr(self.api.auth, "users", None):
-                    user0 = self.api.auth.users[0]
-                    if user0 and user0.cookie:
-                        cookie_str = user0.cookie
-            except Exception:
-                cookie_str = ""
+            # Use the current verified session for the encrypted confirmation.
+            account = self.api.auth.user
+            cookie_str = account.cookie if account and account.cookie else ""
             if not cookie_str:
                 cookies = self.api.client.cookies
                 cookie_parts = []
@@ -248,138 +235,28 @@ class OrderManager:
                     return False, f"业务错误: {msg}", result
             
             # 检查是否有订单ID（成功下单的标识）
-            order_id = result.get('orderId') or result.get('order_id') or result.get('id') or result.get('data')
-            if not order_id:
-                return False, f"下单失败: 未返回订单ID - {result}", result
-            
-            return True, f"下单成功，订单ID: {order_id}", result
+            if not isinstance(result, dict):
+                return False, "下单响应格式异常，未获得有效订单号", None
+            order_id = result.get("orderId") or result.get("order_id") or result.get("id") or result.get("data")
+            if isinstance(order_id, dict):
+                order_id = order_id.get("orderId") or order_id.get("order_id") or order_id.get("id")
+            if not isinstance(order_id, (str, int)) or isinstance(order_id, bool) or not str(order_id).strip():
+                return False, "下单响应未返回有效订单号", result
+            order_id = str(order_id)
+            return True, f"下单成功，订单ID: {order_id}", {**result, "orderId": order_id}
                 
         except Exception as e:
             return False, f"请求异常: {e}", None
     
-    def _refresh_slot_data(self, preset: PresetOption, date: str) -> Optional[Slot]:
-        """刷新时间段数据，获取最新的sign和sub_site_id"""
-        try:
-            field_type_info = self._get_field_type_info(preset)
-            
-            # 获取日期token
-            date_tokens = self.api.list_available_dates(preset.venue_id, preset.field_type_id)
-            date_token = None
-            for date_str_value, token in date_tokens:
-                if date_str_value == date:
-                    date_token = token
-                    break
-            if not date_token and field_type_info and field_type_info.raw:
-                for key in ("dateId", "dateToken"):
-                    raw_value = field_type_info.raw.get(key)
-                    if raw_value:
-                        date_token = str(raw_value)
-                        break
-            
-            # 查询可用时间段
-            slots = self.api.query_slots(
-                venue_id=preset.venue_id,
-                field_type_id=preset.field_type_id,
-                date_str=date,
-                date_token=date_token,
-                original_field_type=field_type_info
-            )
-            
-            if slots:
-                return slots[0]  # 返回第一个可用时间段
-            return None
-        except Exception as e:
-            print(f"刷新时间段数据失败: {e}")
-            return None
-    
-    def place_order(self, slot: Slot, preset: PresetOption, date: str, 
-                   actual_start: str, actual_end: str, max_retries: int = 3) -> OrderResult:
-        """
-        下单
-        
-        Args:
-            slot: 要预订的时间段
-            preset: 场馆预设配置
-            date: 预订日期
-            max_retries: 最大重试次数
-            
-        Returns:
-            OrderResult: 下单结果
-        """
-        current_slot = slot
-        backoff_base = 2.0
-        last_message: Optional[str] = None
-        for attempt in range(max_retries):
-            print(f"下单尝试 {attempt + 1}/{max_retries}")
-            
-            # 构建下单载荷
-            payload = self._build_order_payload(current_slot, preset, date, actual_start, actual_end)
-            
-            # 发送下单请求（加密 ConfirmOrder 流程）
-            success, message, response = self._send_order_request(payload)
-            
-            if success:
-                return OrderResult(
-                    success=True,
-                    message=message,
-                    order_id=response.get("orderId") if response else None,
-                    raw_response=response
-                )
-            
-            print(f"下单失败: {message}")
-            last_message = message or last_message
+    def place_order(self, slot: Slot, preset: PresetOption, date: str,
+                    actual_start: str, actual_end: str) -> OrderResult:
+        """Submit exactly once; never switch slots or retry an uncertain result."""
+        payload = self._build_order_payload(slot, preset, date, actual_start, actual_end)
+        success, message, response = self._send_order_request(payload)
+        if not success:
+            return OrderResult(False, f"{message}；请先查询订单核对结果，再决定是否重新提交", raw_response=response)
+        return OrderResult(True, message, order_id=response["orderId"], raw_response=response)
 
-            # 回退策略：尝试使用简单提交接口 order_immediately（与旧版一致）
-            try:
-                # 从 slot.raw 中尽可能获取 orderId；否则退化为 slot.slot_id
-                order_identifier = None
-                if isinstance(current_slot.raw, dict):
-                    order_identifier = current_slot.raw.get("orderId") or current_slot.raw.get("id")
-                if not order_identifier:
-                    order_identifier = current_slot.slot_id
-                if order_identifier:
-                    intent = OrderIntent(
-                        venue_id=preset.venue_id,
-                        field_type_id=preset.field_type_id,
-                        slot_id=current_slot.slot_id,
-                        date=date,
-                        order_id=str(order_identifier),
-                        payload=current_slot.raw,
-                    )
-                    resp = self.api.order_immediately(intent)
-                    if isinstance(resp, dict):
-                        code = resp.get("code")
-                        msg = resp.get("msg") or resp.get("message") or ""
-                        if code in (0, "0") and not any(k in str(msg) for k in ["非法", "失败", "错误"]):
-                            return OrderResult(
-                                success=True,
-                                message=msg or "下单成功（简易提交）",
-                                order_id=resp.get("orderId") or resp.get("data") or str(order_identifier),
-                                raw_response=resp,
-                            )
-            except Exception as _:
-                # 忽略回退异常，进入刷新逻辑
-                pass
-            
-            # 如果不是最后一次尝试，刷新时间段数据
-            if attempt < max_retries - 1:
-                print("刷新时间段数据...")
-                refreshed_slot = self._refresh_slot_data(preset, date)
-                if refreshed_slot:
-                    current_slot = refreshed_slot
-                    print("时间段数据已刷新，准备重试...")
-                else:
-                    print("无法刷新时间段数据，使用原始数据重试...")
-                delay_seconds = backoff_base + attempt * 2.0 + random.uniform(0.3, 0.8)
-                print(f"等待 {delay_seconds:.1f} 秒后再次尝试...")
-                time.sleep(delay_seconds)
-        
-        return OrderResult(
-            success=False,
-            message=f"{(last_message or '下单失败')}，已重试{max_retries}次",
-            raw_response=None
-        )
-    
     def place_order_by_preset(self, preset_index: int, date: str, 
                              start_time: str = "21:00", 
                              end_time: str = "22:00") -> OrderResult:
@@ -468,13 +345,9 @@ class OrderManager:
         normalized_end = _normalize(end_time)
 
         target_slot = None
-        debug_matches: List[str] = []
         for slot in slots:
             slot_start = _normalize(slot.start)
             slot_end = _normalize(slot.end) or (slot_start and _next_hour(slot_start, 1))
-            debug_matches.append(
-                f"slot_id={slot.slot_id} start={slot_start} end={slot_end} available={slot.available}"
-            )
             if (
                 slot.available
                 and slot_start == normalized_start
@@ -484,14 +357,6 @@ class OrderManager:
                 break
 
         if not target_slot:
-            logger.warning(
-                "#CZQ_DEBUG order-by-preset miss preset=%s date=%s requested=%s-%s entries=%s",
-                preset.index,
-                date,
-                normalized_start,
-                normalized_end,
-                debug_matches,
-            )
             return OrderResult(
                 success=False,
                 message=f"未找到可用的时间段 {start_time}-{end_time}"

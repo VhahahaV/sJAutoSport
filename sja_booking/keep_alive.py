@@ -13,7 +13,7 @@ import httpx
 from .auth import AuthManager, _cookie_header
 
 try:
-    import config as CFG
+    from . import config as CFG
 except ImportError as exc:  # pragma: no cover - configuration should exist
     raise RuntimeError("keep_alive module requires top-level config.py") from exc
 
@@ -79,17 +79,23 @@ async def _ping_cookie(
     endpoint = _resolve_ping_endpoint()
     url = endpoint if endpoint.startswith("http") else f"{base_url}{endpoint}"
 
-    async with httpx.AsyncClient(headers=headers, timeout=timeout) as client:
+    async with httpx.AsyncClient(headers=headers, timeout=timeout, trust_env=CFG.TRUST_ENV) as client:
         client.cookies.update(cookie_map)
         try:
             response = await client.get(url)
         except Exception as exc:  # pylint: disable=broad-except
             return False, cookie_header, f"request failed: {exc}"
 
-        if response.status_code == 401:
-            return False, cookie_header, "session expired (401)"
-        if response.status_code >= 500:
-            return False, cookie_header, f"server error {response.status_code}"
+        if response.status_code != 200:
+            return False, cookie_header, f"session check returned HTTP {response.status_code}; log in again if expired"
+        try:
+            payload = response.json()
+        except ValueError:
+            return False, cookie_header, "session check returned HTML/non-JSON; log in again"
+        if not isinstance(payload, dict) or payload.get("error") or payload.get("code") not in (None, 0, "0"):
+            return False, cookie_header, "session invalid; log in again"
+        if not any(payload.get(key) for key in ("data", "user", "userInfo", "loginName", "userName")):
+            return False, cookie_header, "session has no authenticated profile; log in again"
 
         # Update cookies if server returned new values (httpx updates client.cookies automatically)
         domain = urlparse(base_url).hostname
@@ -103,166 +109,23 @@ async def _ping_cookie(
         return True, cookie_header, f"ping {response.status_code}"
 
 
-async def run_keep_alive_once(
-    *,
-    auth_manager: Optional[AuthManager] = None,
-    refresh_interval: timedelta = timedelta(hours=1),
-) -> List[KeepAliveResult]:
-    """
-    Refresh all stored cookies once.
-    """
+async def run_keep_alive_once(*, auth_manager=None):
     manager = auth_manager or AuthManager()
-    cookies_map, _ = manager.load_all_cookies()
-    results: List[KeepAliveResult] = []
-
-    if not cookies_map:
-        logger.info("KeepAlive: no cookies found in store")
-        return results
-
-    now = datetime.now(timezone.utc)
-
-    for key, record in cookies_map.items():
-        username = record.get("username") or (None if key == "__default__" else key)
-        nickname = record.get("nickname")
-        cookie_header = record.get("cookie") or ""
-
-        if not cookie_header:
-            logger.warning("KeepAlive skipping %s: no cookie header", username or key)
-            continue
-
-        success, updated_cookie, message = await _ping_cookie(username, nickname, cookie_header)
-        if success:
-            # 确保有有效的cookie
-            if updated_cookie and updated_cookie.strip():
-                expires_at = now + refresh_interval
-                manager.save_cookie(
-                    updated_cookie,
-                    expires_at,
-                    username=username,
-                    nickname=nickname,
-                )
-                logger.info("KeepAlive saved cookie for %s", username or nickname or key)
-            else:
-                logger.warning("KeepAlive: no valid cookie to save for %s", username or key)
-            
-            results.append(
-                KeepAliveResult(
-                    username=username,
-                    nickname=nickname,
-                    success=True,
-                    message=message,
-                )
-            )
-            logger.debug("KeepAlive success for %s: %s", username or key, message)
-        else:
-            results.append(
-                KeepAliveResult(
-                    username=username,
-                    nickname=nickname,
-                    success=False,
-                    message=message,
-                )
-            )
-            logger.warning("KeepAlive failed for %s: %s", username or key, message)
-
-    # 同步内存中的用户信息，确保后续操作使用最新 Cookie
-    try:
-        from . import service  # pylint: disable=cyclic-import
-
-        updated_map, _ = manager.load_all_cookies()
-        service._sync_users_from_store(updated_map)  # type: ignore[attr-defined]
-    except Exception:  # pragma: no cover - 最好努力但不影响主流程
-        pass
-
-    return results
-
-
-async def run_keep_alive_for_user(
-    identifier: str,
-    *,
-    auth_manager: Optional[AuthManager] = None,
-    refresh_interval: timedelta = timedelta(hours=1),
-) -> KeepAliveResult:
-    """
-    Refresh cookie for a single stored user identified by username or nickname.
-    """
-    manager = auth_manager or AuthManager()
-    cookies_map, _ = manager.load_all_cookies()
-
-    target_key = None
-    target_record: Optional[Dict[str, Any]] = None
-
-    for key, record in cookies_map.items():
-        username = record.get("username")
-        nickname = record.get("nickname")
-        candidates = {c for c in (key, username, nickname) if c}
-        if identifier in candidates:
-            target_key = key
-            target_record = record
-            break
-
-    if not target_record:
-        return KeepAliveResult(username=None, nickname=None, success=False, message="user not found")
-
-    username = target_record.get("username")
-    nickname = target_record.get("nickname")
-    cookie_header = target_record.get("cookie") or ""
-
-    success, updated_cookie, message = await _ping_cookie(username, nickname, cookie_header)
+    record = manager.load_record()
+    if not record:
+        return KeepAliveResult(None, None, False, "请先登录")
+    username, nickname = record.get("username"), record.get("nickname")
+    success, cookie, message = await _ping_cookie(username, nickname, record["cookie"])
     if success:
-        expires_at = datetime.now(timezone.utc) + refresh_interval
-        manager.save_cookie(updated_cookie, expires_at, username=username, nickname=nickname)
-        try:
-            from . import service  # pylint: disable=cyclic-import
-
-            updated_map, _ = manager.load_all_cookies()
-            service._sync_users_from_store(updated_map)  # type: ignore[attr-defined]
-        except Exception:  # pragma: no cover
-            pass
-
-    return KeepAliveResult(username=username, nickname=nickname, success=success, message=message)
+        manager.save_cookie(cookie, datetime.now(timezone.utc) + timedelta(hours=1), username=username, nickname=nickname)
+    return KeepAliveResult(username, nickname, success, message)
 
 
-async def keep_alive_loop(
-    *,
-    interval_seconds: int = DEFAULT_INTERVAL_SECONDS,
-    auth_manager: Optional[AuthManager] = None,
-    stop_event: Optional[asyncio.Event] = None,
-) -> None:
-    """
-    Background loop that refreshes cookies every interval.
-    """
-    manager = auth_manager or AuthManager()
+async def keep_alive_loop(*, interval_seconds=900, stop_event=None):
     event = stop_event or asyncio.Event()
-
-    logger.info("KeepAlive loop started (interval=%ss)", interval_seconds)
-
     while not event.is_set():
+        await run_keep_alive_once()
         try:
-            results = await run_keep_alive_once(auth_manager=manager)
-            total = len(results)
-            success = sum(1 for result in results if result.success)
-            logger.info("KeepAlive run completed: %s/%s success", success, total)
-        except Exception as exc:  # pylint: disable=broad-except
-            logger.exception("KeepAlive loop error: %s", exc)
-
-        try:
-            await asyncio.wait_for(event.wait(), timeout=interval_seconds)
+            await asyncio.wait_for(event.wait(), timeout=max(60, interval_seconds))
         except asyncio.TimeoutError:
-            continue
-
-    logger.info("KeepAlive loop stopped")
-
-
-async def run_keep_alive_job(
-    *,
-    interval_seconds: int = DEFAULT_INTERVAL_SECONDS,
-) -> None:
-    """
-    Entry point for background job execution.
-    """
-    stop_event = asyncio.Event()
-    try:
-        await keep_alive_loop(interval_seconds=interval_seconds, stop_event=stop_event)
-    finally:
-        stop_event.set()
+            pass

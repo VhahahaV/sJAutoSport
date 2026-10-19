@@ -1,3 +1,81 @@
+.login-workspace { width: min(1120px, 100%); margin: 0 auto; padding: 24px; display: grid; gap: 24px; }
+.field { display: flex; flex-direction: column; min-width: 0; gap: 9px; font-size: 13px; font-weight: 600; }
+.field input:not([type="checkbox"]) { width: 100%; min-height: 46px; padding: 12px 14px; border: 1px solid #cec8de; border-radius: 13px; background: #FBFAFF; font: inherit; }
+.signin-shell { min-height: 100vh; max-width: 1320px; margin: auto; padding: 34px 64px 24px; }
+.signin-header { display: flex; align-items: center; justify-content: space-between; gap: 20px; }
+.signin-brand { display: inline-flex; gap: 12px; align-items: center; text-decoration: none; color: #2E2A5B; }
+.signin-brand > span { font-size: 16px; letter-spacing: 1.6px; font-weight: 400; }
+.signin-brand strong { font-weight: 800; }
+.signin-brand small { display: block; letter-spacing: 1.6px; font-size: 10px; margin-top: 3px; color: #655e7e; }
+.signin-official { font-size: 12px; color: #655e7e; text-decoration: none; display: inline-flex; gap: 12px; }
+.signin-official:hover { color: #2E2A5B; text-decoration: underline; }
+.signin-layout { display: grid; grid-template-columns: minmax(0, 1.15fr) minmax(360px, .95fr); align-items: center; gap: 70px; padding: 62px 0 40px; }
+.signin-story { position: relative; padding-top: 5px; }
+.signin-eyebrow { display: inline-flex; align-items: center; gap: 9px; font-size: 10px; font-weight: 700; letter-spacing: 2.1px; }
+.signin-eyebrow > span { width: 7px; height: 7px; background: #8b75bc; border-radius: 50%; }
+.signin-story h1 { font-size: clamp(36px, 4vw, 57px); line-height: 1.23; letter-spacing: -1.8px; margin: 24px 0 20px; font-weight: 750; }
+.signin-story h1 > span { color: #7061a1; }
+.signin-intro { color: #655e7e; line-height: 1.95; font-size: 14px; margin: 0; }
+.signin-illustration { display: block; width: min(100%, 470px); height: auto; margin: 13px 0 -6px -23px; }
+.signin-story-note { display: flex; align-items: center; gap: 13px; font-size: 11px; color: #655e7e; line-height: 1.8; }
+.signin-note-icon { display: grid; place-items: center; width: 39px; height: 39px; border-radius: 50%; background: #FDE68A; color: #2E2A5B; font-size: 23px; }
+.signin-story-note strong { font-weight: 500; color: #2E2A5B; }
+.signin-card { width: 100%; background: white; border: 1px solid #E8E3F1; border-radius: 29px; padding: 39px 37px 25px; align-self: center; }
+.signin-card-kicker { font-size: 9px; letter-spacing: 2px; font-weight: 700; color: #786898; }
+.signin-card > h2 { font-size: 26px; line-height: 1.4; margin: 12px 0 9px; letter-spacing: -.8px; }
+.signin-card-subtitle { margin: 0; color: #655e7e; font-size: 12px; line-height: 1.8; }
+.signin-tabs { display: grid; grid-template-columns: 1fr 1fr; gap: 4px; background: #F3F0F9; border-radius: 999px; padding: 5px; margin: 27px 0 26px; }
+.signin-tabs > button { min-height: 40px; border: none; border-radius: 999px; background: transparent; font-size: 13px; font-weight: 600; color: #655e7e; display: flex; align-items: center; justify-content: center; gap: 7px; }
+.signin-tabs > button.is-active { background: white; color: #2E2A5B; }
+.signin-recommended { background: #FDE68A; color: #2E2A5B; font-size: 9px; padding: 2px 6px; border-radius: 999px; }
+.signin-qr-panel { text-align: center; }
+.signin-qr-frame { position: relative; display: grid; place-items: center; width: 240px; height: 240px; max-width: 100%; background: white; border: 1px solid #DED7ED; border-radius: 20px; margin: auto; padding: 11px; }
+.signin-qr-frame > img { display: block; width: 216px; height: 216px; max-width: 100%; object-fit: contain; }
+.signin-qr-placeholder { display: flex; flex-direction: column; gap: 19px; align-items: center; justify-content: center; color: #75698D; font-size: 11px; width: 100%; height: 100%; border-radius: 12px; background: #FBFAFF; }
+.signin-qr-placeholder > svg { width: 60px; height: 60px; color: #A99AC8; }
+.signin-qr-confirm { position: absolute; inset: 0; border-radius: 19px; display: flex; align-items: center; justify-content: center; flex-direction: column; gap: 16px; background: #F2EDFCCC; color: #2E2A5B; font-size: 13px; font-weight: 600; }
+.signin-scan-tip { font-size: 12px; margin: 21px 0 6px; color: #655e7e; }
+.signin-scan-tip strong { color: #2E2A5B; font-weight: 650; }
+.signin-qr-status { margin: 0 auto 14px; min-height: 16px; font-size: 10px; line-height: 1.7; color: #655e7e; max-width: 290px; overflow-wrap: anywhere; }
+.signin-text-button { border: 0; padding: 5px 4px; background: none; color: #7061a1; font-size: 11px; font-weight: 600; text-decoration: none; }
+.signin-text-button:hover { text-decoration: underline; text-underline-offset: 4px; }
+.signin-text-button:disabled { color: #655e7e; cursor: wait; }
+.signin-form { display: flex; flex-direction: column; gap: 21px; margin-top: 5px; min-height: 325px; }
+.signin-field { display: flex; flex-direction: column; gap: 9px; font-weight: 600; font-size: 12px; }
+.signin-input-wrap { display: flex; align-items: center; gap: 12px; padding: 0 14px; min-height: 51px; border: 1px solid #DED7EA; border-radius: 13px; background: #FCFBFF; }
+.signin-input-wrap:focus-within { border-color: #8b75bc; outline: 2px solid #E9E1FC; outline-offset: 2px; }
+.signin-input-wrap > svg { flex: 0 0 17px; width: 17px; height: 17px; fill: none; stroke: #8B7DA3; stroke-width: 1.7; }
+.signin-input-wrap > input { min-width: 0; width: 100%; background: transparent; border: 0; padding: 15px 0; outline: 0; font-size: 12px; color: #2E2A5B; font-family: inherit; }
+.signin-input-wrap > button { border: 0; background: transparent; padding: 5px 0 5px 5px; font-size: 10px; color: #655e7e; white-space: nowrap; }
+.signin-field > input { min-height: 50px; border: 1px solid #DED7EA; border-radius: 13px; padding: 12px 14px; background: #FCFBFF; font: inherit; }
+.signin-form-meta { display: flex; justify-content: space-between; gap: 12px; font-size: 10px; line-height: 1.7; margin-top: -8px; color: #655e7e; font-weight: 400; }
+.signin-form-meta a { color: #7061a1; text-decoration: none; }
+.signin-submit { width: 100%; min-height: 48px; font-size: 13px; justify-content: center; gap: 12px; margin-top: 3px; }
+.signin-form > .signin-text-button { align-self: center; }
+.signin-captcha-caption { font-size: 13px; line-height: 1.8; margin: 0; color: #655e7e; }
+.signin-captcha-preview { display: flex; align-items: center; gap: 16px; padding: 17px; border-radius: 14px; background: #F6F2FD; font-size: 10px; color: #655e7e; }
+.signin-captcha-preview img { width: 104px; max-width: 48%; height: auto; border-radius: 4px; background: white; }
+.signin-feedback { margin: 16px 0 0; padding: 12px 14px; background: #F1ECFA; border-radius: 12px; color: #4e426c; font-size: 11px; line-height: 1.8; overflow-wrap: anywhere; }
+.signin-feedback.is-error { background: #FCECF1; color: #8C3451; }
+.signin-privacy { display: flex; gap: 9px; align-items: center; justify-content: center; border-top: 1px solid #EEE9F5; margin-top: 24px; padding-top: 18px; }
+.signin-privacy > svg { width: 20px; height: 20px; fill: none; stroke: #8B7DA3; stroke-width: 1.3; flex-shrink: 0; }
+.signin-privacy > p { font-size: 9px; color: #655e7e; line-height: 1.7; margin: 0; }
+.signin-footer { display: flex; align-items: center; justify-content: space-between; gap: 20px; border-top: 1px solid #EAE5F2; padding-top: 22px; color: #655e7e; font-size: 10px; line-height: 1.6; }
+.signin-footer > span:first-child { font-size: 9px; letter-spacing: 1.5px; }
+.signin-ready { display: flex; flex-direction: column; align-items: center; text-align: center; padding: 32px 0 10px; gap: 11px; }
+.signin-avatar { display: grid; place-items: center; width: 68px; height: 68px; border-radius: 24px; background: #E9E1FC; color: #7061a1; font-weight: 700; font-size: 26px; margin-bottom: 3px; }
+.signin-ready > h3 { margin: 0; font-size: 18px; }.signin-ready > p { font-size: 11px; margin: 0; color: #655e7e; overflow-wrap: anywhere; }
+.signin-verified { display: inline-flex; align-items: center; gap: 6px; border-radius: 999px; background: #E2F6EC; color: #32664F; font-size: 10px; padding: 6px 10px; margin-bottom: 14px; }
+.signin-verified > span { width: 5px; height: 5px; border-radius: 50%; background: #32664F; }
+.signin-maintenance { max-width: 720px; margin: 0 0 40px auto; }
+.signin-spinner { display: inline-block; width: 25px; height: 25px; border: 2px solid #E5DDF2; border-top-color: #7861A1; border-radius: 50%; animation: signin-spin 1s linear infinite; }
+@keyframes signin-spin { to { transform: rotate(360deg); } }
+@media (max-width: 1050px) { .signin-shell { padding: 28px 32px; }.signin-layout { gap: 35px; }.signin-card { padding: 32px 27px 24px; }.signin-story h1 { font-size: 43px; } }
+@media (max-width: 760px) { .signin-shell { padding: 24px 22px; }.signin-layout { grid-template-columns: minmax(0, 1fr); padding-top: 35px; gap: 25px; max-width: 480px; margin: auto; }.signin-story h1 { font-size: 34px; line-height: 1.25; letter-spacing: -1px; margin-top: 16px; }.signin-story h1 br:nth-of-type(2) { display: none; }.signin-intro { font-size: 12px; }.signin-illustration { position: absolute; right: -15px; bottom: -15px; width: 180px; margin: 0; opacity: .95; }.signin-story-note { display: none; }.signin-story { padding-bottom: 14px; }.signin-card { border-radius: 25px; }.signin-footer { margin-top: 10px; }.signin-maintenance { margin-top: 20px; } }
+@media (max-width: 390px) { .signin-shell { padding: 20px 16px; }.signin-brand > span { font-size: 13px; }.signin-official { font-size: 10px; gap: 5px; }.signin-card { padding: 29px 23px 22px; }.signin-card > h2 { font-size: 23px; }.signin-story h1 { font-size: 30px; }.signin-illustration { width: 150px; }.signin-intro { max-width: 225px; }.signin-form-meta { font-size: 9px; }.signin-footer { flex-direction: column; gap: 6px; align-items: flex-start; } }
+@media (prefers-reduced-motion: reduce) { .signin-spinner { animation: none; } }
+@media (max-width: 640px) { .login-workspace { padding: 16px; } }
+
 :root {
   font-family: "Inter", "Avenir Next", "PingFang SC", "Microsoft YaHei", system-ui, sans-serif;
   color: #2e2a5b;
@@ -281,3 +359,86 @@ input[type="checkbox"] { width: 16px; height: 16px; accent-color: #685098; flex-
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { transition: none !important; scroll-behavior: auto !important; }
 }
+
+/* Authenticated workspace: a single booking flow with focused secondary tools. */
+.booking-steps { display: flex; flex-wrap: wrap; gap: 12px; padding: 0; list-style: none; }
+.booking-steps li { border-radius: 999px; background: #efedf5; padding: 10px 18px; color: #625d7b; }
+.booking-steps .is-current { background: #e5ddff; color: #2E2A5B; }
+.choice-list { display: flex; flex-wrap: wrap; gap: 10px; margin: 18px 0; }
+.choice-button { border: 2px solid #e4dfef; background: #FBFAFF; border-radius: 16px; padding: 14px 18px; color: #2E2A5B; font: inherit; cursor: pointer; text-align: left; }
+.choice-button.is-selected { background: #e7e0ff; border-color: #6852a8; }
+.choice-button:disabled { opacity: .5; cursor: not-allowed; }
+.choice-button:focus-visible { outline: 3px solid #6852a8; outline-offset: 3px; }
+.slot-choices { display: grid; grid-template-columns: repeat(auto-fill, minmax(160px, 1fr)); gap: 12px; margin: 20px 0; }
+.slot-choices .choice-button { display: flex; flex-direction: column; gap: 8px; }
+.slot-choices .choice-button span { font-size: 13px; }
+.booking-confirm, .session-summary { display: flex; flex-wrap: wrap; justify-content: space-between; align-items: center; gap: 20px; }
+.booking-confirm { border: 2px solid #b7a6e3; }
+.monitor-advanced { grid-column: 1 / -1; padding: 18px; border-radius: 16px; background: #f4f1fa; }
+.monitor-advanced summary { cursor: pointer; font-weight: 600; }
+.monitor-advanced .form-grid { margin-top: 20px; }
+.empty-state { padding: 24px 0; }
+@media (max-width: 760px) { .booking-steps { font-size: 12px; gap: 6px; } .booking-steps li { padding: 8px 10px; } .booking-confirm > .button { width: 100%; } }
+.form-grid > .preset-selector { grid-column: 1 / -1; }
+.account-identity { display: flex; align-items: center; gap: 16px; margin: 24px 0; }
+.account-identity h4 { margin: 0; font-size: 22px; }
+.account-identity p { margin: 8px 0 0; }
+.account-avatar { display: grid; place-items: center; flex: 0 0 64px; height: 64px; border-radius: 22px; background: #e7e0ff; color: #2e2a5b; font-size: 26px; font-weight: 700; }
+.account-details { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 24px; margin: 0; padding: 24px 0 4px; border-top: 1px solid #e4dfef; }
+.account-details dt { color: var(--cm-muted); font-size: 13px; margin-bottom: 8px; }
+.account-details dd { margin: 0; overflow-wrap: anywhere; line-height: 1.6; }
+@media (max-width: 760px) { .account-details { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 20px; } }
+@media (max-width: 360px) { .account-details { grid-template-columns: minmax(0, 1fr); } }
+
+/* Compact dashboard, fixed card geometry, bounded chart and scrollable details. */
+.dashboard-heading .content-subtitle { max-width: 640px; }
+.dashboard-shortcuts { display: flex; flex-wrap: wrap; gap: 12px 24px; font-size: 13px; margin-top: -12px; }
+.dashboard-shortcuts a { color: #554782; text-decoration: none; }
+.dashboard-shortcuts a:hover { text-decoration: underline; }
+.dashboard-empty { text-align: center; padding: 48px 24px; }
+.availability-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(min(100%, 390px), 1fr)); gap: 22px; align-items: start; }
+.availability-card { height: 560px; min-width: 0; display: flex; flex-direction: column; overflow: hidden; background: #fff; border: 1px solid #e4dfef; border-radius: 24px; }
+.availability-card-header { display: flex; justify-content: space-between; align-items: center; gap: 8px; padding: 20px 20px 16px; flex-shrink: 0; }
+.availability-card-header > div:first-child { min-width: 0; }
+.availability-card-header h3 { margin: 0; font-size: 17px; line-height: 1.5; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.availability-card-header p { margin: 4px 0 0; font-size: 12px; color: var(--cm-muted); }
+.availability-card-tools { display: flex; gap: 6px; flex-shrink: 0; }
+.card-icon-button { display: grid; place-items: center; width: 32px; height: 32px; border-radius: 999px; border: 0; background: #f0ebfc; color: #2e2a5b; font: inherit; font-size: 22px; cursor: pointer; }
+.card-icon-button:disabled { opacity: .5; cursor: wait; }
+.availability-card-body { display: flex; flex-direction: column; gap: 10px; padding: 0 20px; flex: 1; min-height: 0; }
+.availability-error { margin: 0; color: #963454; background: #ffeff3; border-radius: 10px; font-size: 12px; padding: 8px 10px; line-height: 1.6; max-height: 66px; overflow: auto; overflow-wrap: anywhere; flex-shrink: 0; }
+.availability-placeholder { flex: 1; display: grid; place-items: center; color: var(--cm-muted); font-size: 14px; }
+.availability-metrics { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 12px 14px; background: #eeebfc; border-radius: 14px; flex-shrink: 0; }
+.availability-metrics strong { font-size: 23px; }
+.availability-metrics small, .availability-metrics > span { font-size: 12px; font-weight: 500; }
+.availability-chart-caption { display: flex; justify-content: space-between; gap: 8px; color: var(--cm-muted); font-size: 11px; flex-shrink: 0; }
+.availability-chart { display: flex; gap: 7px; height: 132px; flex-shrink: 0; border-bottom: 1px solid #ece8f4; padding-bottom: 10px; }
+.availability-bar { display: flex; flex-direction: column; flex: 1; gap: 5px; align-items: center; min-width: 0; border: 0; border-radius: 8px; padding: 4px 2px; color: #2e2a5b; background: transparent; cursor: pointer; font: inherit; font-size: 11px; }
+.availability-bar:hover, .availability-bar.is-selected { background: #f3effd; }
+.availability-bar-value { font-weight: 700; line-height: 15px; }
+.availability-bar-track { width: min(100%, 38px); flex: 1; min-height: 0; display: flex; align-items: flex-end; border-bottom: 2px solid #d9d1eb; }
+.availability-bar-track > span { width: 100%; background: #b9a4ee; border-radius: 5px 5px 0 0; }
+.availability-bar.is-selected .availability-bar-track > span { background: #73c9ae; }
+.availability-bar.is-error { color: #963454; }
+.availability-bar-date { white-space: nowrap; line-height: 15px; }
+.availability-bar.is-selected .availability-bar-date { font-weight: 700; }
+.availability-detail-heading { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 4px; font-size: 12px; flex-shrink: 0; }
+.availability-detail-heading > span { font-size: 11px; color: var(--cm-muted); }
+.availability-slot-list { flex: 1; min-height: 0; overflow-y: auto; overscroll-behavior: contain; scrollbar-width: thin; }
+.availability-slot-list ul { list-style: none; margin: 0; padding: 0; }
+.availability-slot-list li { display: flex; justify-content: space-between; gap: 12px; padding: 9px 0; border-bottom: 1px solid #f0edf5; }
+.availability-slot-list li:last-child { border-bottom: 0; }
+.availability-slot-list li > div { display: flex; flex-direction: column; gap: 5px; min-width: 0; }
+.availability-slot-list li > div:last-child { text-align: right; flex-shrink: 0; max-width: 53%; }
+.availability-slot-list strong { font-size: 12px; font-weight: 600; }
+.availability-slot-list li span { font-size: 11px; color: var(--cm-muted); overflow-wrap: anywhere; }
+.availability-slot-list li > div:first-child { flex: 1; }
+.availability-chart-legend { font-size: 10px; color: var(--cm-muted); flex-shrink: 0; }
+.slot-quantity-track { display: block; height: 4px; width: 100%; max-width: 120px; background: #f0ebfc; border-radius: 999px; overflow: hidden; }
+.slot-quantity-track > span { display: block; height: 100%; background: #b9a4ee; border-radius: 999px; }
+.availability-slot-list > p { margin-top: 20px; font-size: 13px; }
+.availability-card-footer { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 14px 20px; margin-top: 8px; border-top: 1px solid #ece8f4; font-size: 12px; flex-shrink: 0; }
+.availability-card-footer > span { color: var(--cm-muted); }
+.availability-card-footer a { color: #554782; font-weight: 600; text-decoration: none; }
+.card-icon-button:focus-visible, .availability-bar:focus-visible, .availability-slot-list:focus-visible { outline: 2px solid #6852a8; outline-offset: 2px; }
+@media (max-width: 400px) { .availability-card-body { padding-inline: 14px; } .availability-card-header { padding-inline: 14px; } .availability-card-header h3 { font-size: 15px; } .availability-chart-caption { font-size: 10px; } .availability-chart { gap: 3px; } }

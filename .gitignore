@@ -218,9 +218,12 @@ cache/
 
 # Keep the Web login regression tests in version control.
 !tests/
-!tests/test_web_login.py
+!tests/test_*.py
 
 # 编译文件
 *.pyc
 *.pyo
 *.pyd
+
+# Private runtime state (cookies, database journals, socket and lock).
+/data/

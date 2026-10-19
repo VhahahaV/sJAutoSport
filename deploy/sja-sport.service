@@ -1,0 +1,19 @@
+[Unit]
+Description=SJTU sports shared core
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=%h/Code/sJAutoSport
+Environment=SJA_DATA_DIR=%h/Code/sJAutoSport/data
+Environment=PYTHONUNBUFFERED=1
+ExecStart=%h/Code/sJAutoSport/.venv/bin/sja daemon run
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=180
+UMask=0077
+NoNewPrivileges=true
+
+[Install]
+WantedBy=default.target

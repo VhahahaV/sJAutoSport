@@ -14,12 +14,13 @@ const toNumber = (value: unknown): number | null => {
 export const aggregateAvailableSlots = (
   slots: SlotAvailability[],
   fallbackDate?: string,
+  includeFull = false,
 ): AggregatedSlotEntry[] => {
   const groups = new Map<string, AggregatedSlotEntry>();
 
   for (const availability of slots) {
     const { date, slot } = availability;
-    if (!slot.available) {
+    if (!slot.available && !includeFull) {
       continue;
     }
     const start = String(slot.start || "");
@@ -27,21 +28,23 @@ export const aggregateAvailableSlots = (
       continue;
     }
     const end = String(slot.end || "");
-    const key = start;
+    const key = `${date || fallbackDate || ""}/${start}/${end}`;
     const remainValue = toNumber(slot.remain);
-    if (remainValue !== null && remainValue <= 0) {
+    if (remainValue !== null && remainValue <= 0 && !includeFull) {
       continue;
     }
     const priceValue = toNumber(slot.price);
+    const available = slot.available && (remainValue === null || remainValue > 0);
+    const remaining = available ? remainValue : 0;
 
     const existing = groups.get(key);
     if (existing) {
       existing.site_count += 1;
-      existing.available_count += 1;
-      if (existing.total_remain === null || remainValue === null) {
+      existing.available_count += Number(available);
+      if (existing.total_remain === null || remaining === null) {
         existing.total_remain = null;
       } else {
-        existing.total_remain += remainValue;
+        existing.total_remain += remaining;
       }
       if (priceValue !== null) {
         existing.min_price = existing.min_price === null ? priceValue : Math.min(existing.min_price, priceValue);
@@ -56,8 +59,8 @@ export const aggregateAvailableSlots = (
         start,
         end,
         site_count: 1,
-        available_count: 1,
-        total_remain: remainValue,
+        available_count: Number(available),
+        total_remain: remaining,
         min_price: priceValue,
         max_price: priceValue,
       });

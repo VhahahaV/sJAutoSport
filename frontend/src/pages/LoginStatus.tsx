@@ -1,826 +1,127 @@
-import { FormEvent, useCallback, useEffect, useMemo, useState } from "react";
+import { FormEvent, useCallback, useEffect, useRef, useState } from "react";
+import { Link, useNavigate } from "react-router-dom";
+import { api, type LoginFlowResponse, type QrLogin } from "../lib/api";
+import SportsIllustration from "../components/SportsIllustration";
 
-import {
-  api,
-  type KeepAliveJob,
-  type KeepAliveSummary,
-  type LoginFlowResponse,
-  type LoginStatusResponse,
-  type UserInfoRecord,
-  type UserSummary,
-} from "../lib/api";
+type Props = { onRefresh: () => Promise<void> };
+const waiting = (qr: QrLogin | null) => qr && ["connecting", "waiting", "confirming"].includes(qr.status);
 
-type PendingSession = {
-  sessionId: string;
-  username?: string | null;
-  nickname?: string | null;
-  captchaImage?: string | null;
-  message?: string | null;
-};
+export default function LoginStatusPage({ onRefresh }: Props) {
+  const navigate = useNavigate();
+  const [mode, setMode] = useState<"qr" | "password">("qr");
+  const [username, setUsername] = useState("");
+  const [password, setPassword] = useState("");
+  const [showPassword, setShowPassword] = useState(false);
+  const [pending, setPending] = useState<LoginFlowResponse | null>(null);
+  const [code, setCode] = useState("");
+  const [qr, setQr] = useState<QrLogin | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [qrBusy, setQrBusy] = useState(false);
+  const [message, setMessage] = useState("");
+  const [error, setError] = useState("");
+  const started = useRef(false);
+  const qrSession = useRef<string | null>(null);
+  const polling = useRef(false);
 
-const toDataUrl = (image?: string | null, mime?: string | null) =>
-  image ? `data:${mime ?? "image/png"};base64,${image}` : null;
-
-const deriveNickname = (username: string) => username.trim().split("@", 1)[0];
-
-const sexLabel = (value?: string | null) => {
-  if (value === "0") return "男";
-  if (value === "1") return "女";
-  return value ?? "未知";
-};
-
-const LoginStatusPage = () => {
-  const [status, setStatus] = useState<LoginStatusResponse | null>(null);
-  const [loading, setLoading] = useState(true);
-  const [statusError, setStatusError] = useState<string | null>(null);
-
-  const [form, setForm] = useState({ username: "", password: "", nickname: "" });
-  const [loginBusy, setLoginBusy] = useState(false);
-  const [verifyBusy, setVerifyBusy] = useState(false);
-  const [loginError, setLoginError] = useState<string | null>(null);
-  const [loginInfo, setLoginInfo] = useState<string | null>(null);
-  const [pendingSession, setPendingSession] = useState<PendingSession | null>(null);
-  const [captchaCode, setCaptchaCode] = useState("");
-  const [knownUsers, setKnownUsers] = useState<UserSummary[]>([]);
-  const [usersError, setUsersError] = useState<string | null>(null);
-  const [usersLoading, setUsersLoading] = useState(false);
-  const [userRecords, setUserRecords] = useState<UserInfoRecord[]>([]);
-  const [userInfoLoading, setUserInfoLoading] = useState(false);
-  const [userInfoError, setUserInfoError] = useState<string | null>(null);
-  const [keepAliveJobs, setKeepAliveJobs] = useState<KeepAliveJob[]>([]);
-  const [keepAliveResults, setKeepAliveResults] = useState<KeepAliveSummary[]>([]);
-  const [keepAliveLoading, setKeepAliveLoading] = useState(false);
-  const [keepAliveError, setKeepAliveError] = useState<string | null>(null);
-  const [keepAliveTarget, setKeepAliveTarget] = useState("");
-  const [jobName, setJobName] = useState("KeepAlive");
-  const [jobInterval, setJobInterval] = useState(15);
-
-  const loadStatus = useCallback(async () => {
-    setLoading(true);
-    setStatusError(null);
-    try {
-      const result = await api.getLoginStatus();
-      setStatus(result);
-    } catch (err) {
-      setStatusError((err as Error).message);
-    } finally {
-      setLoading(false);
-    }
-  }, []);
-
-  const loadUsers = useCallback(async () => {
-    setUsersLoading(true);
-    setUsersError(null);
-    try {
-      const result = await api.listUsers();
-      const items = result.users ?? [];
-      setKnownUsers(items);
-      setForm((prev) => {
-        if (prev.username || !items.length) {
-          return prev;
-        }
-        const candidate =
-          items.find((user) => user.is_active && user.username) ??
-          items.find((user) => user.username);
-        if (!candidate || !candidate.username) {
-          return prev;
-        }
-        return {
-          ...prev,
-          username: candidate.username,
-          nickname: candidate.nickname ?? prev.nickname,
-          password: prev.password,
-        };
-      });
-    } catch (err) {
-      setUsersError((err as Error).message);
-    } finally {
-      setUsersLoading(false);
-    }
-  }, []);
-
-  const loadUserInfo = useCallback(async () => {
-    try {
-      setUserInfoLoading(true);
-      setUserInfoError(null);
-      const response = await api.getUserInfos();
-      setUserRecords(response.users ?? []);
-    } catch (err) {
-      setUserInfoError((err as Error).message);
-      setUserRecords([]);
-    } finally {
-      setUserInfoLoading(false);
-    }
-  }, []);
-
-  const loadKeepAliveJobs = useCallback(async () => {
-    try {
-      setKeepAliveLoading(true);
-      setKeepAliveError(null);
-      const data = await api.listKeepAliveJobs();
-      setKeepAliveJobs(data);
-    } catch (err) {
-      setKeepAliveError((err as Error).message);
-    } finally {
-      setKeepAliveLoading(false);
-    }
+  const generateQr = useCallback(async () => {
+    setQrBusy(true); setError(""); setQr(null);
+    try { const result = await api.startQrLogin(); qrSession.current = result.session_id || null; setQr(result); }
+    catch (error) { setError((error as Error).message); }
+    finally { setQrBusy(false); }
   }, []);
 
   useEffect(() => {
-    void loadStatus();
-  }, [loadStatus]);
+    if (mode === "qr" && !started.current) { started.current = true; void generateQr(); }
+  }, [mode, generateQr]);
 
   useEffect(() => {
-    void loadUsers();
-  }, [loadUsers]);
+    if (mode !== "qr" || !qr?.session_id || !waiting(qr)) return;
+    let active = true;
+    const session = qr.session_id;
+    const timer = window.setInterval(async () => {
+      if (polling.current) return;
+      polling.current = true;
+      try {
+        const result = await api.getQrLogin(session);
+        if (!active) return;
+        setQr(result);
+        if (result.status === "success") { qrSession.current = null; await onRefresh(); navigate("/dashboard"); }
+      } catch (error) { if (active) { setError((error as Error).message); setQr(previous => previous ? { ...previous, status: "error" } : null); } }
+      finally { polling.current = false; }
+    }, 1500);
+    return () => { active = false; window.clearInterval(timer); };
+  }, [mode, qr?.session_id, qr?.status, onRefresh, navigate]);
 
-  useEffect(() => {
-    void loadUserInfo();
-    void loadKeepAliveJobs();
-  }, [loadUserInfo, loadKeepAliveJobs]);
-
-  const handleLoginResponse = async (result: LoginFlowResponse) => {
-    if (!result.success) {
-      setPendingSession(null);
-      setLoginError(result.message ?? "登录失败");
-      return;
-    }
-
-    if (result.captcha_required) {
-      if (!result.session_id) {
-        setLoginError("登录会话创建失败，缺少 session_id");
-        setPendingSession(null);
-        return;
-      }
-      setPendingSession({
-        sessionId: result.session_id,
-        username: result.username,
-        nickname: result.nickname,
-        captchaImage: toDataUrl(result.captcha_image, result.captcha_mime),
-        message: result.message ?? "验证码已生成，请在 5 分钟内输入。",
-      });
-      setLoginInfo(result.message ?? "验证码已生成，请输入验证码完成登录。");
-      setCaptchaCode("");
-      return;
-    }
-
-    setPendingSession(null);
-    setCaptchaCode("");
-    setLoginInfo(result.message ?? "登录成功");
-    setForm({ username: "", password: "", nickname: "" });
-    await Promise.all([loadStatus(), loadUsers(), loadUserInfo(), loadKeepAliveJobs()]);
-  };
-
-  const handleStartLogin = async (event: FormEvent<HTMLFormElement>) => {
-    event.preventDefault();
-    if (loginBusy) return;
-    setLoginError(null);
-    setLoginInfo(null);
-    setLoginBusy(true);
-
+  async function changeMode(next: "qr" | "password") {
+    if (next === mode || busy || qrBusy) return;
+    setError(""); setMessage("");
     try {
-      const payload: Record<string, string> = {};
-      const username = form.username.trim();
-      const nickname = form.nickname.trim();
-      if (username) payload.username = username;
-      if (form.password) payload.password = form.password;
-      if (nickname) payload.nickname = nickname;
+      if (qrSession.current) { await api.cancelQrLogin(qrSession.current); qrSession.current = null; }
+      if (pending?.session_id) await api.cancelLoginSession(pending.session_id);
+    } catch (error) { setError((error as Error).message); }
+    setPending(null); setCode(""); setQr(null); setMode(next);
+    if (next === "qr") { started.current = true; await generateQr(); }
+  }
 
-      const result = await api.startLogin(payload);
-      await handleLoginResponse(result);
-    } catch (err) {
-      setLoginError((err as Error).message);
-    } finally {
-      setLoginBusy(false);
-    }
-  };
+  async function accept(result: LoginFlowResponse) {
+    setPassword(""); setCode(""); setMessage(result.message || "");
+    if (result.captcha_base64 && result.session_id) { setPending(result); return; }
+    setPending(null);
+    if (result.success) { await onRefresh(); navigate("/dashboard"); }
+    else setError(result.message || "登录未完成，请重试");
+  }
+  async function login(event: FormEvent) {
+    event.preventDefault(); setBusy(true); setError("");
+    try { await accept(await api.startLogin({ username: username.trim(), password })); }
+    catch (error) { setError((error as Error).message); } finally { setBusy(false); }
+  }
+  async function verify(event: FormEvent) {
+    event.preventDefault(); if (!pending?.session_id) return;
+    setBusy(true); setError("");
+    try { await accept(await api.submitLoginCode({ session_id: pending.session_id, code: code.trim() })); }
+    catch (error) { setError((error as Error).message); } finally { setBusy(false); }
+  }
+  async function restartPassword() {
+    if (pending?.session_id) await api.cancelLoginSession(pending.session_id);
+    setPending(null); setCode(""); setMessage(""); setError("");
+  }
 
-  const handleSubmitCaptcha = async (event: FormEvent<HTMLFormElement>) => {
-    event.preventDefault();
-    if (!pendingSession || verifyBusy) return;
-
-    const code = captchaCode.trim();
-    if (!code) {
-      setLoginError("请输入验证码");
-      return;
-    }
-
-    setVerifyBusy(true);
-    setLoginError(null);
-    setLoginInfo(null);
-
-    try {
-      const result = await api.submitLoginCode({
-        session_id: pendingSession.sessionId,
-        code,
-      });
-
-      if (result.success) {
-        await handleLoginResponse(result);
-        return;
-      }
-
-      if (result.retry) {
-        setLoginInfo(result.message ?? "验证码错误，请重试。");
-        setCaptchaCode("");
-        setPendingSession({
-          sessionId: pendingSession.sessionId,
-          username: result.username ?? pendingSession.username,
-          nickname: result.nickname ?? pendingSession.nickname,
-          captchaImage: toDataUrl(
-            result.captcha_image ?? undefined,
-            result.captcha_mime ?? undefined,
-          ),
-          message: result.message ?? pendingSession.message,
-        });
-        return;
-      }
-
-      setPendingSession(null);
-      setCaptchaCode("");
-      setLoginError(result.message ?? "登录失败");
-    } catch (err) {
-      setLoginError((err as Error).message);
-    } finally {
-      setVerifyBusy(false);
-    }
-  };
-
-  const handleCancelSession = async () => {
-    if (!pendingSession) return;
-    setVerifyBusy(true);
-    setLoginError(null);
-    setLoginInfo(null);
-    try {
-      const result = await api.cancelLoginSession(pendingSession.sessionId);
-      if (result.success) {
-        setLoginInfo(result.message ?? "登录流程已取消");
-      } else {
-        setLoginError(result.message ?? "取消登录流程失败");
-      }
-    } catch (err) {
-      setLoginError((err as Error).message);
-    } finally {
-      setVerifyBusy(false);
-      setPendingSession(null);
-      setCaptchaCode("");
-    }
-  };
-
-  const handleRunKeepAlive = async (user?: string) => {
-    try {
-      setKeepAliveLoading(true);
-      const data = await api.runKeepAlive(user);
-      setKeepAliveResults(data);
-      setKeepAliveError(null);
-    } catch (err) {
-      const message = (err as Error).message;
-      setKeepAliveError(message);
-    } finally {
-      setKeepAliveLoading(false);
-      void loadKeepAliveJobs();
-      void loadStatus();
-      void loadUserInfo();
-    }
-  };
-
-  const handleCreateKeepAliveJob = async (event: FormEvent<HTMLFormElement>) => {
-    event.preventDefault();
-    try {
-      setKeepAliveLoading(true);
-      const payload = {
-        name: jobName || "KeepAlive",
-        interval_minutes: Math.max(1, jobInterval),
-      };
-      const response = await api.createKeepAliveJob(payload);
-      setJobName("KeepAlive");
-      setJobInterval(15);
-      setKeepAliveError(null);
-      await loadKeepAliveJobs();
-    } catch (err) {
-      const message = (err as Error).message;
-      setKeepAliveError(message);
-    } finally {
-      setKeepAliveLoading(false);
-    }
-  };
-
-  const handleDeleteKeepAliveJob = async (jobId: string) => {
-    try {
-      setKeepAliveLoading(true);
-      await api.deleteKeepAliveJob(jobId);
-      await loadKeepAliveJobs();
-    } catch (err) {
-      const message = (err as Error).message;
-      setKeepAliveError(message);
-    } finally {
-      setKeepAliveLoading(false);
-    }
-  };
-
-  const keepAliveSuccessCount = useMemo(
-    () => keepAliveResults.filter((item) => item.success).length,
-    [keepAliveResults],
-  );
-
-  return (
-    <>
-      <div className="content-header">
-        <div>
-          <h2>用户会话与保活</h2>
-          <p style={{ color: "var(--cm-muted)", marginTop: "8px" }}>
-            在此发起登录流程、查看用户档案并统一维护会话保活。
-          </p>
-        </div>
-        <button
-          className="button button-secondary"
-          type="button"
-          onClick={() => {
-            void loadStatus();
-            void loadUsers();
-            void loadUserInfo();
-            void loadKeepAliveJobs();
-          }}
-          disabled={loading}
-        >
-          {loading ? "刷新中…" : "刷新全部"}
-        </button>
-      </div>
-
-      <div className="panel">
-        <div className="section">
-          <h3>发起登录</h3>
-          <p style={{ color: "var(--cm-muted)", margin: 0 }}>
-            输入体育系统用户名和密码开始登录；账号已保存密码时，可留空复用。
-          </p>
-        </div>
-
-        <div className="user-quick-select">
-          <div className="user-quick-header">
-            <span>已保存账号</span>
-            <button
-              className="text-button"
-              type="button"
-              onClick={() => void loadUsers()}
-              disabled={usersLoading}
-            >
-              {usersLoading ? "刷新中…" : "刷新列表"}
-            </button>
-          </div>
-          {usersError ? (
-            <div className="notice notice-error">{usersError}</div>
-          ) : null}
-          {knownUsers.length ? (
-            <div className="user-chip-group">
-              {knownUsers.map((user, index) => {
-                const username = user.username ?? "";
-                const nickname = user.nickname ?? "";
-                const isSelected =
-                  username && form.username && username.toLowerCase() === form.username.toLowerCase();
-                return (
-                  <button
-                    key={`${username || "user"}-${index}`}
-                    type="button"
-                    className={`user-chip${isSelected ? " active" : ""}${
-                      user.is_active ? " current" : ""
-                    }`}
-                    onClick={() =>
-                      setForm({
-                        username,
-                        password: "",
-                        nickname: nickname || deriveNickname(username),
-                      })
-                    }
-                  >
-                    <span className="user-chip-name">{nickname || username || "未命名用户"}</span>
-                    <span className="user-chip-meta">
-                      {username || "（未配置用户名）"}
-                      {user.is_active ? " · 当前" : ""}
-                    </span>
-                  </button>
-                );
-              })}
-            </div>
-          ) : usersLoading ? (
-            <span className="muted-text">正在加载账号…</span>
-          ) : !usersError ? (
-            <span className="muted-text">还没有已保存的账号，直接在下方填写并登录即可。</span>
-          ) : null}
-        </div>
-
-        <form onSubmit={handleStartLogin} className="form-grid">
-          <div className="form-field">
-            <label htmlFor="login-username">用户名</label>
-            <input
-              id="login-username"
-              className="input"
-              placeholder="学号 / 邮箱 / 配置文件中的用户名"
-              value={form.username}
-              onChange={(event) => {
-                const value = event.target.value;
-                setForm((prev) => ({
-                  ...prev,
-                  username: value,
-                  nickname: prev.nickname ? prev.nickname : deriveNickname(value),
-                }));
-              }}
-              autoComplete="username"
-            />
-          </div>
-          <div className="form-field">
-            <label htmlFor="login-password">密码</label>
-            <input
-              id="login-password"
-              className="input"
-              type="password"
-              placeholder="登录密码"
-              value={form.password}
-              onChange={(event) => setForm((prev) => ({ ...prev, password: event.target.value }))}
-              autoComplete="current-password"
-            />
-          </div>
-          <div className="form-field">
-            <label htmlFor="login-nickname">昵称（可选）</label>
-            <input
-              id="login-nickname"
-              className="input"
-              placeholder="用于标识此账号"
-              value={form.nickname}
-              onChange={(event) => setForm((prev) => ({ ...prev, nickname: event.target.value }))}
-            />
-          </div>
-          <div className="panel-actions" style={{ alignItems: "flex-end" }}>
-            <button
-              className="button button-primary"
-              type="submit"
-              disabled={loginBusy || verifyBusy}
-            >
-              {loginBusy ? "处理中…" : "开始登录"}
-            </button>
-            {pendingSession ? (
-              <button
-                className="button button-secondary"
-                type="button"
-                onClick={handleCancelSession}
-                disabled={verifyBusy}
-              >
-                取消登录
-              </button>
-            ) : null}
-          </div>
-        </form>
-
-        {pendingSession ? (
-          <form onSubmit={handleSubmitCaptcha} className="form-grid">
-            <div className="form-field">
-              <label htmlFor="captcha-code">验证码</label>
-              <input
-                id="captcha-code"
-                className="input"
-                value={captchaCode}
-                onChange={(event) => setCaptchaCode(event.target.value)}
-                placeholder="请输入验证码"
-                autoComplete="one-time-code"
-              />
-            </div>
-            {pendingSession.captchaImage ? (
-              <div className="form-field" style={{ alignItems: "flex-start" }}>
-                <label style={{ visibility: "hidden" }}>验证码图片</label>
-                <img
-                  src={pendingSession.captchaImage}
-                  alt="验证码"
-                  className="captcha-image"
-                />
-              </div>
-            ) : null}
-            <div className="panel-actions" style={{ alignItems: "flex-end" }}>
-              <button
-                className="button button-primary"
-                type="submit"
-                disabled={verifyBusy}
-              >
-                {verifyBusy ? "提交中…" : "提交验证码"}
-              </button>
-            </div>
-          </form>
-        ) : null}
-
-        {loginInfo ? <div className="notice notice-success">{loginInfo}</div> : null}
-        {loginError ? <div className="notice notice-error">{loginError}</div> : null}
-      </div>
-
-      {statusError ? (
-        <div className="panel" style={{ border: "1px solid #eed1d9" }}>
-          <strong>状态获取失败</strong>
-          <span style={{ color: "var(--cm-error)" }}>{statusError}</span>
-        </div>
-      ) : null}
-
-      <div className="panel">
-        <div className="section" style={{ marginBottom: "-8px" }}>
-          <h3>登录状态</h3>
-        </div>
-        {loading ? (
-          <span style={{ color: "var(--cm-muted)" }}>加载中…</span>
-        ) : knownUsers.length || (status && status.success) ? (
-          <table className="table">
-            <thead>
-              <tr>
-                <th>昵称</th>
-                <th>用户名</th>
-                <th>有效期</th>
-                <th>状态</th>
-              </tr>
-            </thead>
-            <tbody>
-              {(knownUsers.length ? knownUsers : status?.users || []).map((user, index) => (
-                <tr key={user.key || `${user.username || "user"}-${index}`}>
-                  <td>{user.nickname || "未命名"}</td>
-                  <td>{user.username || "-"}</td>
-                  <td>
-                    {user.expires_at
-                      ? new Date(user.expires_at).toLocaleString()
-                      : "未知"}
-                  </td>
-                  <td>
-                    {user.is_active ? (
-                      <span className="chip chip-success">当前使用</span>
-                    ) : (
-                      <span className="chip chip-info">备用</span>
-                    )}
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        ) : (
-          <span style={{ color: "var(--cm-muted)" }}>
-            尚未保存任何登录凭据，一旦完成登录这里会显示结果。
-          </span>
-        )}
-      </div>
-
-      <section className="section">
-        <div className="content-header" style={{ padding: 0 }}>
-          <div>
-            <h3>用户信息</h3>
-            <p style={{ color: "var(--cm-muted)", marginTop: "4px" }}>
-              查询当前 Cookie 绑定的用户档案（来源于校园系统接口）。
-            </p>
-          </div>
-          <button
-            className="button button-secondary"
-            type="button"
-            onClick={() => void loadUserInfo()}
-            disabled={userInfoLoading}
-          >
-            {userInfoLoading ? "刷新中…" : "重新获取"}
-          </button>
-        </div>
-        <div className="panel">
-          {userInfoError ? (
-            <div className="notice notice-error">{userInfoError}</div>
-          ) : null}
-          {userInfoLoading ? (
-            <span style={{ color: "var(--cm-muted)" }}>加载中…</span>
-          ) : userRecords.length === 0 ? (
-            <span style={{ color: "var(--cm-muted)" }}>暂无用户信息，请先完成登录。</span>
-          ) : (
-            userRecords.map((record, index) => {
-              const profile = record.profile || {};
-              return (
-                <div
-                  key={`${record.username || record.nickname || index}`}
-                  style={{
-                    border: "1px solid var(--cm-border)",
-                    borderRadius: "12px",
-                    padding: "16px",
-                    marginBottom: "12px",
-                    display: "grid",
-                    gap: "10px",
-                    gridTemplateColumns: "repeat(auto-fit, minmax(180px, 1fr))",
-                  }}
-                >
-                  <div>
-                    <strong>昵称：</strong>
-                    {record.nickname || "未命名"}
-                  </div>
-                  <div>
-                    <strong>用户名：</strong>
-                    {record.username || "-"}
-                  </div>
-                  <div>
-                    <strong>状态：</strong>
-                    <span className={`chip ${record.success ? "chip-success" : "chip-warning"}`}>
-                      {record.success ? "有效" : "失效"}
-                    </span>
-                    {record.is_active ? (
-                      <span style={{ marginLeft: "6px", color: "var(--cm-link)" }}>当前活跃</span>
-                    ) : null}
-                  </div>
-                  <div>
-                    <strong>姓名：</strong>
-                    {profile.user_name || "-"}
-                  </div>
-                  <div>
-                    <strong>登录名：</strong>
-                    {profile.login_name || "-"}
-                  </div>
-                  <div>
-                    <strong>手机号：</strong>
-                    {profile.phone || "-"}
-                  </div>
-                  <div>
-                    <strong>性别：</strong>
-                    {sexLabel(profile.sex)}
-                  </div>
-                  <div>
-                    <strong>部门：</strong>
-                    {profile.dept || "-"}
-                  </div>
-                  <div>
-                    <strong>学号：</strong>
-                    {profile.code || "-"}
-                  </div>
-                  <div>
-                    <strong>班级：</strong>
-                    {profile.class_no || "-"}
-                  </div>
-                  <div>
-                    <strong>管理员：</strong>
-                    {profile.admin ? "是" : "否"}
-                  </div>
-                  <div style={{ gridColumn: "1 / -1" }}>
-                    <strong>角色：</strong>
-                    {profile.roles && profile.roles.length > 0 ? profile.roles.join(" / ") : "无"}
-                  </div>
-                  {!record.success && record.message ? (
-                    <div style={{ gridColumn: "1 / -1", color: "var(--cm-error)" }}>
-                      错误：{record.message}
-                    </div>
-                  ) : null}
-                </div>
-              );
-            })
-          )}
-        </div>
+  return <main className="signin-shell">
+    <header className="signin-header"><Link to="/" className="signin-brand"><img src="/favicon.svg" alt="" width={38} height={38} /><span>SJTU <strong>SPORTS</strong><small>交大运动空间</small></span></Link><a href="https://sports.sjtu.edu.cn/" target="_blank" rel="noreferrer" className="signin-official">体育预约平台 <span aria-hidden="true">↗</span></a></header>
+    <div className="signin-layout">
+      <section className="signin-story" aria-labelledby="signin-heading">
+        <span className="signin-eyebrow"><span aria-hidden="true" /> MAKE ROOM FOR PLAY</span>
+        <h1 id="signin-heading">生活很满，<br />也要留点时间<br /><span>给热爱的运动。</span></h1>
+        <p className="signin-intro">好场地，好时光。<br />登录你的交大账号，下一场尽兴从这里开始。</p>
+        <SportsIllustration className="signin-illustration" />
+        <div className="signin-story-note"><span className="signin-note-icon" aria-hidden="true">✦</span><span>少一点安排，多一点热爱。<br /><strong>让运动，轻松发生。</strong></span></div>
       </section>
-
-      <section className="section">
-        <div className="content-header" style={{ padding: 0 }}>
-          <div>
-            <h3>会话保活</h3>
-            <p style={{ color: "var(--cm-muted)", marginTop: "4px" }}>
-              定时刷新 Cookie，确保账号随时可用。
-            </p>
-          </div>
-          <div className="panel-actions" style={{ padding: 0 }}>
-            <button
-              className="button button-secondary"
-              type="button"
-              disabled={keepAliveLoading}
-              onClick={() => handleRunKeepAlive()}
-            >
-              刷新全部
-            </button>
-            <div style={{ display: "flex", gap: "8px" }}>
-              <input
-                placeholder="指定用户昵称或用户名"
-                value={keepAliveTarget}
-                onChange={(event) => setKeepAliveTarget(event.target.value)}
-                className="input"
-                style={{ minWidth: "220px" }}
-              />
-              <button
-                className="button button-primary"
-                type="button"
-                disabled={keepAliveLoading || !keepAliveTarget}
-                onClick={() => handleRunKeepAlive(keepAliveTarget)}
-              >
-                刷新指定用户
-              </button>
+      <section className="signin-card" aria-label="登录交大运动空间">
+        <span className="signin-card-kicker">YOUR NEXT GOOD MOVE</span>
+        <h2>欢迎来到运动空间</h2>
+        <p className="signin-card-subtitle">使用 jAccount 登录，开启今天的好状态。</p>
+          <div className="signin-tabs" role="tablist" aria-label="登录方式"><button type="button" role="tab" aria-selected={mode === "qr"} aria-controls="signin-qr" className={mode === "qr" ? "is-active" : ""} onClick={() => changeMode("qr")} disabled={busy || qrBusy}>扫码登录 <span className="signin-recommended">推荐</span></button><button type="button" role="tab" aria-selected={mode === "password"} aria-controls="signin-password" className={mode === "password" ? "is-active" : ""} onClick={() => changeMode("password")} disabled={busy || qrBusy}>密码登录</button></div>
+          {mode === "qr" ? <div id="signin-qr" role="tabpanel" className="signin-qr-panel">
+            <div className={`signin-qr-frame${qr?.status === "confirming" ? " is-confirming" : ""}`}>
+              {qr?.qr_base64 && waiting(qr) ? <img src={`data:${qr.qr_mime || "image/png"};base64,${qr.qr_base64}`} alt="jAccount 登录二维码，请使用交我办或微信扫描" width={216} height={216} /> : <div className="signin-qr-placeholder">{qrBusy ? <><span className="signin-spinner" aria-hidden="true" /><span>正在准备二维码</span></> : <><svg viewBox="0 0 64 64" fill="none" aria-hidden="true"><path d="M7 7h18v18H7zM39 7h18v18H39zM7 39h18v18H7zM39 39h7v7h-7zM50 39h7v18H39v-7" stroke="currentColor" strokeWidth="4" strokeLinejoin="round" /></svg><span>{qr?.status === "expired" ? "二维码已过期" : "重新准备，马上出发"}</span></>}</div>}
+              {qr?.status === "confirming" && <div className="signin-qr-confirm"><span className="signin-spinner" aria-hidden="true" /> 正在确认登录</div>}
             </div>
-          </div>
-        </div>
-
-        {keepAliveError ? <div className="notice notice-error">{keepAliveError}</div> : null}
-
-        <div className="panel">
-          {keepAliveLoading && <span style={{ color: "var(--cm-link)" }}>执行中…</span>}
-          {!keepAliveLoading && keepAliveResults.length === 0 ? (
-            <span style={{ color: "var(--cm-muted)" }}>暂无保活记录，点击「刷新全部」开始。</span>
-          ) : null}
-
-          {keepAliveResults.length > 0 ? (
-            <div style={{ display: "flex", flexDirection: "column", gap: "12px" }}>
-              <div>
-                成功 <strong style={{ color: "var(--cm-success)" }}>{keepAliveSuccessCount}</strong> /
-                {keepAliveResults.length}
-              </div>
-              <table className="table">
-                <thead>
-                  <tr>
-                    <th>昵称</th>
-                    <th>用户名</th>
-                    <th>状态</th>
-                    <th>信息</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {keepAliveResults.map((result, index) => (
-                    <tr key={`${result.username}-${index}`}>
-                      <td>{result.nickname || "未命名"}</td>
-                      <td>{result.username || "-"}</td>
-                      <td>
-                        <span className={`chip ${result.success ? "chip-success" : "chip-warning"}`}>
-                          {result.success ? "成功" : "失败"}
-                        </span>
-                      </td>
-                      <td>{result.message}</td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-          ) : null}
-        </div>
-
-        <div className="panel">
-          <h4 style={{ margin: 0 }}>定时保活任务</h4>
-          <form onSubmit={handleCreateKeepAliveJob} className="form-grid">
-            <div className="form-field">
-              <label htmlFor="keepalive-name">任务名称</label>
-              <input
-                id="keepalive-name"
-                className="input"
-                value={jobName}
-                onChange={(event) => setJobName(event.target.value)}
-              />
-            </div>
-            <div className="form-field">
-              <label htmlFor="keepalive-interval">间隔（分钟）</label>
-              <input
-                id="keepalive-interval"
-                className="input"
-                type="number"
-                min={1}
-                value={jobInterval}
-                onChange={(event) => setJobInterval(Number(event.target.value) || 1)}
-              />
-            </div>
-            <div className="panel-actions" style={{ alignItems: "flex-end" }}>
-              <button
-                className="button button-primary"
-                type="submit"
-                disabled={keepAliveLoading}
-              >
-                创建任务
-              </button>
-            </div>
-          </form>
-
-          {keepAliveLoading && keepAliveJobs.length === 0 ? (
-            <span style={{ color: "var(--cm-muted)" }}>加载任务中…</span>
-          ) : keepAliveJobs.length === 0 ? (
-            <span style={{ color: "var(--cm-muted)" }}>暂无保活任务。</span>
-          ) : (
-            <table className="table">
-              <thead>
-                <tr>
-                  <th>ID</th>
-                  <th>名称</th>
-                  <th>状态</th>
-                  <th>间隔</th>
-                  <th>操作</th>
-                </tr>
-              </thead>
-              <tbody>
-                {keepAliveJobs.map((job) => (
-                  <tr key={job.job_id}>
-                    <td>{job.job_id}</td>
-                    <td>{job.name}</td>
-                    <td>{job.status}</td>
-                    <td>{job.interval_minutes} 分钟</td>
-                    <td>
-                      <button
-                        className="text-button"
-                        type="button"
-                        onClick={() => void handleDeleteKeepAliveJob(job.job_id)}
-                        disabled={keepAliveLoading}
-                      >
-                        删除
-                      </button>
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          )}
-
-        </div>
+            <p className="signin-scan-tip">打开 <strong>交我办</strong> 或 <strong>微信</strong> 扫一扫</p>
+            <p className="signin-qr-status" role="status">{qr?.message || "在手机上确认，即可安全登录"}</p>
+            <button className="signin-text-button" type="button" onClick={generateQr} disabled={qrBusy}>{qrBusy ? "正在生成…" : "↻ 刷新二维码"}</button>
+          </div> : <div id="signin-password" role="tabpanel">
+            {pending ? <form className="signin-form" onSubmit={verify}><p className="signin-captcha-caption">再确认一下，是你本人。</p><div className="signin-captcha-preview"><img src={`data:${pending.captcha_mime || "image/jpeg"};base64,${pending.captcha_base64}`} alt="登录验证码" /><span>请输入左侧图片中的字符</span></div><label className="signin-field">验证码<input autoFocus autoComplete="off" placeholder="填写图片中的验证码" value={code} onChange={e => setCode(e.target.value)} required /></label><button className="button button-primary signin-submit" disabled={busy}>{busy ? "正在验证…" : "验证并登录 →"}</button><button className="signin-text-button" type="button" onClick={() => restartPassword().catch(error => setError(error.message))} disabled={busy}>返回账号密码</button></form> : <form className="signin-form" onSubmit={login}>
+              <label className="signin-field">jAccount 账号<div className="signin-input-wrap"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="8" r="4" /><path d="M4 22v-3a8 8 0 0 1 16 0v3" /></svg><input autoComplete="username" placeholder="用户名 / 交大邮箱" value={username} onChange={e => setUsername(e.target.value)} required /></div></label>
+              <label className="signin-field">密码<div className="signin-input-wrap"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="4" y="10" width="16" height="12" rx="3" /><path d="M8 10V6a4 4 0 0 1 8 0v4M12 15v3" /></svg><input type={showPassword ? "text" : "password"} autoComplete="current-password" placeholder="请输入 jAccount 密码" value={password} onChange={e => setPassword(e.target.value)} required /><button type="button" aria-label={showPassword ? "隐藏密码" : "显示密码"} onClick={() => setShowPassword(!showPassword)}>{showPassword ? "隐藏" : "显示"}</button></div></label>
+              <div className="signin-form-meta"><span>接下来将进行图片验证</span><a href="https://jaccount.sjtu.edu.cn/profile/#/find" target="_blank" rel="noreferrer">忘记密码？</a></div>
+              <button className="button button-primary signin-submit" disabled={busy}>{busy ? "正在连接…" : "开始登录 →"}</button>
+            </form>}
+          </div>}
+        {error && <p className="signin-feedback is-error" role="alert">{error}</p>}
+        {message && !error && mode === "password" && <p className="signin-feedback" role="status">{message}</p>}
+        <div className="signin-privacy"><svg viewBox="0 0 20 20" aria-hidden="true"><path d="m10 2 6 3v5c0 4-6 7-6 7s-6-3-6-7V5l6-3Z" /><path d="m7 9 2 2 4-4" /></svg><p>通过交大统一身份认证连接<br />密码不会保存在这里</p></div>
       </section>
-    </>
-  );
-};
-
-export default LoginStatusPage;
+    </div>
+    <footer className="signin-footer"><span>LESS PLANNING. MORE PLAY.</span><span>属于你的交大运动日常</span></footer>
+  </main>;
+}

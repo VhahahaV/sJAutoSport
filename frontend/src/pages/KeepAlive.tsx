@@ -1,298 +1,79 @@
-import { FormEvent, useEffect, useMemo, useState } from "react";
+import { FormEvent, useCallback, useEffect, useState } from "react";
+import { api, type KeepAliveSettings, type UserProfile } from "../lib/api";
 
-import {
-  api,
-  type KeepAliveJob,
-  type KeepAliveSummary,
-} from "../lib/api";
-
-const KeepAlivePage = () => {
-  const [jobs, setJobs] = useState<KeepAliveJob[]>([]);
-  const [results, setResults] = useState<KeepAliveSummary[]>([]);
-  const [loadingJobs, setLoadingJobs] = useState(true);
-  const [running, setRunning] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-  const [formName, setFormName] = useState("KeepAlive");
-  const [formInterval, setFormInterval] = useState(15);
-  const [targetUser, setTargetUser] = useState("");
-
-  const loadJobs = async () => {
+export default function KeepAlivePage() {
+  const [settings, setSettings] = useState<KeepAliveSettings>({ enabled: false, interval_minutes: 15 });
+  const [profile, setProfile] = useState<UserProfile | null>(null);
+  const [profileLoading, setProfileLoading] = useState(true);
+  const [profileError, setProfileError] = useState("");
+  const [ready, setReady] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [message, setMessage] = useState("");
+  const [error, setError] = useState("");
+  const loadProfile = useCallback(async () => {
+    setProfileLoading(true); setProfileError("");
     try {
-      setLoadingJobs(true);
-      const data = await api.listKeepAliveJobs();
-      setJobs(data);
-    } catch (err) {
-      setError((err as Error).message);
-    } finally {
-      setLoadingJobs(false);
-    }
-  };
-
-  useEffect(() => {
-    void loadJobs();
+      const result = await api.getAccountInfo();
+      if (!result.success || !result.profile) throw new Error(result.message || "未获得用户资料，请重试");
+      setProfile(result.profile);
+    } catch (error) { setProfileError((error as Error).message); }
+    finally { setProfileLoading(false); }
   }, []);
-
-  const handleRun = async (user?: string) => {
-    try {
-      setRunning(true);
-      const requestPayload = { user: user || undefined };
-      const data = await api.runKeepAlive(user);
-      setResults(data);
-      setError(null);
-    } catch (err) {
-      const message = (err as Error).message;
-      setError(message);
-    } finally {
-      setRunning(false);
-      void loadJobs();
-    }
-  };
-
-  const handleCreateJob = async (event: FormEvent<HTMLFormElement>) => {
-    event.preventDefault();
-    try {
-      setRunning(true);
-      const payload = {
-        name: formName || "KeepAlive",
-        interval_minutes: Math.max(1, formInterval),
-      };
-      const response = await api.createKeepAliveJob(payload);
-      setFormName("KeepAlive");
-      setFormInterval(15);
-      setError(null);
-      await loadJobs();
-    } catch (err) {
-      const message = (err as Error).message;
-      setError(message);
-    } finally {
-      setRunning(false);
-    }
-  };
-
-  const handleDeleteJob = async (jobId: string) => {
-    try {
-      setRunning(true);
-      await api.deleteKeepAliveJob(jobId);
-      await loadJobs();
-    } catch (err) {
-      const message = (err as Error).message;
-      setError(message);
-    } finally {
-      setRunning(false);
-    }
-  };
-
-  const lastSuccessCount = useMemo(
-    () => results.filter((item) => item.success).length,
-    [results],
-  );
-
-  return (
-    <>
+  useEffect(() => {
+    void loadProfile();
+    api.getKeepAlive().then(settings => { setSettings(settings); setReady(true); }).catch(error => setError(error.message));
+  }, [loadProfile]);
+  async function save(event: FormEvent) {
+    event.preventDefault(); setBusy(true); setMessage(""); setError("");
+    try { setSettings(await api.configureKeepAlive({ enabled: settings.enabled, interval_minutes: settings.interval_minutes })); setMessage("会话保活设置已保存。"); }
+    catch (error) { setError((error as Error).message); } finally { setBusy(false); }
+  }
+  async function refresh() {
+    setBusy(true); setMessage(""); setError("");
+    try { const result = await api.runKeepAlive(); if (result.success) { setMessage(result.message); await loadProfile(); } else setError(result.message); setSettings(await api.getKeepAlive()); }
+    catch (error) { setError((error as Error).message); } finally { setBusy(false); }
+  }
+  async function logout() {
+    if (!window.confirm("退出后会暂停正在运行的监控并关闭自动保活，确认退出？")) return;
+    setBusy(true); setError("");
+    try { await api.logout(); window.dispatchEvent(new Event("session-expired")); }
+    catch (error) { setError((error as Error).message); } finally { setBusy(false); }
+  }
+  return <>
+    <div className="content-header"><div><h2>账号与会话</h2><p className="content-subtitle">管理当前登录账号，以及后台运行时的会话维护。</p></div></div>
+    {error && <p className="notice notice-error" role="alert">{error}</p>}
+    {message && <p className="notice notice-success" role="status">{message}</p>}
+    <section className="panel" aria-busy={profileLoading} aria-label="当前账号资料">
       <div className="content-header">
-        <div>
-          <h2>会话保活</h2>
-          <p style={{ color: "var(--cm-muted)", marginTop: "8px" }}>
-            定时刷新所有账号，确保 Cookie 始终有效。
-          </p>
-        </div>
+        <h3>当前账号</h3>
         <div className="panel-actions">
-          <button
-            className="button button-secondary"
-            type="button"
-            disabled={running}
-            onClick={() => handleRun()}
-          >
-            刷新全部
-          </button>
-          <div style={{ display: "flex", gap: "8px" }}>
-            <input
-              placeholder="指定用户昵称或用户名"
-              value={targetUser}
-              onChange={(event) => setTargetUser(event.target.value)}
-              style={{
-                padding: "10px 14px",
-                borderRadius: "10px",
-                border: "1px solid var(--cm-border)",
-                fontSize: "14px",
-              }}
-            />
-            <button
-              className="button button-primary"
-              type="button"
-              disabled={running || !targetUser}
-              onClick={() => handleRun(targetUser)}
-            >
-              刷新指定用户
-            </button>
-          </div>
+          <button className="button button-secondary" disabled={profileLoading || busy} onClick={loadProfile}>{profileLoading ? "正在读取…" : "刷新资料"}</button>
+          <button className="button button-danger" disabled={busy} onClick={logout}>退出登录</button>
         </div>
       </div>
-
-      {error ? (
-        <div className="panel" style={{ border: "1px solid #eed1d9" }}>
-          <strong>操作失败</strong>
-          <span style={{ color: "var(--cm-error)" }}>{error}</span>
+      {profileError && <p className="notice notice-error" role="alert">资料读取失败：{profileError}。可以点击“刷新资料”重试。</p>}
+      {profile ? <>
+        <div className="account-identity">
+          <span className="account-avatar" aria-hidden="true">{(profile.user_name || profile.login_name || "").slice(0, 1)}</span>
+          <div><h4>{profile.user_name || profile.login_name}</h4><p className="muted-text">交大体育预约平台 · 当前登录用户</p></div>
         </div>
-      ) : null}
-
-      <section className="section">
-        <h3>最近结果</h3>
-        <div className="panel">
-          {running && <span style={{ color: "var(--cm-link)" }}>执行中…</span>}
-          {!running && results.length === 0 ? (
-            <span style={{ color: "var(--cm-muted)" }}>
-              暂无记录，点击「刷新全部」开始第一次保活。
-            </span>
-          ) : null}
-          {results.length > 0 ? (
-            <div style={{ display: "flex", flexDirection: "column", gap: "12px" }}>
-              <div>
-                成功{" "}
-                <strong style={{ color: "var(--cm-success)" }}>{lastSuccessCount}</strong> /
-                {results.length}
-              </div>
-              <table className="table">
-                <thead>
-                  <tr>
-                    <th>昵称</th>
-                    <th>用户名</th>
-                    <th>状态</th>
-                    <th>信息</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {results.map((result, index) => (
-                    <tr key={`${result.username}-${index}`}>
-                      <td>{result.nickname || "未命名"}</td>
-                      <td>{result.username || "-"}</td>
-                      <td>
-                        <span
-                          className={`chip ${
-                            result.success ? "chip-success" : "chip-warning"
-                          }`}
-                        >
-                          {result.success ? "成功" : "失败"}
-                        </span>
-                      </td>
-                      <td>{result.message}</td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-          ) : null}
-        </div>
-      </section>
-
-      <section className="section">
-        <h3>Keep-Alive 任务列表</h3>
-        <div className="panel">
-          {loadingJobs ? (
-            <span style={{ color: "var(--cm-muted)" }}>加载中…</span>
-          ) : jobs.length === 0 ? (
-            <span style={{ color: "var(--cm-muted)" }}>暂无 Keep-Alive 任务。</span>
-          ) : (
-            <table className="table">
-              <thead>
-                <tr>
-                  <th>名称</th>
-                  <th>状态</th>
-                  <th>间隔</th>
-                  <th>创建时间</th>
-                  <th>操作</th>
-                </tr>
-              </thead>
-              <tbody>
-                {jobs.map((job) => (
-                  <tr key={job.job_id}>
-                    <td>{job.name}</td>
-                    <td>
-                      <span
-                        className={`chip ${
-                          job.status === "running"
-                            ? "chip-success"
-                            : "chip-warning"
-                        }`}
-                      >
-                        {job.status}
-                      </span>
-                    </td>
-                    <td>{job.interval_minutes} 分钟</td>
-                    <td>{new Date(job.created_at).toLocaleString()}</td>
-                    <td>
-                      <button
-                        className="button button-secondary"
-                        type="button"
-                        onClick={() => handleDeleteJob(job.job_id)}
-                        disabled={running}
-                      >
-                        删除
-                      </button>
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          )}
-        </div>
-      </section>
-
-      <section className="section">
-        <h3>创建新的 Keep-Alive 任务</h3>
-        <div className="panel">
-          <form
-            style={{ display: "flex", gap: "16px", flexWrap: "wrap" }}
-            onSubmit={handleCreateJob}
-          >
-            <div style={{ display: "flex", flexDirection: "column", gap: "6px" }}>
-              <label htmlFor="job-name">任务名称</label>
-              <input
-                id="job-name"
-                value={formName}
-                onChange={(event) => setFormName(event.target.value)}
-                required
-                style={{
-                  padding: "10px 14px",
-                  borderRadius: "10px",
-                  border: "1px solid var(--cm-border)",
-                  fontSize: "14px",
-                }}
-              />
-            </div>
-            <div style={{ display: "flex", flexDirection: "column", gap: "6px" }}>
-              <label htmlFor="job-interval">刷新间隔 (分钟)</label>
-              <input
-                id="job-interval"
-                type="number"
-                min={1}
-                value={formInterval}
-                onChange={(event) =>
-                  setFormInterval(Number.parseInt(event.target.value, 10) || 15)
-                }
-                style={{
-                  width: "120px",
-                  padding: "10px 14px",
-                  borderRadius: "10px",
-                  border: "1px solid var(--cm-border)",
-                  fontSize: "14px",
-                }}
-              />
-            </div>
-            <div style={{ alignSelf: "flex-end" }}>
-              <button
-                className="button button-primary"
-                type="submit"
-                disabled={running}
-              >
-                创建任务
-              </button>
-            </div>
-          </form>
-        </div>
-      </section>
-    </>
-  );
-};
-
-export default KeepAlivePage;
+        <dl className="account-details">
+          <div><dt>姓名</dt><dd>{profile.user_name || "未提供"}</dd></div>
+          <div><dt>jAccount 账号</dt><dd>{profile.login_name || "未提供"}</dd></div>
+          <div><dt>学工号</dt><dd>{profile.code || "未提供"}</dd></div>
+          <div><dt>院系 / 部门</dt><dd>{profile.dept || "未提供"}</dd></div>
+          <div><dt>班级</dt><dd>{profile.class_no || "未提供"}</dd></div>
+          <div><dt>用户角色</dt><dd>{profile.roles?.length ? profile.roles.join("、") : "未提供"}</dd></div>
+        </dl>
+      </> : !profileError && <p className="muted-text" role="status">正在从体育预约平台读取个人资料…</p>}
+    </section>
+    <section className="panel"><h3>保持当前会话在线</h3><p className="muted-text">定期验证和刷新登录凭证。适合后台长期监控；服务器上的核心服务需保持运行。失效后仍需重新登录，保活无法保证永不过期。</p>
+      <form className="form-grid" onSubmit={save}>
+        <label className="field"><span>自动保活</span><input type="checkbox" disabled={busy || !ready} checked={settings.enabled} onChange={e => setSettings({ ...settings, enabled: e.target.checked })} /></label>
+        <label className="field">检查间隔（分钟）<input type="number" min={1} disabled={busy || !ready || !settings.enabled} value={settings.interval_minutes} onChange={e => setSettings({ ...settings, interval_minutes: Number(e.target.value) })} required /></label>
+        <div className="form-actions"><button className="button button-primary" disabled={busy || !ready}>{busy ? "处理中…" : "保存设置"}</button><button className="button button-secondary" type="button" onClick={refresh} disabled={busy || !ready}>立即检查会话</button></div>
+      </form>
+      <p className="muted-text">最近检查：{settings.last_run ? `${new Date(settings.last_run).toLocaleString()} · ${settings.last_result?.message || ""}` : "暂无检查记录"}</p>
+    </section>
+  </>;
+}

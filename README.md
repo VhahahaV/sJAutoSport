@@ -1,255 +1,151 @@
-# SJTU Sports 预约系统
+# sJAutoSport
 
-上海交通大学体育场馆预约的自动化/可视化解决方案，整合了后端服务、Web 前端以及 QQ Bot，适合多人协作抢场地、监控空位、自动下单。
+交大运动场馆预约工具：**一个 core，CLI 与网页两个入口**。仅使用当前登录的一个账号。支持密码与人工验证码登录、扫码登录、场地查询、预约、订单取消、余位监控和会话保活。无需 QQ Bot、OCR、浏览器自动化或大模型 API；不包含定时预约。
 
----
+## 安装与启动
 
-## ✨ 功能亮点
-
-- **多终端入口**：命令行、可视化控制台、QQ 机器人三端同步。
-- **多用户协同**：支持导入多名体育系统账号，自动切换与并行抢场地。
-- **任务调度**：内置监控、定时预约、自动抢票任务管理。
-- **实时通知**：通过 OneBot/Napcat 推送群消息和私聊提醒，含订单详情。
-- **前端门户保护**：内置门户密码页，可再叠加 Web 服务器 Basic Auth/VPN。
-- **环境可移植**：所有敏感信息均来自环境变量或外部 JSON，方便部署到不同环境。
-
----
-
-## ⚙️ 架构速览
-
-| 模块 | 技术栈 | 说明 |
-| --- | --- | --- |
-| 后端 API | FastAPI + asyncio | 提供登录、抢场地、监控、任务调度等 REST 接口。 |
-| 任务 Worker | 内置异步任务引擎 | 执行监控/定时/自动抢票任务，写入本地持久化。 |
-| Web 前端 | React + Vite + TypeScript | 提供表单化操作、任务面板、用户管理等 UI。 |
-| 通知服务 | NoneBot + OneBot (Napcat/Go-CQHTTP) | 接收下单事件并推送群聊/私聊通知。 |
-| 配置 & 凭据 | 环境变量 + JSON 文件 + `data/credentials.json` | 支持 development / production 等多套环境。 |
-
-目录结构：
-
-```
-sJAutoSport/
-├── config.py            # 运行时配置加载（环境变量/JSON）
-├── sja_booking/         # 核心业务逻辑（登录、下单、任务等）
-├── web_api/             # FastAPI 路由
-├── frontend/            # React 前端（Vite）
-├── bot/                 # NoneBot 插件、集成代码
-├── data/                # 默认凭据存储目录（可通过环境变量覆盖）
-├── scripts/             # 部署辅助脚本
-└── docs/                # 说明文档
-```
-
----
-
-## ✅ 前置条件
-
-- 操作系统：macOS / Linux（Windows 建议使用 WSL2）
-- Python 3.10+
-- Node.js 18+（用于构建前端）
-- Tesseract OCR（`brew install tesseract` 或按系统安装）
-- QQ Bot：任意 OneBot v11 实现（Napcat、Go-CQHTTP 等）
-- 访问 HTTPS 体育系统的网络环境
-
----
-
-## 🚀 从 0 开始的部署流程
-
-### 1. 克隆代码并安装依赖
+需要 Linux、Python 3.11+。仅使用 CLI 时无需安装 Node.js。
 
 ```bash
-git clone <your-repo-url> sJAutoSport
-cd sJAutoSport
-
-# Python 虚拟环境
-python -m venv .venv
-source .venv/bin/activate
-pip install -r requirements.txt
-
-# 前端依赖
-cd frontend
-npm install
-cd ..
+python3 -m venv .venv
+.venv/bin/python -m pip install -c constraints.txt -e .
+.venv/bin/sja
+.venv/bin/sja daemon start
+.venv/bin/sja schema
 ```
 
-### 2. 运行一键配置脚本
+`data/` 默认在项目根目录，首次使用会初始化数据库。可用 `SJA_DATA_DIR` 指定其他目录；CLI、API 和 core 必须使用同一目录。后台进程仅通过私有 Unix socket 通信，负责保存登录流程、监控及保活。`daemon start` 可重复调用，不会启动第二个 core。
 
-脚本会引导你设置环境变量、创建 `.env` 文件以及默认配置（不会覆盖已有文件）。
-
-```bash
-chmod +x scripts/setup_env.sh     # 首次执行需要赋权
-./scripts/setup_env.sh
-```
-
-脚本会生成以下文件（如已存在会提示是否覆盖）：
-
-- `deploy.env` – 后端/任务/Bot 通用的环境变量（`source deploy.env` 即可加载）
-- `frontend/.env.production` – 前端构建所需变量（API 地址、门户密码等）
-- `bot/.env` – NoneBot 运行配置
-- `config/users.json` – 体育系统账号模板（需手动填写用户名/密码后保存）
-- `data/credentials.json` – 登录成功后写入 Cookie 的默认路径
-
-> ⚠️ **记得编辑 `config/users.json`**：至少填写 1 个用户的 `username`/`password`。建议将 `deploy.env` 和 `config/users.json` 存入安全的 Secret 管理系统。
-
-### 3. 装填体育账号 & 凭据
-
-1. 编辑 `config/users.json`，填入至少一个体育系统账号：
-   ```json
-   [
-     {
-       "nickname": "USER_A",
-       "username": "your-account@sjtu.edu.cn",
-       "password": "your-password"
-     }
-   ]
-   ```
-2. 确保 `deploy.env` 中的关键变量已填好（参见下文【环境变量一览】）。
-
-### 4. 启动服务
+### 启动网页
 
 ```bash
-source deploy.env           # 加载环境变量
-
-# 一键启动（后端 + 前端 + Bot）
-python start_integrated.py
-
-# 或者分别启动：
-# 1) 后端 API
-uvicorn web_api.app:app --host 0.0.0.0 --port 8000
-# 2) 前端开发模式
-cd frontend && npm run dev
-# 3) Bot / OneBot 适配器
-python sjtu_sports.py bot
-```
-
-访问地址：
-- 前端门户：`http://localhost:5173`（开发环境）或 `https://example.com`（生产环境）
-- 后端 API：`http://localhost:8000/api`（开发环境）或 `https://example.com/api`（生产环境）
-- QQ Bot：根据 `bot/.env` 配置链接 OneBot/Napcat
-
-### 5. 验证
-
-1. 浏览器访问门户，输入门户密码（`VITE_PORTAL_PASSWORD`）。
-2. 在 “会话管理” 页面尝试登录体育系统账号。
-3. 查询场馆、创建监控或定时任务。
-4. 手动下单一次确认通知是否从 Bot 推送成功。
-
-### 仅启动 Web 前后端
-
-不使用 QQ Bot 时，在项目根目录加载本地配置并启动 API：
-
-```bash
-source deploy.env
-export SJA_ENABLE_NOTIFICATION=false
+.venv/bin/python -m pip install -c constraints.txt -e '.[web]'
 .venv/bin/python -m uvicorn web_api.app:app --host 127.0.0.1 --port 8000
-```
-
-另开终端，从项目根目录启动前端：
-
-```bash
-source deploy.env
+# 另一个终端
 cd frontend
-npm run dev -- --host 127.0.0.1 --port 5173
+npm ci
+npm run dev
 ```
 
-前端本地配置 `frontend/.env.local` 应包含
-`VITE_API_BASE_URL=/api`。Vite 将 `/api` 同源转发到本机后端端口 8000，
-浏览器只需能访问前端端口；使用端口转发访问时也无需暴露后端端口。打开
-`http://127.0.0.1:5173/sessions`，在「会话管理」中输入体育系统账号，
-并按页面提示填写验证码。可以通过 `SJA_USER0_USERNAME=""` 禁用开发模式的示例账号。
+打开 http://127.0.0.1:5173 。开发服务器将 `/api` 转发到本机 8000；API 启动时会确保 core 在线，关闭网页/API 不会停止后台监控。
 
-若 Vite 报 `ENOSPC: System limit for number of file watchers reached`，
-启动前设置 `export CHOKIDAR_USEPOLLING=true`。若登录时报代理协议错误，
-检查启动终端的代理变量；不需要代理时可在该终端执行
-`unset HTTP_PROXY HTTPS_PROXY ALL_PROXY http_proxy https_proxy all_proxy`。
+## 网页操作逻辑
 
-前端构建包含 TypeScript 检查：`cd frontend && npm run build`。
-Web 登录回归测试使用模拟服务，不会登录真实账号或下单：
-`.venv/bin/python -m unittest discover -s tests -v`。
+未登录先显示登录界面；已有有效会话则直接进入总览。
 
----
-
-## 📄 环境变量一览
-
-下表列出部署时常用的环境变量。所有变量均可写入 `deploy.env` 或在部署平台的 Secret 中设置。
-
-### 后端 & 任务（加载顺序：环境变量 > JSON 文件 > 默认值）
-
-| 变量 | 说明 | 示例 / 默认 |
-| --- | --- | --- |
-| `SJA_ENV` | 运行环境 | `development` / `production` |
-| `SJA_BASE_URL` | 体育系统地址 | `https://sports.sjtu.edu.cn` |
-| `SJA_USERS_JSON` / `SJA_USERS_FILE` | 用户账号列表（JSON 数组） | `config/users.json` |
-| `SJABOT_CREDENTIAL_STORE` | Cookie 持久化文件路径 | `data/credentials.json` |
-| `BOT_HTTP_URL` | OneBot HTTP 接口地址 | `http://127.0.0.1:6099` |
-| `BOT_ACCESS_TOKEN` | OneBot 接口访问令牌（可选） | `your-token` |
-| `SJA_NOTIFICATION_GROUPS` | 下单通知 QQ 群 ID（逗号分隔） | `YOUR_GROUP_ID` |
-| `SJA_NOTIFICATION_USERS` | 下单通知 QQ 号（逗号分隔） | `YOUR_QQ_ID` |
-| `SJA_ENABLE_NOTIFICATION` | 是否启用通知 | `true` / `false` |
-| `SJA_MONITOR_INTERVAL` | 监控任务间隔（秒） | `300` |
-| `SJA_MONITOR_PREFERRED_HOURS` | 监控优先时间段 | `18,19,20` |
-| `SJA_MONITOR_PREFERRED_DAYS` | 监控优先天数（offset） | `0,1,2` |
-| `SJA_SCHEDULE_HOUR` | 定时任务小时 | `12` |
-| `SJA_SCHEDULE_START_HOURS` | 定时任务尝试时间段 | `18` |
-| `SJA_ENCRYPTION_RETURN_URL` | 下单支付回跳地址 | 体育系统默认值 |
-
-> 更多可覆盖项可在 `config.py` 中搜索 `os.getenv("SJA_...")`。
-
-### Bot（`bot/.env`）
-
-| 变量 | 说明 |
+| 模块 | 职责 |
 | --- | --- |
-| `DRIVER` | NoneBot 驱动，默认 `~fastapi` |
-| `NTQQ_WS_URL` / `NTQQ_HTTP_URL` | Napcat/QQ 频道的 WS/HTTP 地址 |
-| `BOT_COMMAND_PREFIX` | 机器人命令前缀，默认 `!` |
-| `LOG_LEVEL` | Bot 日志级别 |
+| 总览 | 自定义场馆运动卡片，查看未来 1–7 天的余位柱状图和完整场次明细 |
+| 场地预约 | 选择场馆和运动 → 自动加载开放日期 → 选择时段 → 核对信息 → 提交预约 |
+| 我的订单 | 核对预约、支付和使用状态，取消订单；状态筛选作用于当前页 |
+| 余位监控 | 设置期望的未来日期和开始小时，持续检查余位；自动预约默认关闭 |
+| 账号与会话 | 当前账号、退出登录、自动保活设置、立即检查会话 |
 
-### 前端（`frontend/.env.production`）
+预约成功后进入“我的订单”核对支付状态。没有余位可携带场馆选择进入监控创建。监控创建表单默认收起，高级选项包含自动预约和每日检查范围；最近发现的场次可在监控列表中展开。监控页面每 30 秒刷新状态，后台实际检查频率由任务配置决定。
 
-| 变量 | 说明 |
-| --- | --- |
-| `VITE_API_BASE_URL` | 指向后端 API 的完整 URL，例如 `https://example.com/api` 或 `/api`（相对路径，适用于同域部署） |
-| `VITE_PORTAL_PASSWORD` | 门户密码页的口令 |
+总览卡片选择场馆、运动和含今天的未来 1–7 天，配置保存在数据库中。每次进入总览自动刷新，也可单张或全部刷新。先请求日期余位摘要，仅对开放且未满的日期查询详情。柱状图展示每天的可预约场次数（场地 × 时段）；点击日期后，卡片内部可滚动查看全部场次、剩余量和价格，固定 560px 高度不随数据量变化。查询错误会单独标记，区别于已满和未开放。卡片不是后台监控任务。
 
----
+订单列表返回 `can_cancel` 作为取消按钮的唯一判断条件：只有预订成功且校园接口未禁止取消的订单显示按钮。上游的 `cancelOrder=true` 表示禁止取消。
 
-## 🔐 凭据与安全建议
+监控结果记录在本地数据库；目前没有外部消息推送。自动预约会创建真实订单。退出登录会暂停监控并关闭保活；重新登录后需自行恢复任务。
 
-- **双重入口保护**：推荐在反向代理（Nginx/Caddy）再加一层 Basic Auth 或 VPN/IP 白名单，配合前端门户密码双重防护。
-- **HTTPS 强制**：生产环境务必使用证书（Let’s Encrypt 等），并开启 HSTS。
-- **日志脱敏**：不要在日志中打印用户密码/Cookie。`deploy.env`、`config/users.json` 应存储在受限目录并定期备份。
-- **Bot 接口安全**：若 Bot 与后端不在同一台机器上，建议配置 `BOT_ACCESS_TOKEN` 并在反向代理层做 IP 白名单。
+## Agent / CLI：先登录
 
----
-
-## 🛠️ 常用命令
+`schema` 是操作协议的唯一来源：
 
 ```bash
-# 检查必要依赖（OCR、Node 等）
-python sjtu_sports.py --check-deps
+.venv/bin/sja schema auth.start
+.venv/bin/sja schema monitors.create
+```
 
-# CLI 登录 / 查询
-python sjtu_sports.py cli login
-python sjtu_sports.py cli slots --preset 13
+所有业务命令接受 `--json '{...}'`、`--json @FILE` 或 `--json -`（stdin）。输出 JSON：`{ok,result}` 或 `{ok:false,error}`。退出码 0 成功，1 业务/参数错误，2 连接/命令行错误。帮助信息是普通终端文本。
 
-# 启动 Bot（含热加载）
-python sjtu_sports.py bot --hot-reload
+### 密码与人工验证码
 
-# Web 控制台开发模式
-cd frontend && npm run dev
+```bash
+.venv/bin/sja auth start --username USER_NAME --password-stdin
+# 从受控标准输入提供一行密码；交互终端也可省略 --password-stdin 隐藏输入。
+.venv/bin/sja auth verify --session-id SESSION_ID --code USER_ENTERED_CODE
+.venv/bin/sja auth status
+```
 
-# Web 控制台打包
+开始登录会返回 `session_id` 和 `captcha_path` / `captcha_mime` / `captcha_base64`。Agent 应将图片展示或发送给用户，等待用户填写后提交；不要自动识别。验证码错误可返回更新图片和 `retry` 状态，使用同一会话重新提交。会话在 core 内存中，重启或超时后重新开始。只有运动网站验证通过后才保存凭证，登录失败不会覆盖已有凭证。
+
+密码不要放在命令行参数或 shell 历史。不要打印/上传凭证文件或完整调试响应。
+
+### 扫码登录
+
+```bash
+.venv/bin/sja auth qr-start
+.venv/bin/sja auth qr-status --json '{"session_id":"SESSION_ID"}'
+.venv/bin/sja auth qr-cancel --json '{"session_id":"SESSION_ID"}'
+```
+
+将返回的 `qr_path` 或 `qr_base64` 图片展示给用户，使用交我办或微信扫码确认。每 2–3 秒轮询 `qr-status`，图片版本变化时重新展示；`success` 才表示运动网站会话已验证并保存。`expired` / `error` 时重新开始。二维码、UUID、签名均从 jAccount 实时获取，不固定保存。最多保留一个待完成的登录流程，开始另一种登录会取消旧流程。返回的图片文件是私有临时文件，轮询、取消或结束后可能被替换/删除，应及时读取。
+
+### 查询、预约与订单
+
+```bash
+.venv/bin/sja presets list
+.venv/bin/sja dates list --json '{"preset":5}'
+.venv/bin/sja slots list --json '{"preset":5,"date":"1","show_full":true}'
+.venv/bin/sja orders list --json '{"page_no":1,"page_size":20}'
+.venv/bin/sja orders create --json '{"preset":5,"date":"YYYY-MM-DD","start_time":"19:00","end_time":"20:00"}'
+.venv/bin/sja orders cancel --json '{"order_id":"ORDER_ID"}'
+```
+
+`date` 可以为真实日期或天数偏移（`0` 今天、`1` 明天）。命令示例中的日期和 ID 需替换。查询空列表不会替换为其他日期。提交预约/取消前应取得用户对具体操作的授权。预约只提交一次，不会失败后换接口、换时段或自动重试；网络超时后先查订单，确认结果再决定是否重新提交。
+
+### 总览卡片
+
+```bash
+.venv/bin/sja dashboard add --json '{"preset":5,"days":7}'
+.venv/bin/sja dashboard list
+.venv/bin/sja dashboard availability --json '{"card_id":"CARD_ID"}'
+.venv/bin/sja dashboard delete --json '{"card_id":"CARD_ID"}'
+```
+
+CLI 与网页共享同一份卡片配置；卡片查询为只读，不预约场地。
+
+### 监控与保活
+
+```bash
+.venv/bin/sja monitors create --json '{"monitor_id":"badminton-evening","preset":5,"preferred_days":[1,2],"preferred_hours":[19,20],"interval_seconds":240,"auto_book":false}'
+.venv/bin/sja monitors list
+.venv/bin/sja monitors pause --json '{"monitor_id":"badminton-evening"}'
+.venv/bin/sja monitors resume --json '{"monitor_id":"badminton-evening"}'
+.venv/bin/sja monitors delete --json '{"monitor_id":"badminton-evening"}'
+.venv/bin/sja keep-alive configure --json '{"enabled":true,"interval_minutes":15}'
+.venv/bin/sja keep-alive run
+.venv/bin/sja keep-alive status
+.venv/bin/sja history list
+.venv/bin/sja events list
+```
+
+`preferred_hours` 是期望开始小时；日期偏移随每天滚动。保活只有一份设置。监控/保活状态持久化，core 重启后恢复；关闭 CLI 或网页不影响它们。保活无法保证永不过期，失效仍需重新登录。
+
+## 部署、数据与维护
+
+```bash
+.venv/bin/sja daemon status
+.venv/bin/sja daemon logs
+.venv/bin/sja daemon stop
+```
+
+生产环境建议 systemd 托管。`deploy/sja-sport.service` 默认路径为 `%h/Code/sJAutoSport`，按实际安装路径修改后放入 `~/.config/systemd/user/`，先停止已有手动启动的 core，再运行 `systemctl --user daemon-reload` 和 `systemctl --user enable --now sja-sport`。SSH 断开后继续运行需服务器管理员允许该用户 linger。Web API 可单独托管，浏览器访问建议通过 SSH 转发本机 5173/8000；该单人控制台没有额外的网站访问认证，不应直接公开到互联网。
+
+`data/credentials.json` 是单账号凭证，`data/state.db` 保存任务、设置、预约记录和事件。目录及运行数据已忽略，凭证/图片以私有权限保存。可安装 `.[secure]` 并配置稳定的 `SJA_SECRET` 加密凭证；丢失密钥将无法读取已有凭证。代理环境默认忽略，需要使用代理时设 `SJA_TRUST_ENV=true`。
+
+`./scripts/deploy.sh` 安装 Python Web 依赖并构建前端，不会替你重启服务。生产静态文件在 `frontend/dist`，反向代理 `/api` 到本机 8000，并为前端路由配置回退到 `index.html`。
+
+## 验证与结构
+
+```bash
+.venv/bin/python -m pip install -c constraints.txt -e '.[web,test]'
+.venv/bin/python -m pytest -q
 cd frontend && npm run build
 ```
 
-更多命令详见 `python sjtu_sports.py --help`。
+`sja_booking/` 是协议与业务 core；`web_api/` 只转发同一套操作；`frontend/` 是浏览器入口。CLI 命令也通过同一个后台实例执行。参见 [AGENTS.md](AGENTS.md)。
 
----
-
-## 📚 更多资料
-
-- [docs/BOT_INTEGRATION_GUIDE.md](docs/BOT_INTEGRATION_GUIDE.md) – Bot/Napcat 集成说明
-- [docs/guides/QUICK_START.md](docs/guides/QUICK_START.md) – 原始快速上手指南
-- [docs/HOT_RELOAD_GUIDE.md](docs/HOT_RELOAD_GUIDE.md) – 热加载说明
-- [docs/LOGIN_RETRY_GUIDE.md](docs/LOGIN_RETRY_GUIDE.md) – 登录重试机制
-
-欢迎按照上述步骤部署，并结合自己的基础设施（Docker、systemd、CI/CD 等）扩展更稳定的上线流程。若遇到问题，查看 `deploy.env`、`config/users.json` 是否正确配置，或重新运行 `scripts/setup_env.sh` 生成新的配置模板。
+`tests/test_cli.py` 以独立 CLI 进程逐一执行 `sja schema` 中的全部命令，外部 HTTP / WebSocket 使用隔离模拟，实际运行登录协议、加密下单、退款、监控、卡片和保活逻辑，并检查退出码、图片权限和凭证脱敏。另有真实进程的后台启停、重启恢复及双入口共享状态测试。测试不连接真实预约或退款接口，不能代替真人扫码确认或真实订单支付验证。

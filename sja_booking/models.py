@@ -16,8 +16,8 @@ class UserAuth:
 
 @dataclass
 class AuthConfig:
-    """认证配置，支持多用户"""
-    users: List[UserAuth] = field(default_factory=list)
+    """当前单个账号的认证配置。"""
+    user: Optional[UserAuth] = None
 
 
 @dataclass
@@ -27,7 +27,6 @@ class EndpointSet:
     venue_detail: str = "/manage/venue/queryVenueById"
     field_situation: str = "/manage/fieldDetail/queryFieldSituation"
     field_reserve: str = "/manage/fieldDetail/queryFieldReserveSituationIsFull"
-    order_submit: str = "/venue/personal/orderImmediatelyPC"
     order_confirm: str = "/venue/personal/ConfirmOrder"
     refund_create_receipt: str = "/tRefundReceipt/tRefundReceipt/createUserReceipt"
     refund_accept: str = "/tRefundReceipt/tRefundReceipt/cannelRefundReceipt"
@@ -64,9 +63,6 @@ class BookingTarget:
     fixed_dates: List[str] = field(default_factory=list)
     start_hour: int = 18
     duration_hours: int = 1
-    # 多用户支持
-    target_users: List[str] = field(default_factory=list)  # 指定预订的用户昵称列表，空表示所有用户
-    exclude_users: List[str] = field(default_factory=list)  # 排除的用户昵称列表
 
 
 @dataclass
@@ -87,25 +83,8 @@ class MonitorPlan:
     notify_stdout: bool = True
     preferred_hours: Optional[List[int]] = None  # 优先时间段，如 [15, 16, 17]
     preferred_days: Optional[List[int]] = None  # 优先天数，0-8，0表示今天，1表示明天，以此类推
-    require_all_users_success: bool = False  # 是否要求所有用户都成功
-    max_time_gap_hours: int = 1  # 当需要所有用户成功时，允许的最大时间差
 
 
-@dataclass
-class SchedulePlan:
-    hour: int = 12
-    minute: int = 0
-    second: int = 0
-    date_offset: int = 1
-    start_hours: List[int] = field(default_factory=lambda: [18])
-    duration_hours: int = 1
-    auto_start: bool = True
-
-    @property
-    def start_hour(self) -> int:
-        if self.start_hours:
-            return self.start_hours[0]
-        return 18
 
 
 @dataclass
@@ -154,13 +133,3 @@ class Slot:
     sub_site_id: Optional[str] = None  # 对应PAYLOAD中的subSiteId
     sign: Optional[str] = None  # 对应PAYLOAD中的sign字段
     raw: Dict[str, Any] = field(default_factory=dict)
-
-
-@dataclass
-class OrderIntent:
-    venue_id: str
-    field_type_id: str
-    slot_id: str
-    date: str
-    order_id: Optional[str] = None
-    payload: Dict[str, Any] = field(default_factory=dict)

@@ -1,3 +1,4 @@
+import { aggregateAvailableSlots } from "./slotAggregations";
 const rawApiBase =
   (typeof import.meta !== "undefined" && import.meta.env?.VITE_API_BASE_URL) || "/api";
 
@@ -19,6 +20,7 @@ const extractErrorMessage = (payload: unknown): string | null => {
   }
   if (typeof payload === "object") {
     const record = payload as Record<string, unknown>;
+    if (record.error) return extractErrorMessage(record.error);
     if (typeof record.message === "string" && record.message.trim()) {
       return record.message.trim();
     }
@@ -51,6 +53,7 @@ async function request<T>(path: string, options: FetchOptions = {}): Promise<T> 
   const contentType = response.headers.get("content-type") || "";
 
   if (!response.ok) {
+    if (response.status === 401) window.dispatchEvent(new Event("session-expired"));
     const text = await response.text();
     let message = text.trim();
     if (!message && contentType.includes("application/json")) {
@@ -92,57 +95,17 @@ export type HealthResponse = {
   status: string;
 };
 
-export type LoginStatusResponse = {
-  success: boolean;
-  active_user: string | null;
-  users: Array<{
-    key: string;
-    username: string | null;
-    nickname: string | null;
-    expires_at: string | null;
-    is_active: boolean;
-  }>;
-};
-
 export type LoginFlowResponse = {
   success: boolean;
   message?: string | null;
   captcha_required?: boolean;
   session_id?: string | null;
-  captcha_image?: string | null;
+  captcha_base64?: string | null;
   captcha_mime?: string | null;
   retry?: boolean;
   username?: string | null;
   nickname?: string | null;
   expires_at?: string | null;
-};
-
-export type KeepAliveSummary = {
-  username: string | null;
-  nickname: string | null;
-  success: boolean;
-  message: string;
-};
-
-export type KeepAliveJob = {
-  job_id: string;
-  name: string;
-  status: string;
-  interval_minutes: number;
-  created_at: string;
-  started_at: string | null;
-  pid: number | null;
-};
-
-export type JobSummary = {
-  job_id: string;
-  name: string;
-  job_type: string;
-  status: string;
-  created_at: string;
-  started_at: string | null;
-  stopped_at: string | null;
-  pid: number | null;
 };
 
 export type Preset = {
@@ -152,15 +115,6 @@ export type Preset = {
   field_type_id: string;
   field_type_name: string;
   field_type_code?: string | null;
-};
-
-export type UserSummary = {
-  key?: string | null;
-  nickname?: string | null;
-  username?: string | null;
-  expires_at?: string | null;
-  is_active?: boolean;
-  has_password?: boolean;
 };
 
 export type OrderRecord = {
@@ -173,21 +127,19 @@ export type OrderRecord = {
   orderpaytime?: string;
   scDate?: string;
   countprice: number;
-  cancelOrder: boolean;
-  name: string;
-  userId: string;
+  can_cancel: boolean;
 };
 
 export type VenueSummary = {
-  id: string;
   name: string;
+  id: string;
   address?: string | null;
   phone?: string | null;
 };
 
 export type FieldTypeSummary = {
-  id: string;
   name: string;
+  id: string;
   category?: string | null;
 };
 
@@ -263,20 +215,6 @@ export type SlotQueryResponse = {
   aggregated_days?: AggregatedSlotsByDay[];
 };
 
-export type OrderResponse = {
-  success: boolean;
-  message: string;
-  order_id?: string | null;
-  results?: Array<{
-    user: string;
-    success: boolean;
-    message: string;
-    order_id?: string | null;
-  }>;
-};
-
-export type MonitorInfo = Record<string, unknown>;
-export type ScheduleInfo = Record<string, unknown>;
 export type UserProfile = {
   create_time?: string | null;
   login_name?: string | null;
@@ -290,17 +228,6 @@ export type UserProfile = {
   roles?: string[];
 };
 
-export type UserInfoRecord = {
-  key: string | null;
-  username: string | null;
-  nickname: string | null;
-  is_active: boolean;
-  success: boolean;
-  message?: string | null;
-  profile: UserProfile | null;
-  raw: unknown;
-};
-
 export type SlotQueryRequest = {
   preset?: number;
   venue_id?: string;
@@ -311,15 +238,6 @@ export type SlotQueryRequest = {
   target?: Record<string, unknown>;
   all_days?: boolean;
   incremental?: boolean;
-};
-
-export type OrderRequestBody = {
-  preset: number;
-  date: string;
-  start_time: string;
-  end_time?: string;
-  user?: string;
-  target?: Record<string, unknown>;
 };
 
 export type ImmediateAvailabilityRequest = {
@@ -347,190 +265,85 @@ export type MonitorRequestBody = {
   interval_seconds?: number;
   auto_book?: boolean;
   long_running?: boolean;
-  require_all_users_success?: boolean;
   target?: Record<string, unknown>;
-  target_users?: string[];
-  exclude_users?: string[];
   preferred_hours?: number[];
   preferred_days?: number[];
   operating_start_hour?: number;
   operating_end_hour?: number;
 };
 
-export type ScheduleRequestBody = {
-  job_id: string;
-  hour: number;
-  minute?: number;
-  second?: number;
-  preset?: number;
-  venue_id?: string;
-  field_type_id?: string;
-  date?: string;
-  start_hour?: number;
-  start_hours?: number[];
-  require_all_users_success?: boolean;
+export type OrderRequestBody = {
+  preset: number;
+  date: string;
+  start_time: string;
+  end_time?: string;
   target?: Record<string, unknown>;
-  target_users?: string[];
-  exclude_users?: string[];
 };
 
+export type Account = { username: string | null; nickname: string | null; expires_at: string | null; is_online: boolean };
+export type LoginStatusResponse = { success: boolean; account: Account | null; message?: string };
+export type OrderResponse = { success: boolean; message: string; order_id?: string | null };
+export type MonitorInfo = Record<string, unknown>;
+export type KeepAliveSummary = { success: boolean; message: string; username: string | null; nickname: string | null };
+export type KeepAliveSettings = { enabled: boolean; interval_minutes: number; last_run?: string; last_result?: KeepAliveSummary };
+export type DashboardCardConfig = { id: string; preset: number; days: number };
+export type DashboardDay = { date: string; status: "available" | "full" | "closed" | "unopened" | "error"; slots: SlotDetails[]; message?: string };
+export type DashboardAvailability = { card_id: string; days: DashboardDay[]; updated_at: string };
+
+type Envelope<T> = { ok: boolean; result?: T; error?: { code: string; message?: string; details?: unknown } };
+export async function coreCall<T>(operation: string, payload: object = {}): Promise<T> {
+  const response = await request<Envelope<T>>(`/core/${operation}`, { method: "POST", body: JSON.stringify(payload) });
+  if (response.error) throw new Error(response.error.message || JSON.stringify(response.error.details) || response.error.code);
+  if (response.result === undefined) throw new Error("核心未返回结果");
+  if (!response.ok && !operation.startsWith("auth.") && !["orders.create", "orders.cancel", "keep-alive.run"].includes(operation)) {
+    throw new Error((response.result as { message?: string })?.message || "操作未完成，请刷新后重试");
+  }
+  return response.result;
+}
+
+export type QrLogin = { success: boolean; session_id?: string; status: "connecting" | "waiting" | "confirming" | "success" | "expired" | "error" | "cancelled"; qr_base64?: string; qr_mime?: string; image_version?: number; expires_at?: string; message?: string };
+
+const selection = (payload: ImmediateAvailabilityRequest) => ({ preset: payload.preset, venue_id: payload.venue_id, field_type_id: payload.field_type_id, target: payload.target });
+
 export const api = {
-  // System & jobs
-  getHealth: () => request<HealthResponse>("/system/health"),
-  getLoginStatus: () => request<LoginStatusResponse>("/system/status/login"),
-  getUserInfos: () => request<{ users: UserInfoRecord[] }>("/system/users/info"),
-  getOrders: (page: number = 1, pageSize: number = 100) =>
-    request<{
-      success: boolean;
-      orders: OrderRecord[];
-      total: number;
-      message?: string;
-      grouped?: Record<
-        string,
-        {
-          userId: string;
-          name: string;
-          orders: OrderRecord[];
-        }
-      >;
-      summary?: Array<{
-        userId: string;
-        name: string;
-        count: number;
-        error?: string;
-      }>;
-    }>(`/system/orders?page_no=${page}&page_size=${pageSize}`),
-  startLogin: (payload: {
-    username?: string;
-    password?: string;
-    nickname?: string;
-    user_id?: string;
-  }) =>
-    request<LoginFlowResponse>("/auth/login/start", {
-      method: "POST",
-      body: JSON.stringify(payload),
-    }),
-  submitLoginCode: (payload: { session_id: string; code: string }) =>
-    request<LoginFlowResponse>("/auth/login/verify", {
-      method: "POST",
-      body: JSON.stringify(payload),
-    }),
-  cancelLoginSession: (sessionId: string) =>
-    request<{ success: boolean; message?: string }>("/auth/login/cancel", {
-      method: "POST",
-      body: JSON.stringify({ session_id: sessionId }),
-    }),
-  listJobs: (jobType?: string) => {
-    const query = jobType ? `?job_type=${jobType}` : "";
-    return request<JobSummary[]>(`/jobs/${query}`);
+  getHealth: () => request<HealthResponse>("/health"),
+  getLoginStatus: () => coreCall<LoginStatusResponse>("auth.status"),
+  getAccountInfo: () => coreCall<{ success: boolean; profile: UserProfile | null; message?: string }>("account.info"),
+  startLogin: (payload: { username: string; password: string }) => coreCall<LoginFlowResponse>("auth.start", payload),
+  submitLoginCode: (payload: { session_id: string; code: string }) => coreCall<LoginFlowResponse>("auth.verify", payload),
+  cancelLoginSession: (sessionId: string) => coreCall<{ success: boolean }>("auth.cancel", { session_id: sessionId }),
+  startQrLogin: () => coreCall<QrLogin>("auth.qr-start"),
+  getQrLogin: (sessionId: string) => coreCall<QrLogin>("auth.qr-status", { session_id: sessionId }),
+  cancelQrLogin: (sessionId: string) => coreCall<QrLogin>("auth.qr-cancel", { session_id: sessionId }),
+  logout: () => coreCall<{ success: boolean }>("auth.logout"),
+  getPresets: async () => ({ presets: await coreCall<Preset[]>("presets.list") }),
+  getDashboardCards: () => coreCall<DashboardCardConfig[]>("dashboard.list"),
+  addDashboardCard: (payload: { preset: number; days: number }) => coreCall<DashboardCardConfig>("dashboard.add", payload),
+  deleteDashboardCard: (cardId: string) => coreCall<{ success: boolean }>("dashboard.delete", { card_id: cardId }),
+  getDashboardAvailability: (cardId: string) => coreCall<DashboardAvailability>("dashboard.availability", { card_id: cardId }),
+  searchVenues: async (keyword: string, page = 1, size = 20) => ({ venues: await coreCall<VenueSummary[]>("venues.list", { keyword, page, size }) }),
+  getFieldTypes: async (venueId: string) => ({ field_types: await coreCall<FieldTypeSummary[]>("venues.fields", { venue_id: venueId }) }),
+  querySlots: (payload: SlotQueryRequest) => {
+    const { all_days, incremental, ...rest } = payload;
+    return coreCall<SlotQueryResponse>("slots.list", { ...rest, all_dates: all_days });
   },
-
-  // Keep-alive
-  runKeepAlive: (user?: string) =>
-    request<KeepAliveSummary[]>("/keep-alive/run", {
-      method: "POST",
-      body: JSON.stringify({ user }),
-    }),
-  listKeepAliveJobs: () => request<KeepAliveJob[]>("/keep-alive/jobs"),
-  createKeepAliveJob: (payload: {
-    name: string;
-    interval_minutes: number;
-    auto_start?: boolean;
-  }) =>
-    request<KeepAliveJob>("/keep-alive/jobs", {
-      method: "POST",
-      body: JSON.stringify(payload),
-    }),
-  deleteKeepAliveJob: (jobId: string) =>
-    request<void>(`/keep-alive/jobs/${jobId}`, {
-      method: "DELETE",
-      parseJson: false,
-    }),
-
-  // Booking reference data
-  getPresets: () => request<{ presets: Preset[] }>("/booking/presets"),
-  listUsers: () => request<{ users: UserSummary[] }>("/booking/users"),
-  searchVenues: (keyword: string, page = 1, size = 20) =>
-    request<{ venues: VenueSummary[] }>(
-      `/booking/venues?keyword=${encodeURIComponent(keyword)}&page=${page}&size=${size}`,
-    ),
-  getFieldTypes: (venueId: string) =>
-    request<{ field_types: FieldTypeSummary[] }>(`/booking/venues/${venueId}/field-types`),
-
-  // Booking actions
-  querySlots: (payload: SlotQueryRequest) =>
-    request<SlotQueryResponse>("/booking/slots", {
-      method: "POST",
-      body: JSON.stringify(payload),
-    }),
-  getImmediateAvailability: (payload: ImmediateAvailabilityRequest) =>
-    request<ImmediateAvailabilityResponse>("/booking/immediate/availability", {
-      method: "POST",
-      body: JSON.stringify(payload),
-    }),
-  getImmediateSlots: (payload: ImmediateSlotsRequest) =>
-    request<ImmediateSlotsResponse>("/booking/immediate/slots", {
-      method: "POST",
-      body: JSON.stringify(payload),
-    }),
-  createOrder: (payload: OrderRequestBody) =>
-    request<OrderResponse>("/booking/order", {
-      method: "POST",
-      body: JSON.stringify(payload),
-    }),
-
-  // Monitor management
-  listMonitors: () => request<{ success: boolean; monitors?: MonitorInfo[]; monitor_info?: MonitorInfo }>(
-    "/booking/monitors",
-  ),
-  createMonitor: (payload: MonitorRequestBody) =>
-    request<Record<string, unknown>>("/booking/monitors", {
-      method: "POST",
-      body: JSON.stringify(payload),
-    }),
-  deleteMonitor: (monitorId: string) =>
-    request<{ success: boolean; message: string }>(`/booking/monitors/${monitorId}`, {
-      method: "DELETE",
-    }),
-  pauseMonitor: (monitorId: string) =>
-    request<Record<string, unknown>>(`/booking/monitors/${monitorId}/pause`, {
-      method: "POST",
-    }),
-  resumeMonitor: (monitorId: string) =>
-    request<Record<string, unknown>>(`/booking/monitors/${monitorId}/resume`, {
-      method: "POST",
-    }),
-
-  // Job management
-  deleteAllJobs: (jobType?: string, force?: boolean) => {
-    const params = new URLSearchParams();
-    if (jobType) params.append("job_type", jobType);
-    if (force) params.append("force", "true");
-    const query = params.toString() ? `?${params.toString()}` : "";
-    return request<{ success: boolean; message: string; deleted_count: number }>(
-      `/jobs/all${query}`,
-      { method: "DELETE" }
-    );
+  getImmediateAvailability: async (payload: ImmediateAvailabilityRequest): Promise<ImmediateAvailabilityResponse> => {
+    const result = await coreCall<{ resolved: SlotQueryResponse["resolved"]; dates: DateAvailabilityStatus[] }>("dates.list", selection(payload));
+    return { ...result, default_date: result.dates[0]?.date, selected_date: payload.date || result.dates[0]?.date };
   },
-
-  // Schedule management
-  listSchedules: () =>
-    request<{ success: boolean; jobs: ScheduleInfo[] }>("/booking/schedules"),
-  createSchedule: (payload: ScheduleRequestBody) =>
-    request<Record<string, unknown>>("/booking/schedules", {
-      method: "POST",
-      body: JSON.stringify(payload),
-    }),
-  deleteSchedule: (jobId: string) =>
-    request<Record<string, unknown>>(`/booking/schedules/${jobId}`, {
-      method: "DELETE",
-    }),
-  cancelOrder: (orderId: string, user?: string) =>
-    request<{ success: boolean; message: string; steps?: unknown[] }>(
-      `/system/orders/${orderId}/cancel`,
-      {
-        method: "POST",
-        body: JSON.stringify({ user }),
-      },
-    ),
+  getImmediateSlots: async (payload: ImmediateSlotsRequest): Promise<ImmediateSlotsResponse> => {
+    const result = await coreCall<SlotQueryResponse>("slots.list", { ...selection(payload), date: payload.date, show_full: payload.show_full });
+    return { ...result, date: payload.date, entries: aggregateAvailableSlots(result.slots, payload.date, payload.show_full) };
+  },
+  createOrder: (payload: OrderRequestBody) => coreCall<OrderResponse>("orders.create", payload),
+  getOrders: (page = 1, pageSize = 100) => coreCall<{ success: boolean; orders: OrderRecord[]; total: number; message?: string }>("orders.list", { page_no: page, page_size: pageSize }),
+  cancelOrder: (id: string) => coreCall<OrderResponse>("orders.cancel", { order_id: id }),
+  listMonitors: () => coreCall<{ success: boolean; monitors: MonitorInfo[] }>("monitors.list"),
+  createMonitor: (payload: MonitorRequestBody) => coreCall<{ success: boolean }>("monitors.create", payload),
+  pauseMonitor: (id: string) => coreCall<{ success: boolean }>("monitors.pause", { monitor_id: id }),
+  resumeMonitor: (id: string) => coreCall<{ success: boolean }>("monitors.resume", { monitor_id: id }),
+  deleteMonitor: (id: string) => coreCall<{ success: boolean }>("monitors.delete", { monitor_id: id }),
+  getKeepAlive: () => coreCall<KeepAliveSettings>("keep-alive.status"),
+  configureKeepAlive: (payload: { enabled: boolean; interval_minutes: number }) => coreCall<KeepAliveSettings>("keep-alive.configure", payload),
+  runKeepAlive: () => coreCall<KeepAliveSummary>("keep-alive.run"),
 };
