@@ -29,3 +29,5 @@ Python 3.11+, Linux. See [README.md](README.md) for installation/login/deploymen
 One account, one credential record, one core runtime. No QQ bot, account pools, scheduled reservations, browser automation or OCR. Live monitoring may optionally book immediately when a slot appears; keepalive periodically maintains the saved login. These are the only background workflows.
 
 Preserve user edits, stage specific files, and commit/push only when requested. Use public placeholder identities in tests/docs. Update this map and README when operation or page boundaries change.
+
+Write all commit subjects and bodies in English. Follow Conventional Commits (`feat:`, `fix:`, `docs:`, `refactor:`, `test:`, `chore:`).
