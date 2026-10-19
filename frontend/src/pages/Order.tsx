@@ -9,7 +9,6 @@ import {
   type UserSummary,
 } from "../lib/api";
 import PresetSelector from "../components/PresetSelector";
-import { fireConfetti, fireFireworks } from "../lib/effects";
 import { aggregateAvailableSlots } from "../lib/slotAggregations";
 import { czqDebugEnd, czqDebugLog, czqDebugStart } from "../lib/czqDebug";
 
@@ -74,7 +73,7 @@ const OrderPage = () => {
             description,
           };
         })
-        .filter((entry): entry is { id: string; value: string; label: string; description?: string } => entry !== null),
+        .filter((entry): entry is NonNullable<typeof entry> => entry !== null),
     [users],
   );
 
@@ -294,10 +293,6 @@ const OrderPage = () => {
       if (submitStart !== null) {
         czqDebugEnd(`OrderPage.submit.complete preset=${selectedPreset} success=${response.success}`, submitStart);
       }
-      if (response.success) {
-        fireConfetti({ origin: { x: 0.75, y: 0.22 }, particleCount: 36 });
-        fireFireworks({ bursts: 6 });
-      }
     } catch (err) {
       setResult(null);
       setError((err as Error).message);
@@ -496,7 +491,7 @@ const OrderPage = () => {
           <div style={{ fontWeight: 600, marginBottom: "6px" }}>{result.success ? "预订成功" : "预订失败"}</div>
           <div>{result.message}</div>
           {Array.isArray(result.results) && result.results.length > 0 ? (
-            <ul style={{ marginTop: "8px", paddingLeft: "18px", color: "#475467" }}>
+            <ul style={{ marginTop: "8px", paddingLeft: "18px", color: "var(--cm-muted)" }}>
               {result.results.map((entry) => (
                 <li key={entry.user}>
                   <strong>{entry.user}：</strong>

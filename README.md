@@ -133,6 +133,39 @@ python sjtu_sports.py bot
 3. 查询场馆、创建监控或定时任务。
 4. 手动下单一次确认通知是否从 Bot 推送成功。
 
+### 仅启动 Web 前后端
+
+不使用 QQ Bot 时，在项目根目录加载本地配置并启动 API：
+
+```bash
+source deploy.env
+export SJA_ENABLE_NOTIFICATION=false
+.venv/bin/python -m uvicorn web_api.app:app --host 127.0.0.1 --port 8000
+```
+
+另开终端，从项目根目录启动前端：
+
+```bash
+source deploy.env
+cd frontend
+npm run dev -- --host 127.0.0.1 --port 5173
+```
+
+前端本地配置 `frontend/.env.local` 应包含
+`VITE_API_BASE_URL=/api`。Vite 将 `/api` 同源转发到本机后端端口 8000，
+浏览器只需能访问前端端口；使用端口转发访问时也无需暴露后端端口。打开
+`http://127.0.0.1:5173/sessions`，在「会话管理」中输入体育系统账号，
+并按页面提示填写验证码。可以通过 `SJA_USER0_USERNAME=""` 禁用开发模式的示例账号。
+
+若 Vite 报 `ENOSPC: System limit for number of file watchers reached`，
+启动前设置 `export CHOKIDAR_USEPOLLING=true`。若登录时报代理协议错误，
+检查启动终端的代理变量；不需要代理时可在该终端执行
+`unset HTTP_PROXY HTTPS_PROXY ALL_PROXY http_proxy https_proxy all_proxy`。
+
+前端构建包含 TypeScript 检查：`cd frontend && npm run build`。
+Web 登录回归测试使用模拟服务，不会登录真实账号或下单：
+`.venv/bin/python -m unittest discover -s tests -v`。
+
 ---
 
 ## 📄 环境变量一览

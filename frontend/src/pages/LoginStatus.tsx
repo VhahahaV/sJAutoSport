@@ -21,6 +21,8 @@ type PendingSession = {
 const toDataUrl = (image?: string | null, mime?: string | null) =>
   image ? `data:${mime ?? "image/png"};base64,${image}` : null;
 
+const deriveNickname = (username: string) => username.trim().split("@", 1)[0];
+
 const sexLabel = (value?: string | null) => {
   if (value === "0") return "男";
   if (value === "1") return "女";
@@ -87,7 +89,7 @@ const LoginStatusPage = () => {
           ...prev,
           username: candidate.username,
           nickname: candidate.nickname ?? prev.nickname,
-          password: candidate.password_masked ?? prev.password,
+          password: prev.password,
         };
       });
     } catch (err) {
@@ -326,7 +328,7 @@ const LoginStatusPage = () => {
       <div className="content-header">
         <div>
           <h2>用户会话与保活</h2>
-          <p style={{ color: "#667085", marginTop: "8px" }}>
+          <p style={{ color: "var(--cm-muted)", marginTop: "8px" }}>
             在此发起登录流程、查看用户档案并统一维护会话保活。
           </p>
         </div>
@@ -348,14 +350,14 @@ const LoginStatusPage = () => {
       <div className="panel">
         <div className="section">
           <h3>发起登录</h3>
-          <p style={{ color: "#667085", margin: 0 }}>
-            提供用户名与密码后即可开始登录。如配置文件已保存凭据，可留空以复用。
+          <p style={{ color: "var(--cm-muted)", margin: 0 }}>
+            输入体育系统用户名和密码开始登录；账号已保存密码时，可留空复用。
           </p>
         </div>
 
         <div className="user-quick-select">
           <div className="user-quick-header">
-            <span>已配置用户</span>
+            <span>已保存账号</span>
             <button
               className="text-button"
               type="button"
@@ -385,7 +387,7 @@ const LoginStatusPage = () => {
                     onClick={() =>
                       setForm({
                         username,
-                        password: user.password_masked || "",
+                        password: "",
                         nickname: nickname || deriveNickname(username),
                       })
                     }
@@ -399,9 +401,11 @@ const LoginStatusPage = () => {
                 );
               })}
             </div>
-          ) : (
-            <span className="muted-text">暂无用户配置，请在 config.py 的 AUTH 中填写。</span>
-          )}
+          ) : usersLoading ? (
+            <span className="muted-text">正在加载账号…</span>
+          ) : !usersError ? (
+            <span className="muted-text">还没有已保存的账号，直接在下方填写并登录即可。</span>
+          ) : null}
         </div>
 
         <form onSubmit={handleStartLogin} className="form-grid">
@@ -506,9 +510,9 @@ const LoginStatusPage = () => {
       </div>
 
       {statusError ? (
-        <div className="panel" style={{ border: "1px solid #fca5a5" }}>
+        <div className="panel" style={{ border: "1px solid #eed1d9" }}>
           <strong>状态获取失败</strong>
-          <span style={{ color: "#b91c1c" }}>{statusError}</span>
+          <span style={{ color: "var(--cm-error)" }}>{statusError}</span>
         </div>
       ) : null}
 
@@ -517,7 +521,7 @@ const LoginStatusPage = () => {
           <h3>登录状态</h3>
         </div>
         {loading ? (
-          <span style={{ color: "#667085" }}>加载中…</span>
+          <span style={{ color: "var(--cm-muted)" }}>加载中…</span>
         ) : knownUsers.length || (status && status.success) ? (
           <table className="table">
             <thead>
@@ -550,7 +554,7 @@ const LoginStatusPage = () => {
             </tbody>
           </table>
         ) : (
-          <span style={{ color: "#667085" }}>
+          <span style={{ color: "var(--cm-muted)" }}>
             尚未保存任何登录凭据，一旦完成登录这里会显示结果。
           </span>
         )}
@@ -560,7 +564,7 @@ const LoginStatusPage = () => {
         <div className="content-header" style={{ padding: 0 }}>
           <div>
             <h3>用户信息</h3>
-            <p style={{ color: "#667085", marginTop: "4px" }}>
+            <p style={{ color: "var(--cm-muted)", marginTop: "4px" }}>
               查询当前 Cookie 绑定的用户档案（来源于校园系统接口）。
             </p>
           </div>
@@ -578,9 +582,9 @@ const LoginStatusPage = () => {
             <div className="notice notice-error">{userInfoError}</div>
           ) : null}
           {userInfoLoading ? (
-            <span style={{ color: "#667085" }}>加载中…</span>
+            <span style={{ color: "var(--cm-muted)" }}>加载中…</span>
           ) : userRecords.length === 0 ? (
-            <span style={{ color: "#667085" }}>暂无用户信息，请先完成登录。</span>
+            <span style={{ color: "var(--cm-muted)" }}>暂无用户信息，请先完成登录。</span>
           ) : (
             userRecords.map((record, index) => {
               const profile = record.profile || {};
@@ -588,7 +592,7 @@ const LoginStatusPage = () => {
                 <div
                   key={`${record.username || record.nickname || index}`}
                   style={{
-                    border: "1px solid rgba(148, 163, 184, 0.25)",
+                    border: "1px solid var(--cm-border)",
                     borderRadius: "12px",
                     padding: "16px",
                     marginBottom: "12px",
@@ -611,7 +615,7 @@ const LoginStatusPage = () => {
                       {record.success ? "有效" : "失效"}
                     </span>
                     {record.is_active ? (
-                      <span style={{ marginLeft: "6px", color: "#2563eb" }}>当前活跃</span>
+                      <span style={{ marginLeft: "6px", color: "var(--cm-link)" }}>当前活跃</span>
                     ) : null}
                   </div>
                   <div>
@@ -651,7 +655,7 @@ const LoginStatusPage = () => {
                     {profile.roles && profile.roles.length > 0 ? profile.roles.join(" / ") : "无"}
                   </div>
                   {!record.success && record.message ? (
-                    <div style={{ gridColumn: "1 / -1", color: "#b91c1c" }}>
+                    <div style={{ gridColumn: "1 / -1", color: "var(--cm-error)" }}>
                       错误：{record.message}
                     </div>
                   ) : null}
@@ -666,7 +670,7 @@ const LoginStatusPage = () => {
         <div className="content-header" style={{ padding: 0 }}>
           <div>
             <h3>会话保活</h3>
-            <p style={{ color: "#667085", marginTop: "4px" }}>
+            <p style={{ color: "var(--cm-muted)", marginTop: "4px" }}>
               定时刷新 Cookie，确保账号随时可用。
             </p>
           </div>
@@ -702,15 +706,15 @@ const LoginStatusPage = () => {
         {keepAliveError ? <div className="notice notice-error">{keepAliveError}</div> : null}
 
         <div className="panel">
-          {keepAliveLoading && <span style={{ color: "#2563eb" }}>执行中…</span>}
+          {keepAliveLoading && <span style={{ color: "var(--cm-link)" }}>执行中…</span>}
           {!keepAliveLoading && keepAliveResults.length === 0 ? (
-            <span style={{ color: "#667085" }}>暂无保活记录，点击「刷新全部」开始。</span>
+            <span style={{ color: "var(--cm-muted)" }}>暂无保活记录，点击「刷新全部」开始。</span>
           ) : null}
 
           {keepAliveResults.length > 0 ? (
             <div style={{ display: "flex", flexDirection: "column", gap: "12px" }}>
               <div>
-                成功 <strong style={{ color: "#15803d" }}>{keepAliveSuccessCount}</strong> /
+                成功 <strong style={{ color: "var(--cm-success)" }}>{keepAliveSuccessCount}</strong> /
                 {keepAliveResults.length}
               </div>
               <table className="table">
@@ -776,9 +780,9 @@ const LoginStatusPage = () => {
           </form>
 
           {keepAliveLoading && keepAliveJobs.length === 0 ? (
-            <span style={{ color: "#667085" }}>加载任务中…</span>
+            <span style={{ color: "var(--cm-muted)" }}>加载任务中…</span>
           ) : keepAliveJobs.length === 0 ? (
-            <span style={{ color: "#667085" }}>暂无保活任务。</span>
+            <span style={{ color: "var(--cm-muted)" }}>暂无保活任务。</span>
           ) : (
             <table className="table">
               <thead>

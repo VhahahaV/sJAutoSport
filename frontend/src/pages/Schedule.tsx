@@ -321,7 +321,7 @@ const SchedulePage = () => {
           </fieldset>
 
           {!includeAllUsers && selectedUsers.length > 0 && (
-            <div className="panel" style={{ gridColumn: "1 / -1", border: "2px solid #0891B2", background: "#ECFEFF", padding: "16px" }}>
+            <div className="panel" style={{ gridColumn: "1 / -1", border: "2px solid var(--cm-link)", background: "#f0ecfa", padding: "16px" }}>
               <label style={{ display: "flex", alignItems: "center", gap: "12px", fontSize: "14px" }}>
                 <input 
                   type="checkbox" 
@@ -329,7 +329,7 @@ const SchedulePage = () => {
                   onChange={(event) => setRequireAllUsersSuccess(event.target.checked)}
                   style={{ width: "18px", height: "18px" }}
                 />
-                <span style={{ color: "#0891B2" }}>
+                <span style={{ color: "var(--cm-link)" }}>
                   ✓ 要求所有用户都成功 - 全部指定账号抢到场次才算任务完成，并会限制预约的开始时间相差不超过 1 小时
                 </span>
               </label>

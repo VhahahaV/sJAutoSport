@@ -344,7 +344,7 @@ const MonitorPage = () => {
       );
 
       const succeeded = creationResults
-        .filter((entry): entry is PromiseFulfilledResult<{ id: string; venue?: string | null }> => entry.status === "fulfilled")
+        .filter((entry): entry is PromiseFulfilledResult<{ id: string; venue: string }> => entry.status === "fulfilled")
         .map((entry) => entry.value);
       const failed = creationResults.filter((entry) => entry.status === "rejected");
 
@@ -686,7 +686,7 @@ const MonitorPage = () => {
             <span className="muted-text">限定每日自动监控的时间段；保持 00:00 ~ 24:00 表示全天运行。</span>
           </div>
 
-          <div className="panel" style={{ gridColumn: "1 / -1", border: "2px solid #F97316", background: "#FFF7ED", padding: "16px" }}>
+          <div className="panel" style={{ gridColumn: "1 / -1", border: "2px solid var(--cm-yellow)", background: "#fff5d9", padding: "16px" }}>
             <label style={{ display: "flex", alignItems: "center", gap: "12px", fontWeight: "600", fontSize: "16px" }}>
               <input
                 type="checkbox"
@@ -694,7 +694,7 @@ const MonitorPage = () => {
                 onChange={(event) => setAutoBook(event.target.checked)}
                 style={{ width: "20px", height: "20px" }}
               />
-              <span style={{ color: "#EA580C" }}>🤖 自动预订 - 发现可用场次时自动下单</span>
+              <span style={{ color: "#705021" }}>🤖 自动预订 - 发现可用场次时自动下单</span>
             </label>
             {autoBook && (
               <label style={{ display: "flex", alignItems: "center", gap: "12px", marginTop: "12px", fontSize: "14px" }}>
@@ -704,7 +704,7 @@ const MonitorPage = () => {
                   onChange={(event) => setRequireAllUsersSuccess(event.target.checked)}
                   style={{ width: "18px", height: "18px" }}
                 />
-                <span style={{ color: "#0891B2" }}>
+                <span style={{ color: "var(--cm-link)" }}>
                   ✓ 要求所有用户都成功 - 所有指定账号都在同一场馆抢到场次才算完成，并自动限制开始时间相差不超过 1 小时
                 </span>
               </label>
@@ -715,8 +715,8 @@ const MonitorPage = () => {
             className="panel"
             style={{
               gridColumn: "1 / -1",
-              border: "1px solid rgba(34,197,94,0.4)",
-              background: "#F0FDF4",
+              border: "1px solid #c8e7d9",
+              background: "#e7f7ee",
               padding: "16px",
             }}
           >
@@ -727,7 +727,7 @@ const MonitorPage = () => {
                 onChange={(event) => setLongRunning(event.target.checked)}
                 style={{ width: "20px", height: "20px" }}
               />
-              <span style={{ color: "#15803d" }}>♾️ 长期监控 - 成功抢到票后仍持续监控优先天数窗口</span>
+              <span style={{ color: "var(--cm-success)" }}>♾️ 长期监控 - 成功抢到票后仍持续监控优先天数窗口</span>
             </label>
             <p className="muted-text" style={{ marginTop: "8px" }}>
               启用后任务不会进入完成状态，而是每天追踪「今天~明天」这样的滑动窗口，并避免为同一账号重复下单。
@@ -750,7 +750,7 @@ const MonitorPage = () => {
       ) : null}
 
       {message ? (
-        <div className="panel" style={{ border: "1px solid rgba(255, 159, 209, 0.3)", background: "rgba(255, 245, 250, 0.92)" }}>
+        <div className="panel" style={{ border: "1px solid var(--cm-border)", background: "var(--cm-surface)" }}>
           {message}
         </div>
       ) : null}
@@ -772,7 +772,7 @@ const MonitorPage = () => {
         </div>
         <div className="panel">
           {monitors.length === 0 ? (
-            <span style={{ color: "#667085" }}>暂无监控任务。</span>
+            <span style={{ color: "var(--cm-muted)" }}>暂无监控任务。</span>
           ) : (
             <div className="card-scroll">
               {monitors.map((monitor, index) => {
@@ -953,7 +953,7 @@ const MonitorPage = () => {
                           <strong>最新可用：</strong>
                           <div className="monitor-card-slots">
                             {slotPreview.map((line, idx) => (
-                              <span key={`${monitorKey}-slot-${idx}`} style={{ color: "#475467" }}>
+                              <span key={`${monitorKey}-slot-${idx}`} style={{ color: "var(--cm-muted)" }}>
                                 {line}
                               </span>
                             ))}

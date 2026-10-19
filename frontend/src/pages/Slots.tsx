@@ -2,6 +2,7 @@ import { FormEvent, useEffect, useMemo, useRef, useState } from "react";
 
 import {
   api,
+  buildUrl,
   type AggregatedSlotEntry,
   type AggregatedSlotsByDay,
   type Preset,
@@ -107,7 +108,7 @@ const SlotsPage = () => {
     controller: AbortController,
   ): Promise<void> => {
     setIsStreaming(true);
-    const response = await fetch("/api/booking/slots", {
+    const response = await fetch(buildUrl("/booking/slots"), {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ ...payload, incremental: true }),
@@ -346,7 +347,7 @@ const SlotsPage = () => {
         <section className="section">
           <h3>查询结果</h3>
           <div className="panel">
-            <span style={{ color: "#667085" }}>{message}</span>
+            <span style={{ color: "var(--cm-muted)" }}>{message}</span>
           </div>
         </section>
       ) : null}
@@ -356,7 +357,7 @@ const SlotsPage = () => {
           <h3>{day.date}</h3>
           <div className="panel">
             {day.entries.length === 0 ? (
-              <span style={{ color: "#667085" }}>该日期暂无可预订的时间段。</span>
+              <span style={{ color: "var(--cm-muted)" }}>该日期暂无可预订的时间段。</span>
             ) : (
               <table className="table">
                 <thead>

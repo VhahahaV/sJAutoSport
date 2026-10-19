@@ -92,7 +92,7 @@ const KeepAlivePage = () => {
       <div className="content-header">
         <div>
           <h2>会话保活</h2>
-          <p style={{ color: "#667085", marginTop: "8px" }}>
+          <p style={{ color: "var(--cm-muted)", marginTop: "8px" }}>
             定时刷新所有账号，确保 Cookie 始终有效。
           </p>
         </div>
@@ -113,7 +113,7 @@ const KeepAlivePage = () => {
               style={{
                 padding: "10px 14px",
                 borderRadius: "10px",
-                border: "1px solid rgba(148, 163, 184, 0.4)",
+                border: "1px solid var(--cm-border)",
                 fontSize: "14px",
               }}
             />
@@ -130,18 +130,18 @@ const KeepAlivePage = () => {
       </div>
 
       {error ? (
-        <div className="panel" style={{ border: "1px solid #fca5a5" }}>
+        <div className="panel" style={{ border: "1px solid #eed1d9" }}>
           <strong>操作失败</strong>
-          <span style={{ color: "#b91c1c" }}>{error}</span>
+          <span style={{ color: "var(--cm-error)" }}>{error}</span>
         </div>
       ) : null}
 
       <section className="section">
         <h3>最近结果</h3>
         <div className="panel">
-          {running && <span style={{ color: "#2563eb" }}>执行中…</span>}
+          {running && <span style={{ color: "var(--cm-link)" }}>执行中…</span>}
           {!running && results.length === 0 ? (
-            <span style={{ color: "#667085" }}>
+            <span style={{ color: "var(--cm-muted)" }}>
               暂无记录，点击「刷新全部」开始第一次保活。
             </span>
           ) : null}
@@ -149,7 +149,7 @@ const KeepAlivePage = () => {
             <div style={{ display: "flex", flexDirection: "column", gap: "12px" }}>
               <div>
                 成功{" "}
-                <strong style={{ color: "#15803d" }}>{lastSuccessCount}</strong> /
+                <strong style={{ color: "var(--cm-success)" }}>{lastSuccessCount}</strong> /
                 {results.length}
               </div>
               <table className="table">
@@ -189,9 +189,9 @@ const KeepAlivePage = () => {
         <h3>Keep-Alive 任务列表</h3>
         <div className="panel">
           {loadingJobs ? (
-            <span style={{ color: "#667085" }}>加载中…</span>
+            <span style={{ color: "var(--cm-muted)" }}>加载中…</span>
           ) : jobs.length === 0 ? (
-            <span style={{ color: "#667085" }}>暂无 Keep-Alive 任务。</span>
+            <span style={{ color: "var(--cm-muted)" }}>暂无 Keep-Alive 任务。</span>
           ) : (
             <table className="table">
               <thead>
@@ -255,7 +255,7 @@ const KeepAlivePage = () => {
                 style={{
                   padding: "10px 14px",
                   borderRadius: "10px",
-                  border: "1px solid rgba(148, 163, 184, 0.4)",
+                  border: "1px solid var(--cm-border)",
                   fontSize: "14px",
                 }}
               />
@@ -274,7 +274,7 @@ const KeepAlivePage = () => {
                   width: "120px",
                   padding: "10px 14px",
                   borderRadius: "10px",
-                  border: "1px solid rgba(148, 163, 184, 0.4)",
+                  border: "1px solid var(--cm-border)",
                   fontSize: "14px",
                 }}
               />

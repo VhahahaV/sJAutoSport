@@ -41,7 +41,7 @@ const UserInfoPage = () => {
       <div className="content-header">
         <div>
           <h2>用户信息</h2>
-          <p style={{ color: "#667085", marginTop: "8px" }}>
+          <p style={{ color: "var(--cm-muted)", marginTop: "8px" }}>
             展示当前保存的登录用户信息，数据来自原 CLI `userinfo` 流程。
           </p>
         </div>
@@ -51,17 +51,17 @@ const UserInfoPage = () => {
       </div>
 
       {error ? (
-        <div className="panel" style={{ border: "1px solid #fca5a5" }}>
+        <div className="panel" style={{ border: "1px solid #eed1d9" }}>
           <strong>加载失败</strong>
-          <span style={{ color: "#b91c1c" }}>{error}</span>
+          <span style={{ color: "var(--cm-error)" }}>{error}</span>
         </div>
       ) : null}
 
       <div className="panel" style={{ display: "flex", flexDirection: "column", gap: "18px" }}>
         {loading ? (
-          <span style={{ color: "#667085" }}>加载中…</span>
+          <span style={{ color: "var(--cm-muted)" }}>加载中…</span>
         ) : records.length === 0 ? (
-          <span style={{ color: "#667085" }}>暂无用户信息，请先完成登录。</span>
+          <span style={{ color: "var(--cm-muted)" }}>暂无用户信息，请先完成登录。</span>
         ) : (
           records.map((record, index) => {
             const profile = record.profile || {};
@@ -69,7 +69,7 @@ const UserInfoPage = () => {
               <div
                 key={`${record.username || record.nickname || index}`}
                 style={{
-                  border: "1px solid rgba(148, 163, 184, 0.2)",
+                  border: "1px solid var(--cm-border)",
                   borderRadius: "12px",
                   padding: "16px",
                   display: "grid",
@@ -90,7 +90,7 @@ const UserInfoPage = () => {
                   <span className={`chip ${record.success ? "chip-success" : "chip-warning"}`}>
                     {record.success ? "有效" : "失效"}
                   </span>
-                  {record.is_active ? <span style={{ marginLeft: "6px", color: "#2563eb" }}>当前活跃</span> : null}
+                  {record.is_active ? <span style={{ marginLeft: "6px", color: "var(--cm-link)" }}>当前活跃</span> : null}
                 </div>
                 <div>
                   <strong>姓名：</strong>
@@ -129,7 +129,7 @@ const UserInfoPage = () => {
                   {profile.roles && profile.roles.length > 0 ? profile.roles.join(" / ") : "无"}
                 </div>
                 {!record.success && record.message ? (
-                  <div style={{ gridColumn: "1 / -1", color: "#b91c1c" }}>
+                  <div style={{ gridColumn: "1 / -1", color: "var(--cm-error)" }}>
                     错误：{record.message}
                   </div>
                 ) : null}

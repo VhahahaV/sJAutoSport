@@ -211,7 +211,7 @@ def _list_available_users() -> List[Dict[str, Any]]:
             "username": username,
             "expires_at": expires_at,
             "is_active": is_active,
-            "password_masked": user.password,
+            "has_password": bool(user.password),
         }
 
     return list(merged.values())

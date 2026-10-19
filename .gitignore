@@ -14,8 +14,8 @@ dist/
 downloads/
 eggs/
 .eggs/
-lib/
-lib64/
+/lib/
+/lib64/
 parts/
 sdist/
 var/
@@ -215,6 +215,10 @@ cache/
 # 运行时文件
 *.pid
 *.sock
+
+# Keep the Web login regression tests in version control.
+!tests/
+!tests/test_web_login.py
 
 # 编译文件
 *.pyc

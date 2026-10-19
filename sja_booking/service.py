@@ -678,29 +678,7 @@ def _normalize_user_payload(payload: Any) -> Dict[str, Any]:
 async def fetch_user_infos() -> List[Dict[str, Any]]:
     cookies_map, active_username = _auth_manager.load_all_cookies()
     if not cookies_map:
-        try:
-            payload = await asyncio.to_thread(_fetch_user_info_sync, None)
-            normalized = _normalize_user_payload(payload)
-            normalized.update({
-                "key": None,
-                "username": None,
-                "nickname": None,
-                "is_active": True,
-            })
-            return [normalized]
-        except Exception as exc:  # pylint: disable=broad-except
-            return [
-                {
-                    "key": None,
-                    "username": None,
-                    "nickname": None,
-                    "is_active": True,
-                    "success": False,
-                    "message": str(exc),
-                    "profile": None,
-                    "raw": None,
-                }
-            ]
+        return []
 
     results: List[Dict[str, Any]] = []
     for key, record in cookies_map.items():
@@ -4048,6 +4026,37 @@ def _resolve_credentials(
     return resolved_user, resolved_pass
 
 
+def _save_verified_login(
+    username: str,
+    nickname: Optional[str],
+    cookie_header: str,
+    expires_at: datetime,
+) -> str:
+    """Verify the new session for this user before persisting it."""
+    existing_user = _find_user(username)
+    resolved_nickname = (
+        nickname or (existing_user.nickname if existing_user else None)
+        or username.split("@", 1)[0]
+    )
+    candidate = UserAuth(
+        nickname=resolved_nickname, username=username, cookie=cookie_header,
+    )
+    auth = dataclasses.replace(CFG.AUTH, users=[candidate])
+    api = SportsAPI(CFG.BASE_URL, CFG.ENDPOINTS, auth)
+    try:
+        if not api.check_auth_status():
+            raise RuntimeError("未获取到有效的用户登录信息，请重新登录")
+    finally:
+        api.close()
+
+    _auth_manager.save_cookie(
+        cookie_header, expires_at, username=username, nickname=resolved_nickname,
+    )
+    cookies_map, _ = _auth_manager.load_all_cookies()
+    _sync_users_from_store(cookies_map)
+    return resolved_nickname
+
+
 async def start_login_session(
     *,
     user_id: Optional[str] = None,
@@ -4112,37 +4121,9 @@ async def start_login_session(
 
         expires_at = datetime.now(timezone.utc) + timedelta(hours=8)
 
-        resolved_nickname = nickname
-        try:
-            if getattr(CFG.AUTH, "users", None):
-                for user in CFG.AUTH.users:
-                    if user.username == resolved_user:
-                        user.cookie = cookie_header
-                        resolved_nickname = resolved_nickname or user.nickname
-                        break
-            if not resolved_nickname:
-                from .models import UserAuth
-                nickname_guess = nickname or (resolved_user.split("@")[0] if "@" in resolved_user else resolved_user)
-                new_user = UserAuth(nickname=nickname_guess, cookie=cookie_header, username=resolved_user)
-                if not getattr(CFG.AUTH, "users", None):
-                    CFG.AUTH.users = [new_user]
-                else:
-                    # 避免重复添加
-                    if not any(u.username == resolved_user for u in CFG.AUTH.users):
-                        CFG.AUTH.users.append(new_user)
-                resolved_nickname = nickname_guess
-        except Exception:
-            resolved_nickname = nickname
-
-        _auth_manager.save_cookie(cookie_header, expires_at, username=resolved_user, nickname=resolved_nickname)
-
-        # 校验登录态
-        api = SportsAPI(CFG.BASE_URL, CFG.ENDPOINTS, CFG.AUTH)
-        try:
-            if not api.check_auth_status():
-                raise RuntimeError("登录成功但校验失败，请稍后重试")
-        finally:
-            api.close()
+        resolved_nickname = await asyncio.to_thread(
+            _save_verified_login, resolved_user, nickname, cookie_header, expires_at,
+        )
 
         await client.close()
         return {
@@ -4182,35 +4163,9 @@ async def submit_login_session_code(session_id: str, code: str) -> Dict[str, Any
 
         expires_at = datetime.now(timezone.utc) + timedelta(hours=8)
 
-        resolved_nickname = session.nickname
-        try:
-            if getattr(CFG.AUTH, "users", None):
-                for user in CFG.AUTH.users:
-                    if user.username == session.username:
-                        user.cookie = cookie_header
-                        resolved_nickname = resolved_nickname or user.nickname
-                        break
-            if not resolved_nickname:
-                from .models import UserAuth
-                nickname_guess = session.nickname or (session.username.split("@")[0] if "@" in session.username else session.username)
-                new_user = UserAuth(nickname=nickname_guess, cookie=cookie_header, username=session.username)
-                if not getattr(CFG.AUTH, "users", None):
-                    CFG.AUTH.users = [new_user]
-                else:
-                    if not any(u.username == session.username for u in CFG.AUTH.users):
-                        CFG.AUTH.users.append(new_user)
-                resolved_nickname = nickname_guess
-        except Exception:
-            resolved_nickname = session.nickname
-
-        _auth_manager.save_cookie(cookie_header, expires_at, username=session.username, nickname=resolved_nickname)
-
-        api = SportsAPI(CFG.BASE_URL, CFG.ENDPOINTS, CFG.AUTH)
-        try:
-            if not api.check_auth_status():
-                raise RuntimeError("框架未验证通过，请重新尝试")
-        finally:
-            api.close()
+        resolved_nickname = await asyncio.to_thread(
+            _save_verified_login, session.username, session.nickname, cookie_header, expires_at,
+        )
 
         await session.client.close()
         del _login_sessions[session_id]
@@ -4244,7 +4199,7 @@ async def submit_login_session_code(session_id: str, code: str) -> Dict[str, Any
                     "captcha_image": image,
                     "message": f"验证码错误，请重试 ({session.attempts}/5)",
                     "username": session.username,
-                    "nickname": resolved_nickname,
+                    "nickname": session.nickname,
                 }
             await session.client.close()
             del _login_sessions[session_id]

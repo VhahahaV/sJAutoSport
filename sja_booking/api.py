@@ -363,7 +363,10 @@ class SportsAPI:
             if data.get("error"):
                 return False
             code = data.get("code")
-            return code in (None, 0, "0")
+            return code in (None, 0, "0") and bool(
+                data.get("data") or data.get("user") or data.get("userInfo")
+                or data.get("loginName") or data.get("userName")
+            )
         except Exception:
             return False
 

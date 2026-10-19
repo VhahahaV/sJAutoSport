@@ -1,5 +1,6 @@
 import type { PropsWithChildren, FormEvent } from "react";
 import { useEffect, useMemo, useState } from "react";
+import SportsIllustration from "./SportsIllustration";
 
 const GATE_KEY = "sja.portal.unlocked";
 
@@ -55,9 +56,7 @@ const PasswordGate = ({ children }: PropsWithChildren) => {
   return (
     <div className="password-gate">
       <div className="password-gate__panel">
-        <div className="password-gate__emoji" aria-hidden>
-          🔐
-        </div>
+        <SportsIllustration className="password-gate__illustration" />
         <h1>访问受限</h1>
         <p>请输入访问密码进入控制台。</p>
         <form onSubmit={handleSubmit} className="password-gate__form">
@@ -77,7 +76,7 @@ const PasswordGate = ({ children }: PropsWithChildren) => {
             解锁
           </button>
         </form>
-        <span className="password-gate__hint">提示：密码由运营人员配置在环境变量 `VITE_PORTAL_PASSWORD` 中。</span>
+        <span className="password-gate__hint">访问密码由管理员提供。</span>
       </div>
     </div>
   );

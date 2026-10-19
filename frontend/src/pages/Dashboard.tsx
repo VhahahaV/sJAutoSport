@@ -1,8 +1,10 @@
 import { useEffect, useMemo, useState } from "react";
+import { Link } from "react-router-dom";
 
 import StatusCard from "../components/StatusCard";
 import SlotTable from "../components/SlotTable";
-import { api, type HealthResponse, type JobSummary, type Preset } from "../lib/api";
+import SportsIllustration from "../components/SportsIllustration";
+import { api, type HealthResponse, type JobSummary, type LoginStatusResponse, type Preset } from "../lib/api";
 
 const JobDeleteButton = ({ job, onDeleted }: { job: JobSummary; onDeleted: () => void }) => {
   const [loading, setLoading] = useState(false);
@@ -57,7 +59,7 @@ const DashboardPage = () => {
   const [jobTypeFilter, setJobTypeFilter] = useState<string>("");
   const [error, setError] = useState<string | null>(null);
   const [presets, setPresets] = useState<Preset[]>([]);
-  const [loginStatus, setLoginStatus] = useState<any>(null);
+  const [loginStatus, setLoginStatus] = useState<LoginStatusResponse | null>(null);
 
   // 默认查询的预设 (气模体育中心羽毛球、学生中心健身房、子衿街健身房)
   const dashboardPresets = [
@@ -153,17 +155,30 @@ const DashboardPage = () => {
     <>
       <div className="content-header">
         <div>
-          <h2>控制台总览</h2>
-          <p className="content-subtitle">快速了解系统运行状态与后台任务。</p>
+          <h2>我的运动日常</h2>
+          <p className="content-subtitle">预订、监控、计划，在这里有序进行。</p>
         </div>
       </div>
 
-      {showLoginNotice ? (
-        <div className="panel notice">
-          <strong>⚠️ 未登录</strong>
-          <span>请先登录后再查看场次信息。</span>
+      <section className="dashboard-hero" aria-labelledby="welcome-title">
+        <div className="hero-copy">
+          <span className="hero-eyebrow">YOUR NEXT GOOD MOVE</span>
+          <h1 id="welcome-title">把时间留给<br /><span>热爱的运动。</span></h1>
+          <p>找到合适的场地，安排喜欢的时段。<br />下一场尽兴，从这里开始。</p>
+          <div className="hero-actions">
+            <Link to="/slots" className="button button-primary">
+              寻找运动场地 <span aria-hidden="true">↗</span>
+            </Link>
+            <Link to="/sessions" className="button hero-account-link">管理我的账号 <span aria-hidden="true">→</span></Link>
+          </div>
+          <div className="hero-service-status">
+            <span className={`service-dot${health?.status === "ok" ? " is-connected" : ""}`} aria-hidden="true" />
+            {health?.status === "ok" ? "预约服务已连接" : "正在连接预约服务"}
+            {showLoginNotice ? <span>· 登录后查看实时场次</span> : null}
+          </div>
         </div>
-      ) : null}
+        <SportsIllustration className="hero-illustration" />
+      </section>
 
       {error ? (
         <div className="panel notice notice-error">
@@ -179,9 +194,9 @@ const DashboardPage = () => {
           meta={`${runningJobs} 个正在运行`}
         />
         <StatusCard
-          title="Keep-Alive 任务"
+          title="会话保活"
           value={jobsLoading ? "..." : keepAliveJobs}
-          meta="用于保持 Cookie 有效"
+          meta="让账号保持在线"
         />
         <StatusCard
           title="监控任务"
@@ -216,7 +231,21 @@ const DashboardPage = () => {
           {jobsLoading ? (
             <span className="muted-text">加载任务中…</span>
           ) : jobs.length === 0 ? (
-            <span className="muted-text">目前暂无任务。</span>
+            <div className="empty-state">
+              <div className="empty-state-symbol" aria-hidden="true">
+                <svg viewBox="0 0 64 64" fill="none">
+                  <rect x="13" y="15" width="38" height="39" rx="9" fill="#E9E1FC" />
+                  <path d="M23 11v10m18-10v10M21 31h22m-22 8h10" stroke="#2E2A5B" strokeWidth="2" strokeLinecap="round" />
+                  <circle cx="44" cy="45" r="11" fill="#6EE7B7" />
+                  <path d="m39 45 3 3 6-7" stroke="#2E2A5B" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
+                </svg>
+              </div>
+              <div>
+                <strong>把运动排进日常</strong>
+                <p>还没有预约任务。创建一个计划，让运动按你的节奏进行。</p>
+                <Link to="/schedule" className="text-button">安排第一个任务 <span aria-hidden="true">→</span></Link>
+              </div>
+            </div>
           ) : (
             <>
               <div className="table-container" style={{ overflowX: "auto" }}>

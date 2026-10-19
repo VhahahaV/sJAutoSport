@@ -4,7 +4,7 @@ const rawApiBase =
 // Ensure we keep a single slash between base and path to avoid malformed URLs.
 const API_BASE = rawApiBase.replace(/\/+$/, "");
 
-const buildUrl = (path: string) =>
+export const buildUrl = (path: string) =>
   `${API_BASE}${path.startsWith("/") ? "" : "/"}${path}`;
 
 const extractErrorMessage = (payload: unknown): string | null => {
@@ -160,7 +160,7 @@ export type UserSummary = {
   username?: string | null;
   expires_at?: string | null;
   is_active?: boolean;
-  password_masked?: string | null;
+  has_password?: boolean;
 };
 
 export type OrderRecord = {
@@ -422,7 +422,7 @@ export const api = {
     }),
   listJobs: (jobType?: string) => {
     const query = jobType ? `?job_type=${jobType}` : "";
-    return request<JobSummary[]>(`/jobs${query}`);
+    return request<JobSummary[]>(`/jobs/${query}`);
   },
 
   // Keep-alive
