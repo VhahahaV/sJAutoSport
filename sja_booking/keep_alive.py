@@ -1,27 +1,20 @@
+"""Verify the sports session and recover it through the saved jAccount session."""
 from __future__ import annotations
 
 import asyncio
-import logging
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
-from http.cookies import SimpleCookie
-from typing import Any, Dict, List, Optional, Tuple
-from urllib.parse import urlparse
+from datetime import datetime, timezone
+from typing import Optional
 
 import httpx
 
-from .auth import AuthManager, _cookie_header
+from . import config as CFG
+from .auth import (AuthClient, AuthManager, _cookie_header, has_sso_session,
+                   restore_cookies, same_account, serialize_cookies)
+from .notification import emit
 
-try:
-    from . import config as CFG
-except ImportError as exc:  # pragma: no cover - configuration should exist
-    raise RuntimeError("keep_alive module requires top-level config.py") from exc
-
-
-logger = logging.getLogger(__name__)
-
-DEFAULT_INTERVAL_SECONDS = 15 * 60
-REFRESH_WINDOW_MARGIN = timedelta(minutes=10)
+_session_lock = None
+_session_loop = None
 
 
 @dataclass
@@ -30,102 +23,85 @@ class KeepAliveResult:
     nickname: Optional[str]
     success: bool
     message: str
-
-
-def _parse_cookie_header(cookie_header: str) -> Dict[str, str]:
-    cookie = SimpleCookie()
-    cookie.load(cookie_header or "")
-    return {key: morsel.value for key, morsel in cookie.items()}
-
-
-def _resolve_ping_endpoint() -> str:
-    """
-    Determine which endpoint to ping for keep-alive.
-    Prefer the current_user endpoint if configured, fallback to '/'.
-    """
-    endpoint = getattr(CFG.ENDPOINTS, "current_user", None)
-    if endpoint:
-        return endpoint
-    return "/"
-
-
-async def _ping_cookie(
-    username: Optional[str],
-    nickname: Optional[str],
-    cookie_header: str,
-    *,
-    timeout: float = 10.0,
-) -> Tuple[bool, str, str]:
-    """
-    Send a GET request with the provided cookie header to keep the session alive.
-
-    Returns:
-        success flag, updated cookie header (may be unchanged), status message.
-    """
-    cookie_map = _parse_cookie_header(cookie_header)
-    if not cookie_map:
-        return False, cookie_header, "cookie header is empty"
-
-    headers = {
-        "User-Agent": (
-            "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
-            "(KHTML, like Gecko) Chrome/120.0 Safari/537.36"
-        ),
-        "Accept": "application/json, text/plain, */*",
-        "Referer": f"{CFG.BASE_URL}/pc/",
-    }
-
-    base_url = CFG.BASE_URL.rstrip("/")
-    endpoint = _resolve_ping_endpoint()
-    url = endpoint if endpoint.startswith("http") else f"{base_url}{endpoint}"
-
-    async with httpx.AsyncClient(headers=headers, timeout=timeout, trust_env=CFG.TRUST_ENV) as client:
-        client.cookies.update(cookie_map)
-        try:
-            response = await client.get(url)
-        except Exception as exc:  # pylint: disable=broad-except
-            return False, cookie_header, f"request failed: {exc}"
-
-        if response.status_code != 200:
-            return False, cookie_header, f"session check returned HTTP {response.status_code}; log in again if expired"
-        try:
-            payload = response.json()
-        except ValueError:
-            return False, cookie_header, "session check returned HTML/non-JSON; log in again"
-        if not isinstance(payload, dict) or payload.get("error") or payload.get("code") not in (None, 0, "0"):
-            return False, cookie_header, "session invalid; log in again"
-        if not any(payload.get(key) for key in ("data", "user", "userInfo", "loginName", "userName")):
-            return False, cookie_header, "session has no authenticated profile; log in again"
-
-        # Update cookies if server returned new values (httpx updates client.cookies automatically)
-        domain = urlparse(base_url).hostname
-        refreshed_header = _cookie_header(client.cookies, domain=domain)
-        if refreshed_header:
-            cookie_header = refreshed_header
-        # 如果没有刷新后的header，使用原始的cookie_header
-        elif not cookie_header and client.cookies:
-            cookie_header = _cookie_header(client.cookies, domain=domain)
-
-        return True, cookie_header, f"ping {response.status_code}"
+    status: str = "online"
+    sso_available: bool = False
+    checked_at: Optional[str] = None
 
 
 async def run_keep_alive_once(*, auth_manager=None):
-    manager = auth_manager or AuthManager()
+    """Shared preflight for both heads and background monitors. Never replay business requests."""
+    global _session_lock, _session_loop
+    loop = asyncio.get_running_loop()
+    if _session_loop is not loop:
+        _session_loop, _session_lock = loop, asyncio.Lock()
+    async with _session_lock:
+        return await _check_session(auth_manager or AuthManager())
+
+
+async def _check_session(manager):
     record = manager.load_record()
+    result = KeepAliveResult(
+        (record or {}).get("username"), (record or {}).get("nickname"), False, "请先登录",
+        status="login_required", checked_at=datetime.now(timezone.utc).isoformat(),
+    )
     if not record:
-        return KeepAliveResult(None, None, False, "请先登录")
-    username, nickname = record.get("username"), record.get("nickname")
-    success, cookie, message = await _ping_cookie(username, nickname, record["cookie"])
-    if success:
-        manager.save_cookie(cookie, datetime.now(timezone.utc) + timedelta(hours=1), username=username, nickname=nickname)
-    return KeepAliveResult(username, nickname, success, message)
+        return result
+    result.sso_available = has_sso_session(record)
+    if record.get("login_required"):
+        result.message = record.get("login_required_message") or "jAccount 会话已失效或需要验证，请重新扫码或使用密码与验证码登录"
+        return result
 
+    def login_required(message):
+        result.message = message
+        result.sso_available = False
+        if manager.mark_login_required(record, message):
+            emit("login_required", {"message": message})
+        else:
+            result.status, result.message = "session_changed", "会话已变更，请重试"
+        return result
 
-async def keep_alive_loop(*, interval_seconds=900, stop_event=None):
-    event = stop_event or asyncio.Event()
-    while not event.is_set():
-        await run_keep_alive_once()
+    client = AuthClient(CFG.BASE_URL, CFG.ENDPOINTS, CFG.AUTH, cookies=restore_cookies(record))
+    try:
         try:
-            await asyncio.wait_for(event.wait(), timeout=max(60, interval_seconds))
-        except asyncio.TimeoutError:
-            pass
+            profile = await client.current_user()
+            renewed = False
+            if profile is None and result.sso_available and await client.reauthorize():
+                profile = await client.current_user()
+                renewed = profile is not None
+        except (httpx.HTTPError, RuntimeError, OSError):
+            # Request URLs can contain authorization codes. Do not expose exception text.
+            result.status = "error"
+            result.message = "校园会话检查或授权暂时不可用，原凭据已保留；请稍后重试"
+            return result
+
+        if profile is None:
+            if not result.sso_available:
+                return login_required("运动站会话已失效，未保存可用的 jAccount 会话；请重新登录一次以启用自动恢复")
+            return login_required("jAccount 需要重新认证，请扫码或使用密码与验证码登录")
+
+        if not same_account(record.get("username"), profile.get("loginName")):
+            return login_required("校园授权返回的账号与当前账号不一致，原凭据已保留；请重新登录")
+        cookie = _cookie_header(client._client.cookies, url=f"{CFG.BASE_URL}{CFG.ENDPOINTS.current_user}")
+        if not cookie:
+            return login_required("校园授权未返回运动站凭据，请重新登录")
+        nickname = record.get("nickname")
+        if nickname in (None, "", "__default__"):
+            nickname = profile.get("userName") or profile["loginName"]
+        saved = manager.save_cookie(
+            cookie, username=profile["loginName"], nickname=nickname,
+            session_cookies=serialize_cookies(client._client.cookies),
+            expected_record=record, renewed=renewed,
+        )
+        if not saved:
+            result.status, result.message = "session_changed", "会话已变更，请重试"
+            return result
+        result.username, result.nickname = profile["loginName"], nickname
+        result.success = True
+        result.status = "renewed" if renewed else "online"
+        result.message = "已通过 jAccount 自动恢复运动站登录" if renewed else "运动站会话有效"
+        result.sso_available = has_sso_session(manager.load_record() or {})
+        if renewed:
+            emit("session_renewed", {"message": result.message})
+        return result
+    finally:
+        await client.close()

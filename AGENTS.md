@@ -4,7 +4,7 @@ Single-account SJTU sports booking: one Python core and two heads (CLI + React).
 
 - `sja_booking/operations.py`: canonical operation names, Pydantic input contracts and dispatch. Run `sja schema` before using an operation. No duplicate protocol in Web.
 - `sja_booking/service.py`: verified password/captcha and QR login, queries, booking, orders, live monitors and session keepalive.
-- `sja_booking/auth.py`, `api.py`, `order.py`: campus protocol. Never log passwords/cookies or recognize captchas automatically; return images for the user.
+- `sja_booking/auth.py`, `api.py`, `order.py`: campus protocol. `auth.py` persists scoped sports/jAccount cookies; `keep_alive.py` serializes session verification and SSO recovery for both heads and monitors. Preserve newer credentials on concurrent login/logout; never replay booking/refund requests. Never log passwords/cookies or recognize captchas automatically; return images for the user.
 - `sja_booking/database.py`: SQLite state/history/events. `config.py`: public presets, environment configuration.
 - `sja_booking/daemon.py`: singleton core process and private Unix socket. Both CLI and HTTP use this process; stopping a head must not stop monitors.
 - `sja_booking/cli.py`: `sja`, also `python -m sja_booking`.

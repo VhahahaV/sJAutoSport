@@ -207,6 +207,9 @@ def test_every_cli_operation_with_isolated_protocols(tmp_path):
         assert op("auth.status")["account"]["username"] == "student"
         assert op("auth.logout")["success"]
         assert not op("auth.status", expected=1)["success"]
+        assert op("keep-alive.run", expected=1)["status"] == "login_required"
+        assert not op("keep-alive.status")["session"]["sso_available"]
+        assert isinstance(op("events.list")["events"], list)
         assert not (tmp_path / "credentials.json").exists()
         assert set(CONTRACTS) == invoked, f"Unexercised CLI operations: {set(CONTRACTS) - invoked}"
         assert isinstance(call("daemon", "logs")["result"]["lines"], list)

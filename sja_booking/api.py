@@ -6,9 +6,11 @@ import re
 from datetime import datetime, timedelta
 import time
 import random
+from http.cookies import SimpleCookie
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 import httpx
+from .auth import authenticated_user
 from .config import TRUST_ENV
 
 from .models import (
@@ -205,17 +207,7 @@ class SportsAPI:
         
         cookies: Dict[str, str] = {}
         if user and user.cookie and user.cookie.strip():
-            # 只使用JSESSIONID，过滤掉无效的Cookie
-            for kv in user.cookie.split(";"):
-                if "=" in kv:
-                    k, v = kv.strip().split("=", 1)
-                    # 只使用JSESSIONID，且过滤掉.jaccount106后缀
-                    if k == "JSESSIONID":
-                        # 过滤掉.jaccount106等后缀，只保留纯JSESSIONID
-                        if "." in v and not v.startswith("http"):
-                            # 如果包含点但不是URL，可能是带后缀的JSESSIONID，跳过
-                            continue
-                        cookies[k] = v
+            cookies = {key: value.value for key, value in SimpleCookie(user.cookie).items()}
         
         return httpx.Client(
                 trust_env=TRUST_ENV,
@@ -283,20 +275,7 @@ class SportsAPI:
             }
 
     def check_auth_status(self) -> bool:
-        try:
-            data = self.check_login()
-            if not isinstance(data, dict):
-                return False
-            # 检查是否有错误
-            if data.get("error"):
-                return False
-            code = data.get("code")
-            return code in (None, 0, "0") and bool(
-                data.get("data") or data.get("user") or data.get("userInfo")
-                or data.get("loginName") or data.get("userName")
-            )
-        except Exception:
-            return False
+        return authenticated_user(self.check_login()) is not None
 
     def ping(self) -> None:
         try:

@@ -24,6 +24,7 @@ def fixture_daemon():
         fake._client.cookies = cookies
         fake.prepare = AsyncMock(return_value=state)
         fake.fetch_captcha = AsyncMock(return_value=b"mock-image")
+        fake.current_user = AsyncMock(return_value={"loginName": "student", "userName": "Student"})
 
         async def submit(state, username, password, code):
             if code != "abcde":
@@ -40,7 +41,7 @@ def fixture_daemon():
     service.SportsAPI = Mock()
     service.SportsAPI.return_value.check_auth_status.return_value = True
     service._monitor_check = monitor_check
-    keep_alive._ping_cookie = AsyncMock(return_value=(True, "JSESSIONID=test-session", "verified"))
+    keep_alive.AuthClient = client
     run()
 
 

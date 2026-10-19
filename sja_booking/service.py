@@ -13,7 +13,8 @@ from typing import Any, Dict, Iterable, List, Optional, Tuple
 from urllib.parse import urlparse
 from . import config as CFG
 from .api import SportsAPI
-from .auth import AuthManager, AuthClient, AuthState, _cookie_header
+from .auth import AuthManager, AuthClient, AuthState, _cookie_header, authenticated_user, has_sso_session, serialize_cookies
+from .keep_alive import run_keep_alive_once
 from .models import BookingTarget, DateAvailability, FieldType, MonitorPlan, PresetOption, Slot, UserAuth, Venue, AuthConfig
 from .monitor import SlotMonitor
 from .order import OrderManager, OrderResult
@@ -226,13 +227,10 @@ def _normalize_user_payload(payload: Any) -> Dict[str, Any]:
         result["message"] = payload.get("msg") or payload.get("message") or payload.get("error")
         return result
 
-    user_info: Any = payload
-    if isinstance(user_info, dict):
-        for key in ("data", "user", "userInfo", "result", "payload"):
-            candidate = user_info.get(key)
-            if isinstance(candidate, dict) and candidate:
-                user_info = candidate
-                break
+    user_info = authenticated_user(payload)
+    if user_info is None:
+        result.update(success=False, message="未获得有效的用户资料，请刷新重试或重新登录")
+        return result
 
     if isinstance(user_info, dict):
         dept = user_info.get("dept")
@@ -591,15 +589,13 @@ async def start_login_session(
     try:
         submit_resp = await client.submit(state, resolved_user, resolved_pass, None)
         await client.follow_redirects(submit_resp)
-        sports_domain = urlparse(CFG.BASE_URL).hostname
-        cookie_header = _cookie_header(client._client.cookies, domain=sports_domain)  # type: ignore[attr-defined]
+        cookie_header = _cookie_header(client._client.cookies, url=f"{CFG.BASE_URL}{CFG.ENDPOINTS.current_user}")
         if not cookie_header:
             raise RuntimeError("登录失败，未获得 Cookie")
 
-        expires_at = datetime.now(timezone.utc) + timedelta(hours=8)
-
         resolved_nickname = await asyncio.to_thread(
-            _save_verified_login, resolved_user, nickname, cookie_header, expires_at,
+            _save_verified_login, resolved_user, nickname, cookie_header,
+            session_cookies=serialize_cookies(client._client.cookies),
         )
 
         await client.close()
@@ -607,7 +603,7 @@ async def start_login_session(
             "success": True,
             "captcha_required": False,
             "message": "登录成功",
-            "expires_at": expires_at.isoformat(),
+            "expires_at": None,
             "username": resolved_user,
             "nickname": resolved_nickname,
         }
@@ -632,15 +628,13 @@ async def submit_login_session_code(session_id: str, code: str) -> Dict[str, Any
         submit_resp = await session.client.submit(session.state, session.username, session.password, code)
         await session.client.follow_redirects(submit_resp)
 
-        sports_domain = urlparse(CFG.BASE_URL).hostname
-        cookie_header = _cookie_header(session.client._client.cookies, domain=sports_domain)  # type: ignore[attr-defined]
+        cookie_header = _cookie_header(session.client._client.cookies, url=f"{CFG.BASE_URL}{CFG.ENDPOINTS.current_user}")
         if not cookie_header:
             raise RuntimeError("验证码可能错误，未获取到 Cookie")
 
-        expires_at = datetime.now(timezone.utc) + timedelta(hours=8)
-
         resolved_nickname = await asyncio.to_thread(
-            _save_verified_login, session.username, session.nickname, cookie_header, expires_at,
+            _save_verified_login, session.username, session.nickname, cookie_header,
+            session_cookies=serialize_cookies(session.client._client.cookies),
         )
 
         await session.client.close()
@@ -648,7 +642,7 @@ async def submit_login_session_code(session_id: str, code: str) -> Dict[str, Any
         return {
             "success": True,
             "message": "登录成功",
-            "expires_at": expires_at.isoformat(),
+            "expires_at": None,
             "username": session.username,
             "nickname": resolved_nickname,
         }
@@ -706,6 +700,8 @@ def current_account():
     record = _auth_manager.load_record()
     if record:
         CFG.AUTH.user = UserAuth(username=record.get("username"), nickname=record.get("nickname") or record.get("username") or "Account", cookie=record["cookie"])
+    else:
+        CFG.AUTH.user = None
     return record
 
 
@@ -721,7 +717,7 @@ def _resolve_credentials(username, password, *, nickname=None):
             password or (account.password if account and account.username == username else None))
 
 
-def _save_verified_login(username, nickname, cookie_header, expires_at):
+def _save_verified_login(username, nickname, cookie_header, expires_at=None, *, session_cookies=None):
     resolved = nickname or username.split("@", 1)[0]
     candidate = UserAuth(username=username, nickname=resolved, cookie=cookie_header)
     api = SportsAPI(CFG.BASE_URL, CFG.ENDPOINTS, AuthConfig(user=candidate))
@@ -730,33 +726,30 @@ def _save_verified_login(username, nickname, cookie_header, expires_at):
             raise RuntimeError("登录校验失败，原凭据已保留")
     finally:
         api.close()
-    _auth_manager.save_cookie(cookie_header, expires_at, username=username, nickname=resolved)
+    _auth_manager.save_cookie(cookie_header, expires_at, username=username, nickname=resolved,
+                              session_cookies=session_cookies)
     CFG.AUTH.user = candidate
     return resolved
 
 
-def login_status():
+async def login_status():
+    result = await run_keep_alive_once(auth_manager=_auth_manager)
+    if result.status in {"error", "session_changed"}:
+        raise RuntimeError(result.message)
     record = current_account()
-    if not record:
-        return {"success": False, "account": None, "message": "请先登录"}
-    api = _create_api()
-    try:
-        online = api.check_auth_status()
-        if online and (record.get("username") in (None, "", "__default__") or not record.get("nickname")):
-            profile = _normalize_user_payload(api.check_login()).get("profile")
-            if profile:
-                _auth_manager.update_identity(record["cookie"], username=profile["login_name"], nickname=profile["user_name"])
-                record = current_account() or record
-    finally:
-        api.close()
-    return {"success": online, "account": {"username": record.get("username"), "nickname": record.get("nickname"),
-            "expires_at": record.get("expires_at"), "is_online": online}, "message": "登录有效" if online else "会话已失效，请重新登录"}
+    account = None if not record else {
+        "username": record.get("username"), "nickname": record.get("nickname"),
+        "expires_at": None, "is_online": result.success,
+        "sso_available": result.sso_available, "verified_at": record.get("verified_at"),
+        "renewed_at": record.get("renewed_at"),
+    }
+    return {"success": result.success, "account": account, "status": result.status, "message": result.message}
 
 
 async def require_authenticated():
-    status = await asyncio.to_thread(login_status)
+    status = await login_status()
     if not status["success"]:
-        raise PermissionError("请先登录；会话失效时需要重新输入账号密码和验证码")
+        raise PermissionError(status["message"])
 
 
 async def fetch_user_info():
@@ -1035,29 +1028,40 @@ async def monitor_status(monitor_id=None):
 
 
 def keep_alive_status():
-    return get_db_manager().get("settings", "keep_alive") or {"enabled": False, "interval_minutes": 15}
+    info = get_db_manager().get("settings", "keep_alive") or {"enabled": False, "interval_minutes": 15}
+    record = _auth_manager.load_record() or {}
+    return {**info, "session": {"sso_available": has_sso_session(record),
+            "login_required": bool(record.get("login_required")),
+            "verified_at": record.get("verified_at"), "renewed_at": record.get("renewed_at")}}
+
+
+async def check_keep_alive():
+    result = await run_keep_alive_once(auth_manager=_auth_manager)
+    current_account()
+    info = get_db_manager().get("settings", "keep_alive") or {"enabled": False, "interval_minutes": 15}
+    info.update(last_run=result.checked_at, last_result=dataclasses.asdict(result))
+    get_db_manager().put("settings", "keep_alive", info)
+    emit("keep_alive", info["last_result"])
+    return result
 
 
 async def configure_keep_alive(*, enabled=True, interval_minutes=15):
     if interval_minutes < 1:
         raise ValueError("保活间隔至少 1 分钟")
     await _cancel_worker("keep-alive")
-    info = {"enabled": enabled, "interval_minutes": interval_minutes}
+    info = get_db_manager().get("settings", "keep_alive") or {}
+    info.update(enabled=enabled, interval_minutes=interval_minutes)
     get_db_manager().put("settings", "keep_alive", info)
     if enabled:
         _spawn("keep-alive", _keep_alive_worker())
-    return info
+    return keep_alive_status()
 
 
 async def _keep_alive_worker():
-    from .keep_alive import run_keep_alive_once
     while True:
         info = keep_alive_status()
         try:
-            result = await run_keep_alive_once()
-            info.update(last_run=datetime.now(timezone.utc).isoformat(), last_result=dataclasses.asdict(result))
-            get_db_manager().put("settings", "keep_alive", info)
-            emit("keep_alive", info["last_result"])
+            await check_keep_alive()
         except Exception as exc:
             emit("keep_alive_error", {"message": str(exc)})
         await asyncio.sleep(info["interval_minutes"] * 60)
@@ -1086,7 +1090,7 @@ async def shutdown():
         await cancel_login_session(sid)
 
 
-def _save_qr_cookie(cookie):
+def _save_qr_cookie(cookie, *, session_cookies=None):
     candidate = UserAuth(nickname="Account", cookie=cookie)
     api = SportsAPI(CFG.BASE_URL, CFG.ENDPOINTS, AuthConfig(user=candidate))
     try:
@@ -1097,7 +1101,7 @@ def _save_qr_cookie(cookie):
             raise RuntimeError("扫码后未获得有效的体育站用户资料，请重新生成二维码")
     finally:
         api.close()
-    return _save_verified_login(username, details.get("user_name"), cookie, datetime.now(timezone.utc) + timedelta(hours=8))
+    return _save_verified_login(username, details.get("user_name"), cookie, session_cookies=session_cookies)
 
 
 async def start_qr_login():
@@ -1192,10 +1196,11 @@ async def _qr_worker(session_id):
                     session.update(status="confirming", message="扫码已确认，正在连接体育预约平台")
                     response = await client._client.get(state.metadata["qr_express_url"], headers={"Referer": state.prepare_url})
                     await client.follow_redirects(response, max_jumps=10)
-                    cookie = _cookie_header(client._client.cookies, domain=urlparse(CFG.BASE_URL).hostname)
+                    cookie = _cookie_header(client._client.cookies, url=f"{CFG.BASE_URL}{CFG.ENDPOINTS.current_user}")
                     if not cookie:
                         raise RuntimeError("扫码未换取到体育站会话，请重新生成二维码")
-                    await asyncio.to_thread(_save_qr_cookie, cookie)
+                    await asyncio.to_thread(_save_qr_cookie, cookie,
+                                            session_cookies=serialize_cookies(client._client.cookies))
                     session.update(status="success", message="扫码登录成功", image=b"")
                     return
                 elif message.get("type") == "ERROR_MESSAGE":

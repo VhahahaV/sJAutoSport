@@ -67,9 +67,15 @@ export default function KeepAlivePage() {
         </dl>
       </> : !profileError && <p className="muted-text" role="status">正在从体育预约平台读取个人资料…</p>}
     </section>
-    <section className="panel"><h3>保持当前会话在线</h3><p className="muted-text">定期验证和刷新登录凭证。适合后台长期监控；服务器上的核心服务需保持运行。失效后仍需重新登录，保活无法保证永不过期。</p>
+    <section className="panel"><h3>会话维护与自动恢复</h3><p className="muted-text">定期检查运动站登录。过期时尝试用已保存的 jAccount 会话重新授权，成功后继续监控；jAccount 也失效时需要重新扫码或填写验证码。服务器上的 core 需保持运行。</p>
+      <dl className="account-details">
+        <div><dt>jAccount 自动恢复</dt><dd>{!ready ? "正在读取…" : settings.session?.sso_available ? "已保存 SSO 会话，可在过期时尝试恢复" : settings.session?.login_required ? "需要重新登录" : "未保存 SSO 会话，请重新登录一次"}</dd></div>
+        <div><dt>最近验证有效</dt><dd>{settings.session?.verified_at ? new Date(settings.session.verified_at).toLocaleString() : "暂无记录"}</dd></div>
+        <div><dt>最近自动恢复</dt><dd>{settings.session?.renewed_at ? new Date(settings.session.renewed_at).toLocaleString() : "暂无恢复记录"}</dd></div>
+        <div><dt>服务器有效期</dt><dd>由校园服务器决定，无法预先确定</dd></div>
+      </dl>
       <form className="form-grid" onSubmit={save}>
-        <label className="field"><span>自动保活</span><input type="checkbox" disabled={busy || !ready} checked={settings.enabled} onChange={e => setSettings({ ...settings, enabled: e.target.checked })} /></label>
+        <label className="field"><span>后台会话维护</span><input type="checkbox" disabled={busy || !ready} checked={settings.enabled} onChange={e => setSettings({ ...settings, enabled: e.target.checked })} /></label>
         <label className="field">检查间隔（分钟）<input type="number" min={1} disabled={busy || !ready || !settings.enabled} value={settings.interval_minutes} onChange={e => setSettings({ ...settings, interval_minutes: Number(e.target.value) })} required /></label>
         <div className="form-actions"><button className="button button-primary" disabled={busy || !ready}>{busy ? "处理中…" : "保存设置"}</button><button className="button button-secondary" type="button" onClick={refresh} disabled={busy || !ready}>立即检查会话</button></div>
       </form>

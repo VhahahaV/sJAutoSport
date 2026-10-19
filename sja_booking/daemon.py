@@ -53,8 +53,9 @@ class Daemon:
                     result = {"stopping": True}
                 else:
                     result = await self.ops.dispatch(operation, envelope.get("payload", {}))
+            result = public(result)
             success = not (isinstance(result, dict) and result.get("success") is False)
-            response = {"ok": success, "result": public(result)}
+            response = {"ok": success, "result": result}
         except PermissionError as exc:
             response = {"ok": False, "error": {"code": "login_required", "message": str(exc)}}
         except ValidationError as exc:

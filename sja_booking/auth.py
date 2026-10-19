@@ -8,6 +8,7 @@ import os
 import re
 from html import unescape
 from html.parser import HTMLParser
+from http.cookiejar import Cookie
 import threading
 from functools import wraps
 from dataclasses import dataclass, field
@@ -70,13 +71,17 @@ def _now_utc() -> datetime:
     return datetime.now(timezone.utc)
 
 
-def _cookie_header(cookies: httpx.Cookies, *, domain: Optional[str] = None) -> str:
+def _cookie_header(cookies: httpx.Cookies, *, domain: Optional[str] = None, url: Optional[str] = None) -> str:
+    if url:
+        request = httpx.Request("GET", url)
+        cookies.set_cookie_header(request)
+        return request.headers.get("cookie", "")
     cookie_pairs = []
     norm_domain = domain.lstrip(".") if domain else None
     for cookie in cookies.jar:
         if norm_domain:
             cookie_domain = (cookie.domain or "").lstrip(".")
-            if cookie_domain and not norm_domain.endswith(cookie_domain):
+            if cookie_domain and norm_domain != cookie_domain and not norm_domain.endswith("." + cookie_domain):
                 continue
         cookie_pairs.append(f"{cookie.name}={cookie.value}")
     return "; ".join(cookie_pairs)
@@ -87,6 +92,56 @@ def _clone_cookies(source: httpx.Cookies) -> httpx.Cookies:
     for cookie in source.jar:
         cloned.jar.set_cookie(copy.copy(cookie))
     return cloned
+
+
+def serialize_cookies(cookies: httpx.Cookies) -> list[dict]:
+    """Keep scope and attributes, including same-name cookies on different paths."""
+    return [{**{key: getattr(cookie, key) for key in (
+        "version", "name", "value", "port", "port_specified", "domain",
+        "domain_specified", "domain_initial_dot", "path", "path_specified",
+        "secure", "expires", "discard", "comment", "comment_url", "rfc2109",
+    )}, "rest": dict(cookie._rest)} for cookie in cookies.jar if not cookie.is_expired()]
+
+
+def restore_cookies(record: dict) -> httpx.Cookies:
+    from .config import BASE_URL
+    cookies = httpx.Cookies()
+    for item in record.get("session_cookies", []):
+        cookie = Cookie(**item)
+        if not cookie.is_expired():
+            cookies.jar.set_cookie(cookie)
+    # Existing credentials remain usable until the next interactive login captures SSO.
+    if not record.get("session_cookies"):
+        from http.cookies import SimpleCookie
+        parsed = SimpleCookie(record.get("cookie", ""))
+        for key, value in parsed.items():
+            cookies.set(key, value.value, domain=urlparse(BASE_URL).hostname or "", path="/")
+    return cookies
+
+
+def has_sso_session(record: dict) -> bool:
+    if record.get("login_required"):
+        return False
+    return any((cookie.domain or "").lstrip(".") in {"jaccount.sjtu.edu.cn", "sjtu.edu.cn"}
+               for cookie in restore_cookies(record).jar)
+
+
+def authenticated_user(payload: Any) -> Optional[dict]:
+    """A successful status without a user identity is not authentication."""
+    if not isinstance(payload, dict) or payload.get("error") or payload.get("code") not in (None, 0, "0"):
+        return None
+    user = payload
+    for key in ("data", "user", "userInfo", "result", "payload"):
+        if isinstance(payload.get(key), dict) and payload[key]:
+            user = payload[key]
+            break
+    return user if user.get("loginName") or user.get("userName") else None
+
+
+def same_account(username: Optional[str], login_name: Optional[str]) -> bool:
+    def normalize(value):
+        return value.strip().lower().removesuffix("@sjtu.edu.cn") if isinstance(value, str) else ""
+    return bool(normalize(login_name)) and (username in (None, "", "__default__") or normalize(username) == normalize(login_name))
 
 
 def _merge_form(base: Dict[str, str], updates: Dict[str, str]) -> Dict[str, str]:
@@ -187,9 +242,27 @@ class AuthManager:
         return result
 
     @synchronized
-    def save_cookie(self, cookie, expires_at, *, username=None, nickname=None):
+    def save_cookie(self, cookie, expires_at=None, *, username=None, nickname=None,
+                    session_cookies=None, expected_record=None, renewed=False):
+        if expected_record is not None and self.load_record() != expected_record:
+            return False
+        now = _now_utc().isoformat()
         self.store.save({"username": username, "nickname": nickname, "cookie": cookie,
-                         "expires_at": expires_at.isoformat()})
+                         "expires_at": expires_at.isoformat() if expires_at else None,
+                         "session_cookies": session_cookies or [], "verified_at": now,
+                         "renewed_at": now if renewed else (expected_record or {}).get("renewed_at"),
+                         "login_required": False})
+        return True
+
+    @synchronized
+    def mark_login_required(self, expected_record, message):
+        if self.load_record() != expected_record:
+            return False
+        record = self.store.load()
+        record["login_required"] = True
+        record["login_required_message"] = message
+        self.store.save(record)
+        return True
 
     @synchronized
     def update_identity(self, cookie, *, username=None, nickname=None):
@@ -218,16 +291,57 @@ class AuthClient:
         auth_config: AuthConfig,
         *,
         timeout: float = 15.0,
+        cookies: Optional[httpx.Cookies] = None,
     ) -> None:
         if not endpoints.login_prepare or not endpoints.login_submit:
             raise ValueError("EndpointSet 未配置 login_prepare/login_submit")
         self.base_url = base_url.rstrip("/")
         self.endpoints = endpoints
         self.auth_config = auth_config
-        self._client = httpx.AsyncClient(timeout=timeout, headers={"User-Agent": "Mozilla/5.0"}, follow_redirects=False, trust_env=TRUST_ENV)
+        self._client = httpx.AsyncClient(timeout=timeout, cookies=cookies, headers={"User-Agent": "Mozilla/5.0"}, follow_redirects=False, trust_env=TRUST_ENV)
 
     async def close(self) -> None:
         await self._client.aclose()
+
+    async def current_user(self) -> Optional[dict]:
+        response = await self._client.get(self._url(self.endpoints.current_user))
+        if response.status_code in (401, 403) or response.is_redirect:
+            return None
+        response.raise_for_status()
+        try:
+            payload = response.json()
+        except ValueError:
+            if "text/html" in response.headers.get("content-type", ""):
+                return None
+            raise RuntimeError("用户资料接口返回异常，稍后重试") from None
+        user = authenticated_user(payload)
+        if user:
+            return user
+        if isinstance(payload, dict) and payload.get("code") in (None, 0, "0", 301, "301", 401, "401", 403, "403"):
+            return None
+        raise RuntimeError("用户资料接口暂时不可用，稍后重试")
+
+    async def reauthorize(self) -> bool:
+        """Only follow the normal sports/jAccount authorization redirects; never submit a login form."""
+        sports_host = urlparse(self.base_url).hostname
+        # Start a fresh sports session while retaining jAccount's separate session.
+        for cookie in list(self._client.cookies.jar):
+            if cookie.domain.lstrip(".") == sports_host:
+                self._client.cookies.jar.clear(cookie.domain, cookie.path, cookie.name)
+        target = self._url(self.endpoints.login_prepare)
+        for _ in range(12):
+            url = httpx.URL(target)
+            if url.scheme != "https" or url.host not in {sports_host, "jaccount.sjtu.edu.cn"}:
+                raise RuntimeError("校园授权返回了非预期地址，已停止恢复")
+            response = await self._client.get(url)
+            if not response.is_redirect:
+                response.raise_for_status()
+                return response.url.host == sports_host
+            location = response.headers.get("location")
+            if not location:
+                raise RuntimeError("校园授权跳转缺少目标地址")
+            target = self._absolute_url(response.url, location)
+        raise RuntimeError("校园授权跳转次数过多，稍后重试")
 
     def _url(self, path: str) -> str:
         if path.startswith("http"):

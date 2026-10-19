@@ -10,7 +10,8 @@ from pydantic import ValidationError
 from sja_booking import config, database, service
 from sja_booking.auth import AuthManager, AuthStore
 from sja_booking.database import DatabaseManager
-from sja_booking.keep_alive import _ping_cookie, run_keep_alive_once
+from sja_booking.keep_alive import run_keep_alive_once
+from sja_booking.auth import AuthClient
 from sja_booking.models import AuthConfig, BookingTarget, Slot
 from sja_booking.operations import CONTRACTS, Operations, public
 from sja_booking.order import OrderResult
@@ -208,8 +209,8 @@ class OperationsTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_keep_alive_rejection_keeps_old_cookie(self):
         self.user()
-        with patch("sja_booking.keep_alive._ping_cookie", new_callable=AsyncMock) as ping:
-            ping.return_value = (False, "", "expired")
+        client = Mock(current_user=AsyncMock(return_value=None), close=AsyncMock())
+        with patch("sja_booking.keep_alive.AuthClient", return_value=client):
             result = await run_keep_alive_once(auth_manager=self.manager)
         self.assertFalse(result.success)
         self.assertEqual(self.manager.load_record()["cookie"], "JSESSIONID=test-session")
@@ -259,13 +260,11 @@ class OperationsTests(unittest.IsolatedAsyncioTestCase):
 
 
     async def test_keep_alive_rejects_empty_success_profile(self):
-        client = AsyncMock()
-        client.cookies = httpx.Cookies()
-        client.get.return_value = httpx.Response(200, json={"code": 0, "msg": "success"})
-        client.__aenter__.return_value = client
-        with patch("sja_booking.keep_alive.httpx.AsyncClient", return_value=client):
-            success, _, _ = await _ping_cookie("student", "Student", "JSESSIONID=test-session")
-        self.assertFalse(success)
+        async with AuthClient(config.BASE_URL, config.ENDPOINTS, config.AUTH) as client:
+            await client._client.aclose()
+            client._client = httpx.AsyncClient(transport=httpx.MockTransport(
+                lambda request: httpx.Response(200, json={"code": 0, "msg": "success"})))
+            self.assertIsNone(await client.current_user())
 
 
     async def test_database_reservation_history(self):

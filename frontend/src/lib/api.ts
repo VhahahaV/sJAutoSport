@@ -280,12 +280,13 @@ export type OrderRequestBody = {
   target?: Record<string, unknown>;
 };
 
-export type Account = { username: string | null; nickname: string | null; expires_at: string | null; is_online: boolean };
-export type LoginStatusResponse = { success: boolean; account: Account | null; message?: string };
+export type SessionState = { sso_available: boolean; verified_at?: string | null; renewed_at?: string | null; login_required?: boolean };
+export type Account = SessionState & { username: string | null; nickname: string | null; expires_at: string | null; is_online: boolean };
+export type LoginStatusResponse = { success: boolean; account: Account | null; status?: string; message?: string };
 export type OrderResponse = { success: boolean; message: string; order_id?: string | null };
 export type MonitorInfo = Record<string, unknown>;
-export type KeepAliveSummary = { success: boolean; message: string; username: string | null; nickname: string | null };
-export type KeepAliveSettings = { enabled: boolean; interval_minutes: number; last_run?: string; last_result?: KeepAliveSummary };
+export type KeepAliveSummary = { success: boolean; message: string; username: string | null; nickname: string | null; status: "online" | "renewed" | "login_required" | "error" | "session_changed"; sso_available: boolean; checked_at?: string };
+export type KeepAliveSettings = { enabled: boolean; interval_minutes: number; last_run?: string; last_result?: KeepAliveSummary; session?: SessionState };
 export type DashboardCardConfig = { id: string; preset: number; days: number };
 export type DashboardDay = { date: string; status: "available" | "full" | "closed" | "unopened" | "error"; slots: SlotDetails[]; message?: string };
 export type DashboardAvailability = { card_id: string; days: DashboardDay[]; updated_at: string };

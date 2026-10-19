@@ -16,7 +16,7 @@ export default function App() {
   const refresh = useCallback(async () => {
     setError("");
     try { setStatus(await api.getLoginStatus()); }
-    catch (error) { setStatus(null); setError((error as Error).message); }
+    catch (error) { setError((error as Error).message); }
     finally { setLoading(false); }
   }, []);
   useEffect(() => {

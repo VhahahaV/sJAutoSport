@@ -99,7 +99,10 @@ class QrLoginTests(unittest.IsolatedAsyncioTestCase):
             final = service.qr_login_status(result["session_id"])
             self.assertEqual(final["status"], "success")
             self.assertNotIn("qr_image", final)
-            verify.assert_called_once_with("JSESSIONID=test-sports-session")
+            verify.assert_called_once()
+            self.assertEqual(verify.call_args.args, ("JSESSIONID=test-sports-session",))
+            self.assertEqual({c["domain"] for c in verify.call_args.kwargs["session_cookies"]},
+                             {"jaccount.sjtu.edu.cn", "sports.sjtu.edu.cn"})
             client.follow_redirects.assert_awaited_once()
 
     async def test_qr_image_is_private_and_removed_on_cancel(self):

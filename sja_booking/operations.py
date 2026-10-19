@@ -11,7 +11,6 @@ from typing import Annotated
 from pydantic import BaseModel, ConfigDict, Field, SecretStr, field_validator
 from . import config, service
 from .database import get_db_manager
-from .keep_alive import run_keep_alive_once
 from .models import BookingTarget
 Hour = Annotated[int, Field(ge=0, le=23)]
 Day = Annotated[int, Field(ge=0, le=365)]
@@ -144,7 +143,7 @@ def public(value):
                 fields[property_name] = getattr(value, property_name)
         value = fields
     if isinstance(value, dict):
-        private = {"cookie", "cookies", "password", "token", "authorization", "sign", "raw", "raw_response"}
+        private = {"cookie", "cookies", "session_cookies", "password", "token", "authorization", "sign", "raw", "raw_response"}
         return {k: public(v) for k, v in value.items() if str(k).lower() not in private}
     if isinstance(value, (list, tuple)):
         return [public(v) for v in value]
@@ -212,7 +211,7 @@ class Operations:
         if operation == "auth.cancel":
             return self.login_result(await service.cancel_login_session(**data), data["session_id"])
         if operation == "auth.status":
-            return await asyncio.to_thread(service.login_status)
+            return await service.login_status()
         if operation == "auth.logout":
             for sid in list(service._qr_sessions):
                 await service.cancel_qr_login(sid)
@@ -223,6 +222,18 @@ class Operations:
                     await service.pause_monitor(monitor_id)
             await service.configure_keep_alive(enabled=False)
             return service.clear_account()
+        if operation == "keep-alive.run":
+            return await service.check_keep_alive()
+        if operation == "keep-alive.configure":
+            return await service.configure_keep_alive(**data)
+        if operation == "keep-alive.status":
+            return service.keep_alive_status()
+        if operation == "events.list":
+            with sqlite3.connect(self.db.db_path) as conn:
+                rows = conn.execute("SELECT rowid,payload FROM records WHERE kind='event' AND rowid>? ORDER BY rowid LIMIT ?",
+                                    (data["after"], data["limit"])).fetchall()
+            return {"events": [{"cursor": row[0], **json.loads(row[1])} for row in rows],
+                    "next_cursor": rows[-1][0] if rows else data["after"]}
         await service.require_authenticated()
         if operation == "account.info":
             return await service.fetch_user_info()
@@ -270,20 +281,8 @@ class Operations:
             return await service.resume_monitor(**data)
         if operation == "monitors.delete":
             return await service.delete_monitor(**data)
-        if operation == "keep-alive.run":
-            return await run_keep_alive_once()
-        if operation == "keep-alive.configure":
-            return await service.configure_keep_alive(**data)
-        if operation == "keep-alive.status":
-            return service.keep_alive_status()
         if operation == "history.list":
             return list(reversed(self.db.all("booking")))[:data["limit"]]
-        if operation == "events.list":
-            with sqlite3.connect(self.db.db_path) as conn:
-                rows = conn.execute("SELECT rowid,payload FROM records WHERE kind='event' AND rowid>? ORDER BY rowid LIMIT ?",
-                                    (data["after"], data["limit"])).fetchall()
-            return {"events": [{"cursor": row[0], **json.loads(row[1])} for row in rows],
-                    "next_cursor": rows[-1][0] if rows else data["after"]}
         raise ValueError(operation)
 
 
@@ -295,7 +294,7 @@ CONTRACTS = {
     "auth.start": (Login, "First step: sign in; receive captcha image for the user"),
     "auth.verify": (Verify, "Submit the user's captcha answer"),
     "auth.cancel": (Session, "Cancel unfinished login"),
-    "auth.status": (Empty, "Verify the single saved account"),
+    "auth.status": (Empty, "Verify the saved account and recover the sports session through saved jAccount SSO"),
     "auth.logout": (Empty, "Remove the saved login session"),
     "auth.qr-start": (Empty, "Generate a fresh jAccount QR image and subscribe for scan confirmation"),
     "auth.qr-status": (Session, "Poll QR status and refreshed image; success means the sports session is verified"),
@@ -314,7 +313,7 @@ CONTRACTS = {
     "monitors.pause": (MonitorID, "Pause a live monitor"),
     "monitors.resume": (MonitorID, "Resume a paused monitor"),
     "monitors.delete": (MonitorID, "Stop and delete a monitor"),
-    "keep-alive.run": (Empty, "Verify and refresh this session now"),
+    "keep-alive.run": (Empty, "Verify now; recover through saved SSO or report login_required/error without replaying requests"),
     "keep-alive.configure": (KeepAliveConfig, "Enable/disable periodic session maintenance"),
     "keep-alive.status": (Empty, "Read session maintenance settings and result"),
     "history.list": (Limit, "Read local reservation history"),
