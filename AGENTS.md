@@ -6,6 +6,9 @@ Single-account SJTU sports booking: one Python core and two heads (CLI + React).
 - `sja_booking/service.py`: verified password/captcha and QR login, queries, booking, orders, live monitors and session keepalive.
 - `sja_booking/auth.py`, `api.py`, `order.py`: campus protocol. `auth.py` persists scoped sports/jAccount cookies; `keep_alive.py` serializes session verification and SSO recovery for both heads and monitors. Preserve newer credentials on concurrent login/logout; never replay booking/refund requests. Never log passwords/cookies or recognize captchas automatically; return images for the user.
 - `sja_booking/database.py`: SQLite state/history/events. `config.py`: public presets, environment configuration.
+- Booking attempts are persisted before submission. Reuse `request_id` for transport retries; `orders.reconcile` checks uncertain results without replaying POSTs. An empty list never proves failure. Only explicit user confirmation authorizes `confirm_not_created`.
+- `OrderResult.response_info` preserves bounded, redacted HTTP/business response evidence across replay and reconciliation. Keep raw responses and credentials private. Error text does not prove rollback; no campus rejection code is currently verified for automatic continuation.
+- `slots.list` retains a session-bound 60-second snapshot; `orders.create` accepts its ID. `orders.cascade` uses one snapshot for ordered preferences, explicit price/attempt limits, and at most one success. No automatic continuation codes are assumed; code 500 must remain uncertain. See README for the protocol and timing fields.
 - `sja_booking/daemon.py`: singleton core process and private Unix socket. Both CLI and HTTP use this process; stopping a head must not stop monitors.
 - `sja_booking/cli.py`: `sja`, also `python -m sja_booking`.
 - `web_api/app.py`: thin localhost HTTP gateway; `frontend/`: Vite + React + TypeScript.

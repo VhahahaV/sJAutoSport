@@ -190,6 +190,7 @@ class SportsAPI:
         self.preset_targets = preset_targets or []
         self._min_post_interval = max(0.0, post_throttle_seconds)
         self._last_post_time = 0.0
+        self.timings_ms: Dict[str, float] = {}
         self.client = self._create_client(timeout)
 
     def _create_client(self, timeout: float) -> httpx.Client:
@@ -232,6 +233,7 @@ class SportsAPI:
         headers: Optional[Dict[str, str]] = None,
         expected: Iterable[int] = (200,),
     ) -> httpx.Response:
+        started = time.perf_counter()
         if path.startswith("http"):
             url = path
         else:
@@ -254,6 +256,9 @@ class SportsAPI:
         )
         if method.upper() == "POST":
             self._last_post_time = time.time()
+        label = {self.endpoints.venue_detail: "metadata", self.endpoints.field_reserve: "dates",
+                 self.endpoints.field_situation: "slots"}.get(path, "other_queries")
+        self.timings_ms[label] = self.timings_ms.get(label, 0) + round((time.perf_counter() - started) * 1000, 2)
         if resp.status_code not in expected:
             detail = resp.text[:400]
             raise RuntimeError(f"{method} {url} -> {resp.status_code}: {detail}")
@@ -470,7 +475,7 @@ class SportsAPI:
                         or entry.get("endHour")
                         or sign_info.get("end")
                     )
-                    slot_id = entry.get("sign") or entry.get("id") or f"{field_id}:{idx}"
+                    slot_id = f"{field_id}:{idx}"
                     price_raw = entry.get("price") if entry.get("price") is not None else entry.get("amount")
                     try:
                         price_val = float(price_raw) if price_raw not in (None, "") else None
@@ -507,6 +512,7 @@ class SportsAPI:
                                 "price_entry": entry,
                                 "decoded_sign": sign_info,
                                 "status": status,
+                                "field_detail_status": field_node.get("fieldDetailStatus"),
                             },
                         )
                     )
@@ -657,7 +663,7 @@ class SportsAPI:
         ]
         results: List[Dict[str, Any]] = []
         headers = {"Content-Type": "application/x-www-form-urlencoded"}
-        for path, payload in steps:
+        for index, (path, payload) in enumerate(steps):
             if not path:
                 continue
             resp = self._req("POST", path, data=payload, headers=headers)
@@ -668,7 +674,12 @@ class SportsAPI:
             if not isinstance(result, dict):
                 raise RuntimeError("取消订单接口返回格式异常，请查询订单确认结果")
             code = result.get("code", result.get("status"))
-            if result.get("error") or code not in (None, 0, "0", 1, "1", 2, "2", 3, "3"):
+            # Official flow: 4 cancels an unpaid order immediately; a paid
+            # refund follows 1 (created) -> 2 (accepted) -> 3 (confirmed).
+            if index == 0 and str(code) == "4" and not result.get("error"):
+                results.append(result)
+                break
+            if result.get("error") or str(code) != str(index + 1):
                 raise RuntimeError(result.get("msg") or result.get("message") or f"取消订单失败，code={code}")
             results.append(result)
         return results

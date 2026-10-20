@@ -5,6 +5,7 @@ import dataclasses
 import json
 import os
 import sqlite3
+import time
 import uuid
 from datetime import datetime
 from typing import Annotated
@@ -87,6 +88,9 @@ class Order(Input):
     start_time: str
     end_time: str | None = None
     target: Target = Field(default_factory=Target)
+    request_id: Identifier | None = None
+    snapshot_id: Identifier | None = None
+    candidate_id: Identifier | None = None
 
     @field_validator("date")
     @classmethod
@@ -104,9 +108,51 @@ class Order(Input):
 class CancelOrder(Input):
     order_id: Identifier
 
+class OrderPreference(Input):
+    start_time: str
+    end_time: str | None = None
+    candidate_id: Identifier | None = None
+
+    @field_validator("start_time", "end_time")
+    @classmethod
+    def time_is_valid(cls, value):
+        return Order.time_is_valid(value)
+
+class Cascade(Input):
+    preset: Annotated[int, Field(ge=1)]
+    date: str
+    preferences: Annotated[list[OrderPreference], Field(min_length=1, max_length=10)]
+    max_price: Annotated[float, Field(ge=0, allow_inf_nan=False)]
+    max_attempts: Annotated[int, Field(ge=1, le=5)] = 3
+    request_id: Identifier
+    snapshot_id: Identifier | None = None
+    continue_on_codes: list[int] = Field(default_factory=list, description=(
+        "Default: stop after any server rejection. Only supply codes independently verified to mean "
+        "no order was created and another candidate is allowed. Never infer codes or retry code 500."
+    ))
+
+    @field_validator("date")
+    @classmethod
+    def date_is_valid(cls, value):
+        return Slots.date_is_valid(value)
+
+    @field_validator("continue_on_codes")
+    @classmethod
+    def codes_are_safe(cls, values):
+        if any(code <= 0 or code in {401, 403, 429, 500, 1002, 10001} for code in values):
+            raise ValueError("Success, ambiguous, authentication, rate-limit and verification codes cannot trigger continuation")
+        return values
+
 class Orders(Input):
     page_no: Annotated[int, Field(ge=1)] = 1
     page_size: Annotated[int, Field(ge=1, le=100)] = 100
+
+class ReconcileOrder(Input):
+    request_id: Identifier
+    confirm_not_created: bool = Field(
+        default=False,
+        description="Only set after the user explicitly verifies no reservation was created; an empty list is not proof.",
+    )
 
 class Monitor(Slots):
     monitor_id: Identifier
@@ -143,7 +189,8 @@ def public(value):
                 fields[property_name] = getattr(value, property_name)
         value = fields
     if isinstance(value, dict):
-        private = {"cookie", "cookies", "session_cookies", "password", "token", "authorization", "sign", "raw", "raw_response"}
+        private = {"cookie", "cookies", "session_cookies", "password", "token", "date_token", "dateid",
+                   "authorization", "sign", "sid", "tim", "tid", "raw", "raw_response"}
         return {k: public(v) for k, v in value.items() if str(k).lower() not in private}
     if isinstance(value, (list, tuple)):
         return [public(v) for v in value]
@@ -234,7 +281,9 @@ class Operations:
                                     (data["after"], data["limit"])).fetchall()
             return {"events": [{"cursor": row[0], **json.loads(row[1])} for row in rows],
                     "next_cursor": rows[-1][0] if rows else data["after"]}
+        auth_started = time.perf_counter()
         await service.require_authenticated()
+        auth_ms = round((time.perf_counter() - auth_started) * 1000, 2)
         if operation == "account.info":
             return await service.fetch_user_info()
         if operation == "dashboard.list":
@@ -266,7 +315,15 @@ class Operations:
         if operation == "orders.list":
             return await asyncio.to_thread(service.get_user_orders, **data)
         if operation == "orders.create":
-            return await service.order_once(**self.selection(data))
+            result = await service.order_once(**self.selection(data))
+            result.timings_ms["authentication"] = auth_ms
+            return result
+        if operation == "orders.cascade":
+            result = await service.order_cascade(**data)
+            result.timings_ms["authentication"] = auth_ms
+            return result
+        if operation == "orders.reconcile":
+            return await service.reconcile_order(**data)
         if operation == "orders.cancel":
             return await service.cancel_order(**data)
         if operation == "monitors.create":
@@ -307,6 +364,8 @@ CONTRACTS = {
     "slots.list": (Slots, "Query slots; show_full includes unavailable slots"),
     "orders.list": (Orders, "Paginate the current account's orders"),
     "orders.create": (Order, "Create one real reservation"),
+    "orders.cascade": (Cascade, "Try ordered preferences from one snapshot; stop on success or uncertainty, with explicit price/attempt limits"),
+    "orders.reconcile": (ReconcileOrder, "Check an uncertain reservation; never resubmit or infer failure from an empty list"),
     "orders.cancel": (CancelOrder, "Cancel/refund a real reservation"),
     "monitors.create": (Monitor, "Watch slots; auto_book defaults to false"),
     "monitors.list": (Empty, "List live monitors and saved state"),

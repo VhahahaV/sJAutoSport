@@ -154,7 +154,6 @@ export type SlotDetails = {
   field_name?: string | null;
   area_name?: string | null;
   sub_site_id?: string | null;
-  sign?: string | null;
 };
 
 export type SlotAvailability = {
@@ -200,9 +199,13 @@ export type ImmediateSlotsResponse = {
   date: string;
   entries: AggregatedSlotEntry[];
   slots: SlotAvailability[];
+  snapshot_id?: string | null;
+  expires_at?: string | null;
 };
 
 export type SlotQueryResponse = {
+  snapshot_id?: string | null;
+  expires_at?: string | null;
   resolved: {
     label: string;
     venue_id: string;
@@ -273,6 +276,9 @@ export type MonitorRequestBody = {
 };
 
 export type OrderRequestBody = {
+  request_id?: string;
+  snapshot_id?: string;
+  candidate_id?: string;
   preset: number;
   date: string;
   start_time: string;
@@ -283,7 +289,7 @@ export type OrderRequestBody = {
 export type SessionState = { sso_available: boolean; verified_at?: string | null; renewed_at?: string | null; login_required?: boolean };
 export type Account = SessionState & { username: string | null; nickname: string | null; expires_at: string | null; is_online: boolean };
 export type LoginStatusResponse = { success: boolean; account: Account | null; status?: string; message?: string };
-export type OrderResponse = { success: boolean; message: string; order_id?: string | null };
+export type OrderResponse = { success: boolean; message: string; order_id?: string | null; request_id?: string | null; status?: string };
 export type MonitorInfo = Record<string, unknown>;
 export type KeepAliveSummary = { success: boolean; message: string; username: string | null; nickname: string | null; status: "online" | "renewed" | "login_required" | "error" | "session_changed"; sso_available: boolean; checked_at?: string };
 export type KeepAliveSettings = { enabled: boolean; interval_minutes: number; last_run?: string; last_result?: KeepAliveSummary; session?: SessionState };
@@ -296,7 +302,7 @@ export async function coreCall<T>(operation: string, payload: object = {}): Prom
   const response = await request<Envelope<T>>(`/core/${operation}`, { method: "POST", body: JSON.stringify(payload) });
   if (response.error) throw new Error(response.error.message || JSON.stringify(response.error.details) || response.error.code);
   if (response.result === undefined) throw new Error("核心未返回结果");
-  if (!response.ok && !operation.startsWith("auth.") && !["orders.create", "orders.cancel", "keep-alive.run"].includes(operation)) {
+  if (!response.ok && !operation.startsWith("auth.") && !["orders.create", "orders.reconcile", "orders.cancel", "keep-alive.run"].includes(operation)) {
     throw new Error((response.result as { message?: string })?.message || "操作未完成，请刷新后重试");
   }
   return response.result;
@@ -337,6 +343,7 @@ export const api = {
     return { ...result, date: payload.date, entries: aggregateAvailableSlots(result.slots, payload.date, payload.show_full) };
   },
   createOrder: (payload: OrderRequestBody) => coreCall<OrderResponse>("orders.create", payload),
+  reconcileOrder: (requestId: string, confirmNotCreated = false) => coreCall<OrderResponse>("orders.reconcile", { request_id: requestId, confirm_not_created: confirmNotCreated }),
   getOrders: (page = 1, pageSize = 100) => coreCall<{ success: boolean; orders: OrderRecord[]; total: number; message?: string }>("orders.list", { page_no: page, page_size: pageSize }),
   cancelOrder: (id: string) => coreCall<OrderResponse>("orders.cancel", { order_id: id }),
   listMonitors: () => coreCall<{ success: boolean; monitors: MonitorInfo[] }>("monitors.list"),

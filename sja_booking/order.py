@@ -9,9 +9,12 @@ import time
 import base64
 import secrets
 import string
-from datetime import datetime, timedelta
-from typing import Any, Dict, Optional, Tuple
-from dataclasses import dataclass
+import math
+import re
+from datetime import datetime, timedelta, timezone
+from typing import Dict, Optional
+from dataclasses import dataclass, field
+import httpx
 
 from Crypto.Cipher import AES
 from Crypto.Util.Padding import pad
@@ -29,6 +32,15 @@ class OrderResult:
     message: str
     order_id: Optional[str] = None
     raw_response: Optional[Dict] = None
+    status: str = ""
+    request_id: Optional[str] = None
+    timings_ms: Dict[str, float] = field(default_factory=dict)
+    attempts: list = field(default_factory=list)
+    response_info: Dict = field(default_factory=dict)
+
+    def __post_init__(self):
+        if not self.status:
+            self.status = "success" if self.success else "unknown"
 
 
 def _next_hour(time_text: str, duration_hours: int = 1) -> str:
@@ -67,49 +79,11 @@ class OrderManager:
         if cache_key in self._field_type_cache:
             return self._field_type_cache[cache_key]
 
-        resolved: Optional[FieldType] = None
-        try:
-            if preset.venue_id:
-                detail = self.api.get_venue_detail(preset.venue_id)
-                field_types = self.api.list_field_types(detail)
-                for item in field_types:
-                    # 优先使用ID匹配，其次名称匹配
-                    if preset.field_type_id and item.id == preset.field_type_id:
-                        resolved = item
-                        break
-                    if (
-                        resolved is None
-                        and preset.field_type_name
-                        and item.name == preset.field_type_name
-                    ):
-                        resolved = item
-        except Exception:
-            resolved = None
-
+        detail = self.api.get_venue_detail(preset.venue_id)
+        resolved = next((item for item in self.api.list_field_types(detail) if item.id == preset.field_type_id), None)
         if resolved is None:
-            fallback_raw: Dict[str, Any] = {}
-            category = preset.field_type_code
-            if category:
-                fallback_raw["code"] = category
-                fallback_raw["bizMotionType"] = category
-                fallback_raw["motionType"] = category
-                fallback_raw["motionId"] = category
-            if preset.field_type_id:
-                fallback_raw.setdefault("fieldTypeId", preset.field_type_id)
-            if preset.field_type_name:
-                fallback_raw.setdefault("fieldTypeName", preset.field_type_name)
-
-            fallback_id = preset.field_type_id or preset.field_type_name
-            if fallback_id:
-                resolved = FieldType(
-                    id=str(fallback_id),
-                    name=preset.field_type_name or str(fallback_id),
-                    category=category,
-                    raw=fallback_raw,
-                )
-
-        if resolved:
-            self._field_type_cache[cache_key] = resolved
+            raise ValueError("场馆未返回该运动项目的预约配置")
+        self._field_type_cache[cache_key] = resolved
         return resolved
 
     def _generate_aes_key(self) -> str:
@@ -134,29 +108,33 @@ class OrderManager:
     
     def _build_order_payload(self, slot: Slot, preset: PresetOption, date: str, actual_start: str, actual_end: str) -> Dict:
         """构建下单请求载荷"""
+        field_type = self._field_type_cache.get(self._field_type_cache_key(preset))
+        tension = (field_type.raw if field_type else {}).get("tension")
+        tension_label = {"0": "正常", "1": "紧张", "2": "很紧张", "3": "非常紧张", "4": "很紧张(签退)"}.get(str(tension))
         return {
             "venTypeId": preset.field_type_id,
             "venueId": preset.venue_id,
             "fieldType": preset.field_type_name,
             "returnUrl": self.return_url,
             "scheduleDate": date,
-            "week": "0",  # 固定值
+            "week": str((datetime.strptime(date, "%Y-%m-%d").weekday() + 1) % 7),
             "spaces": [{
-                "venuePrice": str(int(slot.price or 0)),
+                "venuePrice": format(slot.price or 0, ".12g"),
                 "count": 1,
                 "sign": slot.sign or "",
                 "status": 1,
                 "scheduleTime": f"{actual_start}-{actual_end}",
                 "subSitename": slot.field_name or "",
                 "subSiteId": slot.sub_site_id or "",
-                "tensity": "1",
+                "tensity": slot.raw.get("field_detail_status"),
                 "venueNum": 1
             }],
-            "tenSity": "紧张"  # 固定值
+            "tenSity": tension_label,
         }
     
-    def _send_order_request(self, payload: Dict) -> Tuple[bool, str, Optional[Dict]]:
-        """发送下单请求"""
+    def _send_order_request(self, payload: Dict) -> OrderResult:
+        """Send once and distinguish a rejected request from an uncertain outcome."""
+        started = time.perf_counter()
         try:
             # 生成加密参数
             aes_key = self._generate_aes_key()
@@ -192,10 +170,13 @@ class OrderManager:
                 "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Safari/537.36",
             }
             
-            # 发送请求
-            url = f"{self.api.base_url}{self.api.endpoints.order_confirm}"
-            # 发送加密的载荷作为原始数据
-            # 与单用户版本保持一致：发送原始加密字符串到 body
+        except (ValueError, TypeError, KeyError):
+            return OrderResult(False, "下单参数或加密配置无效，请检查配置", status="not_submitted")
+
+        url = f"{self.api.base_url}{self.api.endpoints.order_confirm}"
+        self.api.timings_ms["encryption"] = round((time.perf_counter() - started) * 1000, 2)
+        started = time.perf_counter()
+        try:
             response = self.api.client.post(
                 url,
                 data=encrypted_body,
@@ -203,63 +184,95 @@ class OrderManager:
                 timeout=self.request_timeout
             )
             
-            # 解析响应
-            try:
-                result = response.json()
-            except Exception as e:
-                return False, f"解析响应失败: {e}", None
-            
-            # 检查HTTP状态码
-            if response.status_code != 200:
-                text_preview = response.text[:400]
-                error_msg = result.get('msg', result.get('message', text_preview if text_preview else f'HTTP {response.status_code}')) if isinstance(result, dict) else text_preview
-                return False, f"HTTP错误 {response.status_code}: {error_msg}", result
-            
-            # 检查业务逻辑错误
-            if isinstance(result, dict):
-                code = result.get('code')
-                msg = result.get('msg', result.get('message', ''))
+        except httpx.HTTPError as exc:
+            return OrderResult(False, "下单连接异常，服务端是否已创建订单尚不确定", status="unknown",
+                               response_info={"transport_error": type(exc).__name__})
+        finally:
+            self.api.timings_ms["confirmation"] = round((time.perf_counter() - started) * 1000, 2)
+        try:
+            result = response.json()
+        except ValueError:
+            result = None
+        info = self._response_info(response.status_code, result, payload)
 
-                # 统一规范化消息
-                if code in (401, "401"):
-                    return False, f"登录超时: {msg}", result
-                if code in (403, "403"):
-                    return False, f"权限不足: {msg}", result
-                if code in (404, "404"):
-                    return False, f"资源不存在: {msg}", result
-                if code in (500, "500"):
-                    return False, f"服务器错误: {msg}", result
-                if code not in (None, 0, "0"):
-                    return False, f"业务错误 {code}: {msg}", result
-                if msg and any(keyword in msg for keyword in ['失败', '错误', '超时', '登录', '权限', '不存在', '已满', '不可用', '非法']):
-                    return False, f"业务错误: {msg}", result
-            
-            # 检查是否有订单ID（成功下单的标识）
-            if not isinstance(result, dict):
-                return False, "下单响应格式异常，未获得有效订单号", None
-            order_id = result.get("orderId") or result.get("order_id") or result.get("id") or result.get("data")
-            if isinstance(order_id, dict):
-                order_id = order_id.get("orderId") or order_id.get("order_id") or order_id.get("id")
-            if not isinstance(order_id, (str, int)) or isinstance(order_id, bool) or not str(order_id).strip():
-                return False, "下单响应未返回有效订单号", result
-            order_id = str(order_id)
-            return True, f"下单成功，订单ID: {order_id}", {**result, "orderId": order_id}
-                
-        except Exception as e:
-            return False, f"请求异常: {e}", None
+        def outcome(success, message, order_id=None, raw_response=None, *, status):
+            return OrderResult(success, message, order_id, raw_response, status=status, response_info=info)
+
+        if response.status_code == 401:
+            return outcome(False, "下单需要重新登录", status="login_required")
+        if response.status_code in (403, 429):
+            return outcome(False, f"下单被拒绝（HTTP {response.status_code}），请稍后核对", status="rejected")
+        if response.status_code != 200:
+            return outcome(False, f"下单响应异常（HTTP {response.status_code}），结果待核对", status="unknown")
+        if not isinstance(result, dict):
+            return outcome(False, "下单响应格式异常，结果待核对", status="unknown")
+        code = result.get("code")
+        msg = info.get("server_message", "")
+        if code in (1002, "1002"):
+            return outcome(False, "预约需要人工验证码，请在官方预约页面完成验证",
+                               raw_response=result, status="challenge_required")
+        if code in (401, "401"):
+            return outcome(False, "下单需要重新登录", raw_response=result, status="login_required")
+        if code in (500, "500"):
+            detail = f"：{msg}" if msg else ""
+            return outcome(False, f"校园服务返回业务码 500{detail}；下单结果待核对",
+                           raw_response=result, status="unknown")
+        if code not in (None, 0, "0"):
+            return outcome(False, f"预约被拒绝（{info.get('business_code')}）：{msg}",
+                           raw_response=result, status="rejected")
+        order_id = result.get("orderId") or result.get("order_id") or result.get("id") or result.get("data")
+        if isinstance(order_id, dict):
+            order_id = order_id.get("orderId") or order_id.get("order_id") or order_id.get("id")
+        if not isinstance(order_id, (str, int)) or isinstance(order_id, bool) or not str(order_id).strip():
+            return outcome(False, "下单响应未返回有效订单号，结果待核对", raw_response=result, status="unknown")
+        order_id = str(order_id)
+        return outcome(True, f"下单成功，订单ID: {order_id}", order_id, result, status="success")
+
+    def _response_info(self, http_status, body, payload):
+        """Retain bounded response evidence without persisting arbitrary server data."""
+        info = {"http_status": http_status, "received_at": datetime.now(timezone.utc).isoformat()}
+        if not isinstance(body, dict):
+            return info
+        code = body.get("code")
+        if type(code) is int or (isinstance(code, str) and re.fullmatch(r"-?\d{1,9}", code)):
+            info["business_code"] = code
+        message = body.get("msg") or body.get("message")
+        if not isinstance(message, str):
+            return info
+        private_values = []
+        account = self.api.auth.user
+        if account:
+            private_values.extend(getattr(account, key, None)
+                                  for key in ("username", "nickname", "password", "cookie", "token"))
+        private_values.extend(self.api.client.cookies.values())
+        private_values.extend(space.get("sign") for space in payload.get("spaces", []) if isinstance(space, dict))
+        private_values.extend(payload.get(key) for key in ("dateId", "sign", "sid", "tim", "tid"))
+        for value in sorted({v for v in private_values if isinstance(v, str) and v}, key=len, reverse=True):
+            message = message.replace(value, "[REDACTED]")
+        message = re.sub(r"(?i)\b(?:cookie|authorization|password|token|sign|dateId|sid|tim|tid)\s*[:=]\s*\S+",
+                         "[REDACTED]", message)
+        message = re.sub(r"[\w.+-]+@[\w.-]+\.[A-Za-z]{2,}|\d{6,}|[A-Za-z0-9_+/=-]{24,}",
+                         "[REDACTED]", message)
+        info["server_message"] = " ".join(message.split())[:500]
+        return info
     
     def place_order(self, slot: Slot, preset: PresetOption, date: str,
                     actual_start: str, actual_end: str) -> OrderResult:
         """Submit exactly once; never switch slots or retry an uncertain result."""
+        if not slot.sign or not slot.sub_site_id or not slot.field_name:
+            return OrderResult(False, "场次缺少有效预约信息，请重新查询", status="not_submitted")
+        if not slot.available or slot.price is None or not math.isfinite(slot.price) or slot.price < 0:
+            return OrderResult(False, "场次不可预约或价格信息无效，请重新查询", status="not_submitted")
         payload = self._build_order_payload(slot, preset, date, actual_start, actual_end)
-        success, message, response = self._send_order_request(payload)
-        if not success:
-            return OrderResult(False, f"{message}；请先查询订单核对结果，再决定是否重新提交", raw_response=response)
-        return OrderResult(True, message, order_id=response["orderId"], raw_response=response)
+        result = self._send_order_request(payload)
+        result.timings_ms = dict(self.api.timings_ms)
+        if result.status == "unknown":
+            result.message += "；请先查询订单核对结果，核对前暂停其他预约"
+        return result
 
     def place_order_by_preset(self, preset_index: int, date: str, 
                              start_time: str = "21:00", 
-                             end_time: str = "22:00") -> OrderResult:
+                             end_time: str = "22:00", *, still_valid=lambda: True) -> OrderResult:
         """
         通过预设序号下单
         
@@ -282,38 +295,16 @@ class OrderManager:
         if not preset:
             return OrderResult(
                 success=False,
-                message=f"未找到序号为 {preset_index} 的预设配置"
+                message=f"未找到序号为 {preset_index} 的预设配置", status="not_submitted"
             )
         
         # 查询可用时间段
         try:
-            field_type_info = self._get_field_type_info(preset)
-            
-            # 获取日期token
-            date_tokens = self.api.list_available_dates(preset.venue_id, preset.field_type_id)
-            date_token = None
-            for date_str_value, token in date_tokens:
-                if date_str_value == date:
-                    date_token = token
-                    break
-            if not date_token and field_type_info and field_type_info.raw:
-                for key in ("dateId", "dateToken"):
-                    raw_value = field_type_info.raw.get(key)
-                    if raw_value:
-                        date_token = str(raw_value)
-                        break
-            
-            slots = self.api.query_slots(
-                venue_id=preset.venue_id,
-                field_type_id=preset.field_type_id,
-                date_str=date,
-                date_token=date_token,
-                original_field_type=field_type_info
-            )
+            slots = self.query_day(preset, date)
         except Exception as e:
             return OrderResult(
                 success=False,
-                message=f"查询时间段失败: {e}"
+                message=f"查询时间段失败: {type(e).__name__}", status="not_submitted"
             )
         
         # 查找匹配的时间段
@@ -359,8 +350,53 @@ class OrderManager:
         if not target_slot:
             return OrderResult(
                 success=False,
-                message=f"未找到可用的时间段 {start_time}-{end_time}"
+                message=f"未找到可用的时间段 {start_time}-{end_time}", status="not_submitted"
             )
         
         # 执行下单
+        if not still_valid():
+            return OrderResult(False, "登录会话已变化，本次未下单，请重新查询", status="not_submitted")
         return self.place_order(target_slot, preset, date, start_time, end_time)
+
+    def query_day(self, preset: PresetOption, date: str):
+        """Keep metadata in the core, but always get fresh date and slot tokens."""
+        field_type = self._get_field_type_info(preset)
+        days = self.api.list_date_availability(preset.venue_id, preset.field_type_id)
+        day = next((entry for entry in days if entry.date == date), None)
+        if day is None or not day.open:
+            return []
+        if not day.token:
+            raise ValueError("日期缺少预约凭据，请刷新日期列表")
+        return self.api.query_slots(preset.venue_id, preset.field_type_id, date,
+                                    date_token=day.token, original_field_type=field_type)
+
+    def place_candidates(self, preset, date, slots, preferences, *, max_attempts, max_price,
+                         continue_on_codes, still_valid):
+        """One query result, ordered candidates, and at most one successful order."""
+        attempted, seen = [], set()
+        result = OrderResult(False, "候选时段内没有符合价格上限的可用场地", status="not_submitted")
+        for preference in preferences:
+            for slot in slots:
+                if (slot.slot_id in seen or not slot.available or slot.price is None or slot.price > max_price
+                        or slot.start != preference["start_time"] or slot.end != preference["end_time"]
+                        or (preference.get("candidate_id") and preference["candidate_id"] != slot.slot_id)):
+                    continue
+                seen.add(slot.slot_id)
+                if not still_valid():
+                    result = OrderResult(False, "查询已过期或登录已变化，已停止候选预约", status="not_submitted")
+                    result.attempts = attempted
+                    return result
+                result = self.place_order(slot, preset, date, slot.start, slot.end)
+                code = (result.raw_response or {}).get("code")
+                attempted.append({"candidate_id": slot.slot_id, "start_time": slot.start, "end_time": slot.end,
+                                  "price": slot.price, "status": result.status, "code": code,
+                                  "response_info": dict(result.response_info),
+                                  "timings_ms": dict(result.timings_ms)})
+                result.attempts = list(attempted)
+                # Never infer safety from timeout, HTTP failure, captcha, authentication,
+                # or an unrecognized business code. Defaults permit no POST retries.
+                if (result.success or result.status != "rejected" or not result.raw_response
+                        or str(code) not in {str(c) for c in continue_on_codes}
+                        or len(attempted) >= max_attempts):
+                    return result
+        return result

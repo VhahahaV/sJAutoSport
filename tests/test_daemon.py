@@ -7,6 +7,7 @@ import subprocess
 import sys
 import tempfile
 import time
+from unittest.mock import AsyncMock, Mock, patch
 
 
 def fixture_daemon():
@@ -128,6 +129,41 @@ def test_separate_cli_calls_login_retry_restart_and_shared_web_head():
                     process.terminate()
                     process.wait(timeout=10)
             log.close()
+
+
+def test_dashboard_query_does_not_block_a_booking_command():
+    from sja_booking.daemon import Daemon
+
+    async def exercise():
+        entered, release = asyncio.Event(), asyncio.Event()
+
+        async def dispatch(operation, payload):
+            if operation == "dashboard.availability":
+                entered.set()
+                await release.wait()
+            return {"success": True}
+
+        with patch("sja_booking.daemon.Operations", return_value=Mock(dispatch=dispatch)), \
+             patch("sja_booking.daemon.service._session_key", return_value="same-session"):
+            daemon = Daemon()
+
+            def connection(operation):
+                reader = asyncio.StreamReader()
+                reader.feed_data(json.dumps({"operation": operation}).encode() + b"\n")
+                reader.feed_eof()
+                writer = Mock(drain=AsyncMock(), wait_closed=AsyncMock())
+                return reader, writer
+
+            query = asyncio.create_task(daemon.handle(*connection("dashboard.availability")))
+            await entered.wait()
+            # No HTTP request is made here; this exercises the actual daemon locks.
+            await asyncio.wait_for(daemon.handle(*connection("orders.create")), timeout=1)
+            assert not query.done()
+            release.set()
+            await query
+            assert not daemon.active
+
+    asyncio.run(exercise())
 
 
 if __name__ == "__main__" and "--fixture" in sys.argv:

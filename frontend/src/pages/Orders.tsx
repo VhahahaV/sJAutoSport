@@ -9,7 +9,7 @@ export default function OrdersPage() {
   const [filter, setFilter] = useState("all");
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState("");
-  const labels: Record<string, string> = { "1": "预订成功", "2": "已取消", "7": "已使用", "8": "支付超时取消" };
+  const labels: Record<string, string> = { "0": "待支付", "1": "预订成功", "2": "已取消", "7": "已使用", "8": "支付超时取消", "9": "待支付" };
   async function load(current = page) {
     setBusy(true); setMessage("");
     try { const data = await api.getOrders(current, 20); setOrders(data.orders); setTotal(data.total); }

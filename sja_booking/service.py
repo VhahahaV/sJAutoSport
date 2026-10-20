@@ -2,9 +2,12 @@
 from __future__ import annotations
 import asyncio
 import dataclasses
+import hashlib
 import json
 import logging
 import re
+import threading
+import time
 import uuid
 import httpx
 from dataclasses import dataclass
@@ -30,6 +33,12 @@ _active_monitors = {}
 _paused_monitors = {}
 _task_handles = {}
 _order_lock = None
+_booking_mutex = threading.RLock()
+_booking_manager = None
+_booking_session = None
+_booking_created = 0
+_slot_snapshots = {}
+_SNAPSHOT_SECONDS = 60
 
 @dataclass
 class ResolvedTarget:
@@ -81,6 +90,9 @@ class SlotAvailability:
 class SlotListResult:
     resolved: ResolvedTarget
     slots: List[SlotAvailability]
+    snapshot_id: Optional[str] = None
+    expires_at: Optional[str] = None
+    timings_ms: Dict[str, float] = dataclasses.field(default_factory=dict)
 
 
 @dataclass
@@ -116,13 +128,13 @@ def _slot_label_to_hour(label: Any) -> Optional[int]:
 
 def _normalise_slot_times(slot: Slot) -> Optional[int]:
     hour = _slot_label_to_hour(slot.start)
-    if hour is not None:
+    if hour is not None and ":" not in str(slot.start):
         slot.start = f"{hour:02d}:00"
 
     end_hour = _slot_label_to_hour(slot.end)
-    if end_hour is not None:
+    if end_hour is not None and ":" not in str(slot.end):
         slot.end = f"{end_hour:02d}:00"
-    elif hour is not None:
+    elif end_hour is None and hour is not None:
         slot.end = f"{(hour + 1) % 24:02d}:00"
     return hour
 
@@ -412,6 +424,22 @@ def _list_slots_sync(
     base_target: Optional[BookingTarget],
     all_dates: bool,
 ) -> SlotListResult:
+    option = _get_preset(preset)
+    if option and date is not None and not venue_id and not field_type_id:
+        parsed = _parse_date_input(date)
+        with _booking_mutex:
+            manager = _get_booking_manager()
+            manager.api.timings_ms.clear()
+            slots = manager.query_day(option, parsed)
+            for slot in slots:
+                _normalise_slot_times(slot)
+            slots = [SlotAvailability(parsed, slot) for slot in slots
+                     if (show_full or slot.available) and (start_hour is None or int(slot.start[:2]) >= start_hour)]
+            target = _clone_target(base_target or CFG.TARGET)
+            target.venue_id, target.field_type_id = option.venue_id, option.field_type_id
+            return SlotListResult(ResolvedTarget(target, option.venue_id, option.venue_name,
+                                                option.field_type_id, option.field_type_name, option),
+                                  slots, timings_ms=dict(manager.api.timings_ms))
     api = _create_api()
     try:
         preset_option = _get_preset(preset)
@@ -476,7 +504,9 @@ async def list_slots(
     base_target: Optional[BookingTarget] = None,
     all_dates: bool = False,
 ) -> SlotListResult:
-    return await asyncio.to_thread(
+    session = _session_key()
+    queried_at = time.monotonic()
+    result = await asyncio.to_thread(
         _list_slots_sync,
         preset=preset,
         venue_id=venue_id,
@@ -487,6 +517,21 @@ async def list_slots(
         base_target=base_target,
         all_dates=all_dates,
     )
+    if session != _session_key():
+        raise RuntimeError("查询期间登录会话发生变化，请重新查询")
+    now = time.monotonic()
+    for key, snapshot in list(_slot_snapshots.items()):
+        if snapshot["expires"] <= now or snapshot["session"] != session:
+            del _slot_snapshots[key]
+    while len(_slot_snapshots) >= 32:
+        del _slot_snapshots[next(iter(_slot_snapshots))]
+    result.snapshot_id = uuid.uuid4().hex
+    remaining = max(0, queried_at + _SNAPSHOT_SECONDS - now)
+    result.expires_at = (datetime.now(timezone.utc) + timedelta(seconds=remaining)).isoformat()
+    _slot_snapshots[result.snapshot_id] = {
+        "session": session, "expires": queried_at + _SNAPSHOT_SECONDS, "result": result,
+    }
+    return result
 
 
 def _order_once_sync(
@@ -496,10 +541,17 @@ def _order_once_sync(
     start_time: str,
     end_time: Optional[str],
     base_target: Optional[BookingTarget],
+    cached_slot=None,
+    expected_session=None,
+    cached_slots=None,
+    cascade=None,
+    deadline=None,
 ) -> OrderResult:
-    api = _create_api()
-    manager = OrderManager(api, CFG.ENCRYPTION_CONFIG)
-    try:
+    with _booking_mutex:
+        if expected_session and expected_session != _session_key():
+            return OrderResult(False, "登录会话已变化，请重新查询场次", status="not_submitted")
+        manager = _get_booking_manager()
+        manager.api.timings_ms.clear()
         parsed_date = _parse_date_input(date)
         start_label = _parse_time_input(start_time)
         if end_time:
@@ -507,15 +559,34 @@ def _order_once_sync(
         else:
             reference_target = base_target or getattr(CFG, "TARGET", BookingTarget())
             end_label = _next_hour(start_label, reference_target.duration_hours if reference_target.duration_hours else 1)
+        def still_valid():
+            return (expected_session == _session_key()
+                    and (deadline is None or time.monotonic() < deadline))
+        if cascade:
+            option = _get_preset(preset)
+            try:
+                manager._get_field_type_info(option)
+                slots = cached_slots if cached_slots is not None else manager.query_day(option, parsed_date)
+            except (httpx.HTTPError, RuntimeError, ValueError):
+                return OrderResult(False, "候选场次查询失败，本次未下单", status="not_submitted",
+                                   timings_ms=dict(manager.api.timings_ms))
+            for slot in slots:
+                _normalise_slot_times(slot)
+            return manager.place_candidates(option, parsed_date, slots, still_valid=still_valid, **cascade)
+        if cached_slot is not None:
+            option = _get_preset(preset)
+            manager._get_field_type_info(option)
+            if not still_valid():
+                return OrderResult(False, "查询已过期或登录已变化，请重新查询场次", status="not_submitted")
+            return manager.place_order(cached_slot, option, parsed_date, start_label, end_label)
         result = manager.place_order_by_preset(
             preset_index=preset,
             date=parsed_date,
             start_time=start_label,
             end_time=end_label,
+            still_valid=still_valid,
         )
         return result
-    finally:
-        api.close()
 
 
 @dataclass
@@ -707,7 +778,26 @@ def current_account():
 
 def _create_api():
     current_account()
-    return SportsAPI(CFG.BASE_URL, CFG.ENDPOINTS, CFG.AUTH, preset_targets=list(_iter_presets()))
+    # Freeze credentials for this request chain; keepalive may replace CFG.AUTH.
+    auth = AuthConfig(user=dataclasses.replace(CFG.AUTH.user) if CFG.AUTH.user else None)
+    return SportsAPI(CFG.BASE_URL, CFG.ENDPOINTS, auth, preset_targets=list(_iter_presets()))
+
+
+def _session_key():
+    record = _auth_manager.load_record() or {}
+    return hashlib.sha256(f'{record.get("username", "")}\0{record.get("cookie", "")}'.encode()).hexdigest()
+
+
+def _get_booking_manager():
+    """Called under _booking_mutex; reuse a connection and metadata for ten minutes."""
+    global _booking_manager, _booking_session, _booking_created
+    session = _session_key()
+    if _booking_manager is None or _booking_session != session or time.monotonic() - _booking_created > 600:
+        if _booking_manager is not None:
+            _booking_manager.api.close()
+        _booking_manager = OrderManager(_create_api(), CFG.ENCRYPTION_CONFIG)
+        _booking_session, _booking_created = session, time.monotonic()
+    return _booking_manager
 
 
 def _resolve_credentials(username, password, *, nickname=None):
@@ -769,27 +859,36 @@ async def fetch_user_info():
 
 
 def clear_account():
+    global _booking_manager
     _auth_manager.clear()
     CFG.AUTH.user = None
+    _slot_snapshots.clear()
+    with _booking_mutex:
+        if _booking_manager is not None:
+            _booking_manager.api.close()
+            _booking_manager = None
     return {"success": True, "message": "已退出登录"}
 
 
-def resolve_order_identifier(result):
-    if result.order_id:
-        return str(result.order_id)
-    raw = result.raw_response or {}
-    for key in ("orderId", "order_id", "pOrderid", "id", "data"):
-        if isinstance(raw.get(key), (str, int)):
-            return str(raw[key])
-    return None
+def _order_account_key(record):
+    return hashlib.sha256(str(record.get("username") or "").strip().lower().encode()).hexdigest()
 
 
-async def order_once(*, preset, date, start_time, end_time=None, base_target=None, cached_slot=None):
+def _attempt_result(attempt):
+    if attempt.get("result"):
+        return OrderResult(**attempt["result"])
+    return OrderResult(False, "之前的预约尚未确认结果，请先核对订单；当前请求不会再次下单",
+                       status="unknown", request_id=attempt["request_id"])
+
+
+async def order_once(*, preset, date, start_time, end_time=None, base_target=None,
+                     request_id=None, snapshot_id=None, candidate_id=None, _cascade=None):
     global _order_lock
     if _order_lock is None:
         _order_lock = asyncio.Lock()
     async with _order_lock:
-        if not current_account():
+        account = current_account()
+        if not account:
             raise PermissionError("请先登录")
         date = _parse_date_input(date)
         start_time = _parse_time_input(start_time)
@@ -799,28 +898,108 @@ async def order_once(*, preset, date, start_time, end_time=None, base_target=Non
             raise ValueError("无效的场馆预设")
         scope = f"{option.venue_id}:{option.field_type_id}"
         db = get_db_manager()
+        account_key = _order_account_key(account)
+        request_id = request_id or str(uuid.uuid4())
+        intent = {"preset": preset, "date": date, "start_time": start_time, "end_time": end_time}
+        if snapshot_id or candidate_id:
+            intent.update(snapshot_id=snapshot_id, candidate_id=candidate_id)
+        if _cascade:
+            intent["cascade"] = _cascade
+        previous = db.get("order_attempt", request_id)
+        if previous:
+            if previous["account_key"] != account_key or previous["intent"] != intent:
+                raise ValueError("request_id 已用于另一个预约，请勿改变同一请求的参数")
+            return _attempt_result(previous)
+        pending = next((item for item in db.all("order_attempt")
+                        if item["account_key"] == account_key and item["status"] in {"submitting", "unknown"}), None)
+        if pending:
+            return _attempt_result(pending)
+        cached_slot = None
+        cached_slots, deadline = None, None
+        session = _session_key()
+        if candidate_id and not snapshot_id:
+            raise ValueError("candidate_id 必须与 snapshot_id 一起使用")
+        if snapshot_id:
+            snapshot = _slot_snapshots.get(snapshot_id)
+            if not snapshot or snapshot["expires"] <= time.monotonic() or snapshot["session"] != session:
+                return OrderResult(False, "场次查询已过期或登录已变化，请刷新余位后重新选择", status="not_submitted",
+                                   request_id=request_id)
+            prepared = snapshot["result"]
+            deadline = snapshot["expires"]
+            if (prepared.resolved.venue_id, prepared.resolved.field_type_id) != (option.venue_id, option.field_type_id):
+                raise ValueError("snapshot_id 与场馆或运动不匹配")
+            if _cascade:
+                cached_slots = [entry.slot for entry in prepared.slots if entry.date == date]
+            else:
+                cached_slot = next((entry.slot for entry in prepared.slots
+                                if entry.date == date and entry.start == start_time and entry.end == end_time
+                                and entry.available and (not candidate_id or entry.slot.slot_id == candidate_id)), None)
+            if cached_slot is None and not _cascade:
+                return OrderResult(False, "该查询中没有匹配的可预约场次，请重新选择", status="not_submitted",
+                                   request_id=request_id)
         existing = await db.get_reservation(scope, date)
         if existing:
-            return OrderResult(False, "该项目当天已有预约，请先查询订单，避免重复下单", existing.get("order_id"))
-        if cached_slot:
-            def place():
-                api = _create_api()
-                try:
-                    return OrderManager(api, CFG.ENCRYPTION_CONFIG).place_order(cached_slot, option, date, start_time, end_time)
-                finally:
-                    api.close()
-            result = await asyncio.to_thread(place)
-        else:
-            result = await asyncio.to_thread(_order_once_sync, preset=preset, date=date, start_time=start_time,
-                                             end_time=end_time, base_target=base_target)
-        order_id = resolve_order_identifier(result)
+            return OrderResult(False, "该项目当天已有预约，请先查询订单，避免重复下单", existing.get("order_id"),
+                               status="not_submitted", request_id=request_id)
+        attempt = {"request_id": request_id, "account_key": account_key, "scope": scope, "intent": intent,
+                   "status": "submitting", "started_at": datetime.now(timezone.utc).isoformat()}
+        # Persist before starting the thread: cancellation or a crash must not allow a second submission.
+        db.put("order_attempt", request_id, attempt)
+        async def execute():
+            try:
+                return await asyncio.to_thread(_order_once_sync, preset=preset, date=date, start_time=start_time,
+                                               end_time=end_time, base_target=base_target, cached_slot=cached_slot,
+                                               expected_session=session, cascade=_cascade,
+                                               cached_slots=cached_slots, deadline=deadline)
+            except Exception as exc:
+                # An internal error may occur after the remote side effect.
+                logger.error("Order execution interrupted (%s)", type(exc).__name__)
+                return OrderResult(False, "预约执行异常，结果待核对，请先查询订单", status="unknown")
+
+        execution = asyncio.create_task(execute())
+        cancelled = False
+        while True:
+            try:
+                result = await asyncio.shield(execution)
+                break
+            except asyncio.CancelledError:
+                # A synchronous HTTP request keeps running after task cancellation.
+                # Keep the lock until its result is durably recorded.
+                cancelled = True
+                if execution.cancelled():
+                    result = OrderResult(False, "预约任务被中断，结果待核对", status="unknown")
+                    break
+        result.request_id = request_id
+        if result.status != "not_submitted" and snapshot_id:
+            _slot_snapshots.pop(snapshot_id, None)
+        order_id = result.order_id
+        if result.attempts:
+            start_time, end_time = result.attempts[-1]["start_time"], result.attempts[-1]["end_time"]
         await db.save_booking_record(order_id or "", preset, option.venue_name, option.field_type_name, date, start_time, end_time,
-                                     "success" if result.success else "failed", result.message)
+                                     result.status, result.message)
         if result.success:
             await db.save_reservation(scope, date, order_id, result.message)
-        emit("order", {"success": result.success, "message": result.message, "order_id": order_id, "date": date,
+        attempt.update(status=result.status, result={key: value for key, value in dataclasses.asdict(result).items()
+                                                    if key != "raw_response"})
+        db.put("order_attempt", request_id, attempt)
+        emit("order", {"success": result.success, "status": result.status, "request_id": request_id,
+                       "message": result.message, "order_id": order_id, "date": date,
                        "start_time": start_time, "end_time": end_time, "venue_name": option.venue_name})
+        if cancelled:
+            raise asyncio.CancelledError
         return result
+
+
+async def order_cascade(*, preset, date, preferences, max_price, max_attempts, request_id,
+                        snapshot_id=None, continue_on_codes=None):
+    preferences = [{**p, "start_time": _parse_time_input(p["start_time"]),
+                    "end_time": _parse_time_input(p["end_time"]) if p.get("end_time") else _next_hour(p["start_time"])}
+                   for p in preferences]
+    cascade = {"preferences": preferences, "max_price": max_price, "max_attempts": max_attempts,
+               "continue_on_codes": continue_on_codes or []}
+    return await order_once(preset=preset, date=date, start_time=preferences[0]["start_time"],
+                            end_time=preferences[0]["end_time"], request_id=request_id, snapshot_id=snapshot_id,
+                            _cascade=cascade)
 
 
 async def cancel_order(order_id):
@@ -834,6 +1013,76 @@ async def cancel_order(order_id):
         api.close()
 
 
+def _matching_order_sync(intent):
+    """Find positive evidence only. No match does not prove that a POST failed."""
+    option = _get_preset(intent["preset"])
+    api = _create_api()
+    preferences = intent.get("cascade", {}).get("preferences") or [intent]
+    try:
+        page, seen = 1, set()
+        while True:
+            payload = api.list_orders(page_no=page, page_size=100)
+            if not isinstance(payload, dict) or payload.get("code") not in (None, 0, "0"):
+                raise RuntimeError("订单核对失败，仍保留待确认状态")
+            rows = payload.get("records")
+            if not isinstance(rows, list) or any(not isinstance(row, dict) for row in rows):
+                raise RuntimeError("订单列表格式异常，仍保留待确认状态")
+            for row in rows:
+                order_id = row.get("pOrderid")
+                if (str(row.get("venueid")) == option.venue_id
+                        and str(row.get("venid")) == option.field_type_id
+                        and str(row.get("scDate") or row.get("scdate") or "")[:10] == intent["date"]
+                        and any(re.search(rf'(?<!\d){re.escape(p["start_time"])}\s*-\s*{re.escape(p["end_time"])}(?!\d)',
+                                          str(row.get("spaceInfo") or "")) for p in preferences)
+                        and str(row.get("orderstateid")) in {"0", "1", "9"}
+                        and isinstance(order_id, (str, int)) and not isinstance(order_id, bool)
+                        and str(order_id)):
+                    return str(order_id)
+            ids = {str(row.get("pOrderid")) for row in rows}
+            if not rows or len(rows) < 100:
+                return None
+            if ids <= seen or page >= 100:
+                raise RuntimeError("订单分页未能完整核对，仍保留待确认状态")
+            seen.update(ids)
+            page += 1
+    finally:
+        api.close()
+
+
+async def reconcile_order(*, request_id, confirm_not_created=False):
+    global _order_lock
+    if _order_lock is None:
+        _order_lock = asyncio.Lock()
+    async with _order_lock:
+        record = current_account()
+        if not record:
+            raise PermissionError("请先登录")
+        db = get_db_manager()
+        attempt = db.get("order_attempt", request_id)
+        if not attempt or attempt["account_key"] != _order_account_key(record):
+            raise ValueError("当前账号不存在该预约请求")
+        if attempt["status"] not in {"submitting", "unknown"}:
+            return _attempt_result(attempt)
+        response_info = (attempt.get("result") or {}).get("response_info", {})
+        order_id = await asyncio.to_thread(_matching_order_sync, attempt["intent"])
+        if order_id:
+            result = OrderResult(True, "已查到目标时段的有效预约，已阻止重复提交", order_id,
+                                 status="success", request_id=request_id, response_info=response_info)
+            await db.save_reservation(attempt["scope"], attempt["intent"]["date"], order_id, result.message)
+        elif confirm_not_created:
+            result = OrderResult(False, "已记录用户确认未创建订单；再次预约请使用新的 request_id",
+                                 status="not_submitted", request_id=request_id, response_info=response_info)
+            attempt["resolved_by_user"] = True
+        else:
+            return OrderResult(False, "暂未查到目标订单，但不能排除仍在处理；保留未知状态并暂停自动预约",
+                               status="unknown", request_id=request_id, response_info=response_info)
+        attempt.update(status=result.status, reconciled_at=datetime.now(timezone.utc).isoformat(),
+                       result={key: value for key, value in dataclasses.asdict(result).items() if key != "raw_response"})
+        db.put("order_attempt", request_id, attempt)
+        emit("order_reconciled", {"request_id": request_id, "status": result.status, "order_id": order_id})
+        return result
+
+
 def get_user_orders(page_no=1, page_size=100):
     api = _create_api()
     try:
@@ -845,7 +1094,8 @@ def get_user_orders(page_no=1, page_size=100):
             order["scDate"] = order.get("scDate") or order.get("scdate") or (order.get("ordercreatement") or "")[:10]
             # The campus flag is inverted: true means cancellation is blocked.
             blocked = str(order.get("cancelOrder", "")).strip().lower() in {"true", "1"}
-            order["can_cancel"] = str(order.get("orderstateid")) == "1" and not blocked
+            state = str(order.get("orderstateid"))
+            order["can_cancel"] = state in {"0", "9"} or (state == "1" and not blocked)
         return {"success": True, "orders": orders, "total": payload.get("total", len(orders)), "page_no": page_no, "page_size": page_size}
     finally:
         api.close()
@@ -953,6 +1203,8 @@ async def _monitor_worker(monitor_id):
             info["last_error"] = str(exc)
             emit("monitor_error", {"monitor_id": monitor_id, "message": str(exc)})
             await get_db_manager().save_monitor(info)
+        if info["status"] != "running":
+            break
         await asyncio.sleep(info["interval_seconds"])
 
 
@@ -966,7 +1218,8 @@ async def _monitor_check(monitor_id):
     info["last_check"] = datetime.now().isoformat()
     info["resolved"] = {"label": result.resolved.label, "venue_name": result.resolved.venue_name,
                         "field_type_name": result.resolved.field_type_name}
-    info["found_slots"] = [dataclasses.asdict(entry) for entry in entries]
+    info["found_slots"] = [dataclasses.asdict(dataclasses.replace(
+        entry, slot=dataclasses.replace(entry.slot, sign=None, raw={}))) for entry in entries]
     signature = [(e.date, e.start, e.slot.slot_id) for e in entries]
     if signature and signature != info.get("last_signature"):
         emit("availability", {"monitor_id": monitor_id, "slots": info["found_slots"]})
@@ -975,13 +1228,21 @@ async def _monitor_check(monitor_id):
         for entry in entries:
             info["booking_attempts"] += 1
             result = await order_once(preset=info["preset"], date=entry.date, start_time=entry.start, end_time=entry.end,
-                                      base_target=info["base_target"], cached_slot=entry.slot)
-            info["last_booking_result"] = {"success": result.success, "message": result.message, "order_id": result.order_id}
+                                      base_target=info["base_target"], snapshot_id=result.snapshot_id,
+                                      candidate_id=entry.slot.slot_id)
+            info["last_booking_result"] = {"success": result.success, "message": result.message,
+                                          "order_id": result.order_id, "status": result.status,
+                                          "request_id": result.request_id}
             if result.success:
                 info["successful_bookings"] += 1
                 if not info["long_running"]:
                     info["status"] = "completed"
                 break
+            if result.status in {"unknown", "login_required", "challenge_required"}:
+                info["last_error"] = result.message
+                await pause_monitor(monitor_id)
+            # A failed confirmation never silently changes the selected slot.
+            break
 
 
 async def pause_monitor(monitor_id):
@@ -1082,12 +1343,18 @@ async def restore_state():
 
 
 async def shutdown():
+    global _booking_manager
     for sid in list(_qr_sessions):
         await cancel_qr_login(sid)
     for name in list(_task_handles):
         await _cancel_worker(name)
     for sid in list(_login_sessions):
         await cancel_login_session(sid)
+    with _booking_mutex:
+        if _booking_manager is not None:
+            _booking_manager.api.close()
+            _booking_manager = None
+    _slot_snapshots.clear()
 
 
 def _save_qr_cookie(cookie, *, session_cookies=None):

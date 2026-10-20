@@ -72,7 +72,9 @@ def fixture_daemon():
                 for order in orders:
                     if order["pOrderid"] == form["orderId"][0]:
                         order.update(orderstateid="2", cancelOrder=True)
-            return httpx.Response(200, json={"code": 0, "msg": "cancelled"})
+            code = {config.ENDPOINTS.refund_create_receipt: 1, config.ENDPOINTS.refund_accept: 2,
+                    config.ENDPOINTS.refund_confirm: 3}[path]
+            return httpx.Response(200, json={"code": code, "msg": "cancelled"})
         raise AssertionError(f"Unexpected campus request: {request.method} {path}")
 
     # Replace the external transport only. Actual protocol, parsing, crypto and core run unchanged.
@@ -172,12 +174,20 @@ def test_every_cli_operation_with_isolated_protocols(tmp_path):
         assert op("dashboard.list") == [card]
         assert len(op("dashboard.availability", {"card_id": card["id"]})["days"]) == 2
         op("dashboard.delete", {"card_id": card["id"]})
-        order = op("orders.create", {"preset": 5, "date": today, "start_time": "19:00", "end_time": "20:00"})
+        order = op("orders.create", {"preset": 5, "date": today, "start_time": "19:00", "end_time": "20:00",
+                                     "request_id": "test-booking"})
         assert order["success"] and order["order_id"] == "test-order-1"
+        assert op("orders.reconcile", {"request_id": "test-booking"})["order_id"] == "test-order-1"
         assert op("orders.list")["orders"][0]["can_cancel"]
         assert op("orders.cancel", {"order_id": order["order_id"]})["success"]
         assert not op("orders.list")["orders"][0]["can_cancel"]
         assert op("history.list")[0]["order_id"] == order["order_id"]
+        snapshot = op("slots.list", {"preset": 5, "date": today})
+        cascaded = op("orders.cascade", {"preset": 5, "date": today, "request_id": "cascade-booking",
+                                       "snapshot_id": snapshot["snapshot_id"], "max_price": 0,
+                                       "preferences": [{"start_time": "18:00"}, {"start_time": "19:00"}]})
+        assert cascaded["success"] and len(cascaded["attempts"]) == 1
+        op("orders.cancel", {"order_id": cascaded["order_id"]})
         op("monitors.create", {"monitor_id": "test-monitor", "preset": 5, "preferred_days": [0], "preferred_hours": [19]})
         for _ in range(20):
             monitors = op("monitors.list")["monitors"]
@@ -218,10 +228,10 @@ def test_every_cli_operation_with_isolated_protocols(tmp_path):
         assert process.returncode == 0
         audit = [json.loads(line) for line in (tmp_path / "http-audit.jsonl").read_text().splitlines()]
         paths = [entry["path"] for entry in audit]
-        assert paths.count("/venue/personal/ConfirmOrder") == 1
-        assert paths.count("/tRefundReceipt/tRefundReceipt/createUserReceipt") == 1
-        assert paths.count("/tRefundReceipt/tRefundReceipt/cannelRefundReceipt") == 1
-        assert paths.count("/tRefundReceipt/tRefundReceipt/cannelDetail") == 1
+        assert paths.count("/venue/personal/ConfirmOrder") == 2
+        assert paths.count("/tRefundReceipt/tRefundReceipt/createUserReceipt") == 2
+        assert paths.count("/tRefundReceipt/tRefundReceipt/cannelRefundReceipt") == 2
+        assert paths.count("/tRefundReceipt/tRefundReceipt/cannelDetail") == 2
     finally:
         if process and process.poll() is None:
             process.terminate()

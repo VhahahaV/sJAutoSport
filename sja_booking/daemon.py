@@ -6,6 +6,7 @@ import logging
 import os
 import signal
 import time
+from contextlib import nullcontext
 from datetime import datetime, timezone
 
 from pydantic import ValidationError
@@ -39,13 +40,23 @@ class Daemon:
         self.stop = asyncio.Event()
         self.lock = asyncio.Lock()
         self.restored = False
+        self.active = set()
 
     async def handle(self, reader, writer):
+        task = asyncio.current_task()
+        self.active.add(task)
         try:
             raw = await asyncio.wait_for(reader.readline(), 10)
             envelope = json.loads(raw)
             operation = envelope["operation"]
-            async with self.lock:
+            queued = time.perf_counter()
+            # These reads own their HTTP clients and cannot submit reservations.
+            # A multi-day dashboard refresh must not hold up a confirmation.
+            concurrent_reads = {"dashboard.availability", "venues.list", "venues.fields", "dates.list",
+                                "orders.list", "account.info", "events.list", "history.list", "keep-alive.status"}
+            session = service._session_key()
+            async with nullcontext() if operation in concurrent_reads else self.lock:
+                queue_ms = round((time.perf_counter() - queued) * 1000, 2)
                 if operation == "daemon.status":
                     result = {"pid": os.getpid(), "data_dir": str(config.DATA_DIR), "restored": self.restored}
                 elif operation == "daemon.stop":
@@ -53,9 +64,12 @@ class Daemon:
                     result = {"stopping": True}
                 else:
                     result = await self.ops.dispatch(operation, envelope.get("payload", {}))
+            if operation in concurrent_reads and session != service._session_key():
+                raise ValueError("查询期间登录会话发生变化，请刷新重试")
             result = public(result)
             success = not (isinstance(result, dict) and result.get("success") is False)
             response = {"ok": success, "result": result}
+            response["timings_ms"] = {"queue": queue_ms, "total": round((time.perf_counter() - queued) * 1000, 2)}
         except PermissionError as exc:
             response = {"ok": False, "error": {"code": "login_required", "message": str(exc)}}
         except ValidationError as exc:
@@ -69,6 +83,7 @@ class Daemon:
             writer.write(json.dumps(response, ensure_ascii=False).encode() + b"\n")
             await writer.drain()
         finally:
+            self.active.discard(task)
             writer.close()
             await writer.wait_closed()
 
@@ -113,6 +128,9 @@ class Daemon:
             # a reservation in an unknown state.
             async with self.lock:
                 pass
+            server.close()
+            await server.wait_closed()
+            await asyncio.gather(*list(self.active), return_exceptions=True)
         finally:
             server.close()
             await server.wait_closed()
